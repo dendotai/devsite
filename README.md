@@ -2,7 +2,7 @@
 
 One project = one stable `https://<name>.internal` URL. No port numbers, no port coordination between projects, HTTPS everywhere — and the same URL works on your phone over Tailscale. Any number of projects run simultaneously.
 
-You know the problem: `localhost:3000` is taken, again. Ports drift between projects and between machines. Vite prints a different port than it did yesterday. Testing on your phone means hunting for your LAN IP, and then HTTPS-only APIs (camera, clipboard, service workers) don't work anyway. devsite replaces all of that with one name per project that never changes.
+Local development runs on ports, and ports do not scale past one project. `localhost:3000` is taken, so the next project runs on 3001 — a number that differs between machines and changes when the dev server picks a new one. Testing on a phone requires finding the machine's LAN IP, and browser APIs that require a secure context (camera, clipboard, service workers) do not work over plain HTTP. devsite gives each project a fixed name instead of a port.
 
 <!-- TODO: demo GIF — ~20 s screen recording: `devsite init` → `bun dev` → https://myapp.internal opens on the desktop → the same URL opens on a phone. -->
 
@@ -100,13 +100,13 @@ Two tiers. The first is complete on its own — stop there and you have a fully 
    bun dev
    ```
 
-   Open `https://myapp.internal`. Green lock, HMR over `wss`, no port in sight.
+   Open `https://myapp.internal`. The certificate is trusted, and HMR runs over `wss`.
 
-Your second, third, nth project needs only steps 2 and 5 plus a re-run of `devsite init` — no coordination with the projects already running. That is the port-less design paying off, not extra setup.
+Each additional project needs only steps 2 and 5 plus a re-run of `devsite init`. Because no project declares a port, projects never coordinate with each other and any number can run at once.
 
 ### Step 2 — your other devices (optional)
 
-This is the fiddliest part of the whole tool — two manual, per-device steps that nothing can automate away. Budget a few more minutes and do them once per device.
+This is the most manual part of the tool: two steps that cannot be automated, each done once per device.
 
 1. **Install [Tailscale](https://tailscale.com)** on this machine and on the device.
 
@@ -128,25 +128,23 @@ This is the fiddliest part of the whole tool — two manual, per-device steps th
 
    Get it onto the phone (AirDrop works) and install it. On iOS, installing is not trusting: install the profile, then Settings → General → About → Certificate Trust Settings → toggle it on.
 
-Now `https://myapp.internal` on the phone is the same app, same URL, live HMR. `devsite init` re-checks this path on every run (Tailscale up, DNS answering on the Tailscale IP) and prints the per-device checklist.
+The same URL now works on the phone, including HMR. `devsite init` re-checks this path on every run (Tailscale up, DNS answering on the Tailscale IP) and prints the per-device checklist.
 
 ## The DNS and certificate story
 
-The two questions everyone asks:
+**How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Resolution is provided locally — via `/etc/hosts` or dnsmasq for this machine (step 1.3), and via Tailscale split DNS pointing at that dnsmasq for other devices (step 2.2).
 
-**How does `*.internal` resolve?** It doesn't — by design. `.internal` is the TLD ICANN reserved for private use, so no public DNS will ever answer for it and no public CA will ever issue a certificate for it. You provide the answers yourself: locally via `/etc/hosts` or dnsmasq (step 1.3), and for other devices via Tailscale split DNS pointing at your dnsmasq (step 2.2).
-
-**Why does the browser trust the certificate?** Caddy generates a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` trusts that CA's root on your machine (`sudo caddy trust`) and pins the CA's storage to one fixed path — so the CA stays identical no matter how Caddy is run, and a device that trusted the root once stays green. Other devices trust the same root file manually (step 2.3).
+**Why does the browser trust the certificate?** Caddy generates a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` trusts that CA's root on your machine (`sudo caddy trust`) and pins the CA's storage to one fixed path, so the CA stays identical no matter how Caddy is run — a device that trusted the root once keeps trusting every certificate it issues. Other devices trust the same root file manually (step 2.3).
 
 ## Why not X
 
-- **[portless](https://github.com/typicode/portless) / devurl** — the same no-more-ports itch, solved with `*.localhost` URLs. Their strength is zero DNS setup (browsers resolve `.localhost` to loopback on their own); the ceiling is that loopback is all you get — no other device can ever reach the URL. devsite pays a heavier one-time setup (Caddy, a local CA, DNS) and buys real TLS plus your phone in return.
-- **Laravel Valet / Herd** — the same "every project gets a pretty HTTPS domain" experience, done very well, for the PHP ecosystem on macOS. devsite is a small, framework-agnostic take on that idea for Vite projects.
-- **A hand-written Caddyfile** — where devsite started. It works, but every project needs a fixed port and every repo edits the shared file by hand. devsite adds the two missing pieces: repos register their own routes (`devsite init` preserves everyone else's), and fixed ports disappear entirely (ephemeral port + admin-API swap at dev time).
+- **[portless](https://github.com/typicode/portless) / devurl** — solve the same problem with `*.localhost` URLs. They need no DNS setup, because browsers resolve `.localhost` to loopback on their own — but loopback also means no other device can reach the URL, and there is no local-CA HTTPS story. devsite requires more one-time setup (Caddy, a local CA, DNS) and in return provides real TLS and access from other devices.
+- **Laravel Valet / Herd** — the same per-project local HTTPS domain experience, built for the PHP ecosystem on macOS. devsite is a framework-agnostic version of the same idea for Vite projects.
+- **A hand-written Caddyfile** — provides the same URLs, but every project needs a fixed port and every repo edits the shared file by hand. devsite adds route self-registration (`devsite init` preserves blocks owned by other repos) and removes fixed ports (ephemeral port plus admin-API swap at dev time).
 
 ## Trust: what devsite touches, and how to undo it
 
-devsite deliberately touches machine-global state, so here is the honest inventory.
+devsite modifies machine-global state. This section lists everything it changes and how to remove it.
 
 What `devsite init` changes (it prints every privileged command as it runs it):
 
@@ -167,7 +165,7 @@ rm -rf ~/Library/Application\ Support/Caddy
 sudo rm /etc/resolver/internal          # plus the dnsmasq config, if you set them up
 ```
 
-One gotcha to know: removing a `devSite` field and re-running `devsite init` does **not** remove that host's block — a host the current repo no longer owns is treated as another repo's and preserved. Delete retired blocks from the Caddyfile by hand.
+Note: removing a `devSite` field and re-running `devsite init` does **not** remove that host's block — a host the current repo no longer owns is treated as another repo's and preserved. Delete retired blocks from the Caddyfile by hand.
 
 ## Requirements
 
