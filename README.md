@@ -10,7 +10,7 @@ With a stock dev server, a project's address is a port number. `localhost:3000` 
 
 ## How it works
 
-A `devSite` field in `package.json` declares a host — and nothing else. There is no port anywhere in your config:
+A `devSite` field in `package.json` declares a host. There is no port field:
 
 ```jsonc
 // package.json
@@ -20,10 +20,10 @@ A `devSite` field in `package.json` declares a host — and nothing else. There 
 }
 ```
 
-Two halves make that host work:
+devsite has two parts:
 
-- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` host in the repo, writes the machine-global Caddyfile (one TLS-enabled block per host, each answering `503` as a placeholder), and (re)starts Caddy as an always-on service. Blocks registered by your other repos are preserved verbatim, so repos never fight over the shared file. This is the only step that asks for `sudo`.
-- **The Vite plugin** — runs every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, and swaps the host's placeholder route for a live `reverse_proxy` through Caddy's admin API on localhost. No sudo, no configured ports — which is why any number of projects can run at once.
+- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` host in the repo, writes the machine-global Caddyfile (one TLS-enabled block per host, each answering `503` as a placeholder), and (re)starts Caddy as an always-on service. Blocks registered by your other repos are preserved verbatim, so several repos can share the one file. This is the only step that asks for `sudo`.
+- **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, and swaps the host's placeholder route for a live `reverse_proxy` through Caddy's admin API on localhost. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
 
 ```mermaid
 flowchart LR
@@ -33,13 +33,13 @@ flowchart LR
     I[devsite init] -. "write Caddyfile (one-time, sudo)" .-> C
 ```
 
-One thing to know: the live route exists only in Caddy's running config. If the Caddy service restarts mid-session, the host reverts to the `503` placeholder until you restart the dev server.
+The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, the host reverts to the `503` placeholder until you restart the dev server.
 
 ## Quick start
 
-Two tiers. The first is complete on its own — stop there and you have a fully working tool on your machine. The second extends the same URL to your other devices.
+Setup has two tiers. The first is complete on its own: after it, the URL works on this machine. The second extends the same URL to your other devices.
 
-> Current shape of the code, stated honestly: `devsite init` discovers projects in a monorepo layout (workspaces under `apps/*` and `packages/*`), and its paths assume Caddy from Homebrew on Apple Silicon macOS (`/opt/homebrew/etc/Caddyfile`, `brew services`). See [Requirements](#requirements).
+> Current limitations: `devsite init` discovers projects in a monorepo layout (workspaces under `apps/*` and `packages/*`), and its paths assume Caddy from Homebrew on Apple Silicon macOS (`/opt/homebrew/etc/Caddyfile`, `brew services`). See [Requirements](#requirements).
 
 ### Step 1 — local only (~5 minutes)
 
@@ -57,13 +57,13 @@ Two tiers. The first is complete on its own — stop there and you have a fully 
 
 3. **Make `.internal` names resolve to your machine.** `devsite init` verifies this but does not yet configure it for you. Two options:
 
-   The quick one — a hosts entry per project:
+   Option A — one hosts entry per project:
 
    ```sh
    echo "127.0.0.1 myapp.internal" | sudo tee -a /etc/hosts
    ```
 
-   Or the wildcard one, so every future `*.internal` host resolves with zero extra steps — dnsmasq plus a resolver stub:
+   Option B — a wildcard, so every current and future `*.internal` host resolves without further changes. dnsmasq plus a resolver stub:
 
    ```sh
    brew install dnsmasq
@@ -130,7 +130,7 @@ This is the most manual part of the tool: two steps that cannot be automated, ea
 
 The same URL now works on the phone, including HMR. `devsite init` re-checks this path on every run (Tailscale up, DNS answering on the Tailscale IP) and prints the per-device checklist.
 
-## The DNS and certificate story
+## DNS and certificates
 
 **How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Resolution is provided locally — via `/etc/hosts` or dnsmasq for this machine (step 1.3), and via Tailscale split DNS pointing at that dnsmasq for other devices (step 2.2).
 
@@ -138,13 +138,13 @@ The same URL now works on the phone, including HMR. `devsite init` re-checks thi
 
 ## Why not X
 
-- **[portless](https://github.com/typicode/portless) / devurl** — solve the same problem with `*.localhost` URLs. They need no DNS setup, because browsers resolve `.localhost` to loopback on their own — but loopback also means no other device can reach the URL, and there is no local-CA HTTPS story. devsite requires more one-time setup (Caddy, a local CA, DNS) and in return provides real TLS and access from other devices.
+- **[portless](https://github.com/typicode/portless) / devurl** — solve the same problem with `*.localhost` URLs. They need no DNS setup, because browsers resolve `.localhost` to loopback on their own — but loopback also means no other device can reach the URL. devsite requires more one-time setup (Caddy, a local CA, DNS); in return the URL carries a trusted certificate and works from other devices.
 - **Laravel Valet / Herd** — the same per-project local HTTPS domain experience, built for the PHP ecosystem on macOS. devsite is a framework-agnostic version of the same idea for Vite projects.
 - **A hand-written Caddyfile** — provides the same URLs, but every project needs a fixed port and every repo edits the shared file by hand. devsite adds route self-registration (`devsite init` preserves blocks owned by other repos) and removes fixed ports (ephemeral port plus admin-API swap at dev time).
 
-## Trust: what devsite touches, and how to undo it
+## What devsite changes on your machine, and how to undo it
 
-devsite modifies machine-global state. This section lists everything it changes and how to remove it.
+devsite modifies machine-global state. This section lists every change and how to remove it.
 
 What `devsite init` changes (it prints every privileged command as it runs it):
 
@@ -155,7 +155,7 @@ What `devsite init` changes (it prints every privileged command as it runs it):
 
 What the Vite plugin changes: nothing on disk. It only edits Caddy's in-memory running config over the localhost admin API.
 
-**Undoing it** — there is no `devsite uninstall` command yet, so the exit is manual:
+**Undoing it** — there is no `devsite uninstall` command yet, so removal is manual:
 
 ```sh
 sudo caddy untrust                      # remove the CA root from the trust store
@@ -172,6 +172,6 @@ Note: removing a `devSite` field and re-running `devsite init` does **not** remo
 - **Bun** — the CLI is TypeScript executed directly by Bun.
 - **Caddy ≥ 2**, installed through Homebrew (`devsite init` manages it with `brew services`).
 - **Vite** — the plugin is developed against Vite 8.
-- **macOS on Apple Silicon**, currently. The Homebrew prefix `/opt/homebrew` and macOS paths are hardcoded today; Linux and Intel-Mac support means making those configurable, and hasn't been done yet. Windows is out of scope.
+- **macOS on Apple Silicon**, currently. The Homebrew prefix `/opt/homebrew` and macOS paths are hardcoded; supporting Linux or Intel Macs requires making them configurable, which has not been done yet. Windows is out of scope.
 - **A monorepo layout**, currently: `devsite init` discovers `devSite` fields in `apps/*/package.json` and `packages/*/package.json`.
 - **Tailscale** — optional, only for the other-devices tier.
