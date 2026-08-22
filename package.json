@@ -1,0 +1,34 @@
+{
+  "name": "@dendotai/devsite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Port-less dev URLs: one stable https://<name>.internal per project, with self-registered Caddy routes and phone access over Tailscale.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dendotai/devsite.git"
+  },
+  "bin": {
+    "devsite": "./src/init.ts"
+  },
+  "exports": {
+    "./vite": {
+      "types": "./src/vite.d.mts",
+      "default": "./src/vite.mjs"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "vite": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.21",
+    "typescript": "^5.9.2",
+    "vite": "^8.0.10"
+  }
+}
