@@ -39,6 +39,13 @@ const repoRoot = process.cwd();
 const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
 const caRootCert = join(storageRoot, "pki", "authorities", "local", "root.crt");
 
+// Only `init` exists; anything else (bare run, --help, a typo) must not reach
+// the privileged bootstrap.
+if (process.argv[2] !== "init") {
+  console.error("Usage: devsite init [--dry-run]");
+  process.exit(1);
+}
+
 const dryRun = process.argv.includes("--dry-run");
 
 type Route = { host: string; project: string };
