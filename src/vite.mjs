@@ -1,0 +1,120 @@
+// devsite Vite plugin — the dev-time half of devsite.
+//
+// `devsite init` (src/init.ts) is the one-time privileged bootstrap: local CA,
+// always-on Caddy service, and a placeholder route per `package.json#devSite`
+// host. This plugin is the per-run half: it picks a free ephemeral port, points
+// Vite at it, and live-updates the host's route through Caddy's admin API on
+// localhost — no sudo, no configured ports, so any number of projects can run
+// simultaneously.
+//
+// Plain .mjs (not .ts): Vite's config loader externalizes bare imports and
+// hands them to the Node runtime, which won't execute TypeScript from
+// node_modules. Types live in vite.d.mts.
+import { readFileSync } from "node:fs";
+import net from "node:net";
+import { join } from "node:path";
+
+const ADMIN = "http://localhost:2019";
+
+// Node's fetch (undici) sends no Origin header and Caddy's admin API then sees
+// an empty origin and 403s; sending it explicitly satisfies the origin check.
+function caddy(path, init = {}) {
+  return fetch(`${ADMIN}${path}`, { ...init, headers: { origin: ADMIN, ...init.headers } });
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+function devsiteRoute(host, port) {
+  return {
+    match: [{ host: [host] }],
+    handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `localhost:${port}` }] }],
+    terminal: true,
+  };
+}
+
+async function registerRoute(host, port) {
+  const res = await caddy("/config/apps/http/servers");
+  if (!res.ok) throw new Error(`Caddy admin API: HTTP ${res.status}`);
+  const servers = (await res.json()) ?? {};
+
+  for (const [name, srv] of Object.entries(servers)) {
+    const i = (srv.routes ?? []).findIndex((r) =>
+      (r.match ?? []).some((m) => (m.host ?? []).includes(host)),
+    );
+    if (i !== -1) {
+      const patch = await caddy(`/config/apps/http/servers/${name}/routes/${i}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(devsiteRoute(host, port)),
+      });
+      if (!patch.ok) throw new Error(`Caddy route update: HTTP ${patch.status}`);
+      return;
+    }
+  }
+
+  // Host not in the running config (devsite init not run for it yet) — append
+  // to the :443 server so this session still works; init makes it permanent.
+  const https = Object.entries(servers).find(([, s]) =>
+    (s.listen ?? []).some((l) => String(l).endsWith(":443")),
+  );
+  if (!https) throw new Error("no :443 server in the Caddy config — run `bun run devsite init`");
+  const post = await caddy(`/config/apps/http/servers/${https[0]}/routes`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(devsiteRoute(host, port)),
+  });
+  if (!post.ok) throw new Error(`Caddy route append: HTTP ${post.status}`);
+}
+
+export function devsite() {
+  let host;
+  let port;
+  return {
+    name: "devsite",
+    apply: "serve",
+    async config(userConfig) {
+      const root = userConfig.root ?? process.cwd();
+      host = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).devSite?.host;
+      if (!host) return;
+      port = await freePort();
+      return {
+        server: {
+          port,
+          strictPort: true,
+          // Listen beyond loopback so the Tailscale-reachable Caddy proxy
+          // (https://<host>) can reach the dev server.
+          host: true,
+          allowedHosts: [host],
+          // Caddy terminates TLS on :443 and proxies to the dev port, so the
+          // HMR client must connect back over wss to the proxy host, not the
+          // raw port. Browse via https://<host> everywhere so HMR works.
+          ws: { host, protocol: "wss", clientPort: 443 },
+        },
+      };
+    },
+    configureServer(server) {
+      if (!host || !port) return;
+      const [h, p] = [host, port];
+      server.httpServer?.once("listening", () => {
+        registerRoute(h, p).then(
+          () => server.config.logger.info(`devsite: https://${h} → localhost:${p}`),
+          (err) =>
+            server.config.logger.warn(
+              `devsite: could not register https://${h} with Caddy (${err instanceof Error ? err.message : err}). ` +
+                "Is the Caddy service running (`bun run devsite init` sets it up)? " +
+                "Falling back to the raw local URL below — HMR only works via the https host.",
+            ),
+        );
+      });
+    },
+  };
+}

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    /* Base options */
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "target": "es2022",
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "moduleDetection": "force",
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    /* Strictness */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+
+    /* Not transpiling with tsc — Bun executes the TypeScript directly */
+    "module": "preserve",
+    "noEmit": true,
+    "lib": ["es2022"],
+    "types": ["bun"]
+  },
+  "include": ["src"]
+}
