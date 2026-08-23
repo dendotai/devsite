@@ -39,7 +39,7 @@ The live route exists only in Caddy's running config. If the Caddy service resta
 
 Setup has two tiers. The first is complete on its own: after it, the URL works on this machine. The second extends the same URL to your other devices.
 
-> Current limitations: `devsite init` discovers projects in a monorepo layout (workspaces under `apps/*` and `packages/*`), and its paths assume Caddy from Homebrew on Apple Silicon macOS (`/opt/homebrew/etc/Caddyfile`, `brew services`). See [Requirements](#requirements).
+> Current limitation: the paths assume Caddy from Homebrew on Apple Silicon macOS (`/opt/homebrew/etc/Caddyfile`, `brew services`). See [Requirements](#requirements).
 
 ### Step 1 — local only (~5 minutes)
 
@@ -173,5 +173,5 @@ Note: removing a `devSite` field and re-running `devsite init` does **not** remo
 - **Caddy ≥ 2**, installed through Homebrew (`devsite init` manages it with `brew services`).
 - **Vite** — the plugin is developed against Vite 8.
 - **macOS on Apple Silicon**, currently. The Homebrew prefix `/opt/homebrew` and macOS paths are hardcoded; supporting Linux or Intel Macs requires making them configurable, which has not been done yet. Windows is out of scope.
-- **A monorepo layout**, currently: `devsite init` discovers `devSite` fields in `apps/*/package.json` and `packages/*/package.json`.
+- **Project layout**: `devsite init` reads `devSite` fields from the repo root `package.json` and, in a monorepo, from `apps/*/package.json` and `packages/*/package.json`. Other workspace folders (e.g. `services/*`) are not scanned yet.
 - **Tailscale** — optional, only for the other-devices tier.

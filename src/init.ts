@@ -16,7 +16,7 @@
  *
  * Owns the privileged Caddy setup so nobody has to assemble it by hand. It:
  *   - generates devsite's region of /opt/homebrew/etc/Caddyfile from every
- *     workspace package.json#devSite,
+ *     package.json#devSite (repo root, apps/*, packages/*),
  *   - pins Caddy's PKI storage to a fixed path so the local CA is identical no matter
  *     which user runs Caddy (a root service vs a foreground process) — the drift that
  *     silently broke phone cert-trust after a restart,
@@ -33,7 +33,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 // Overridable so tests can run against a scratch file instead of the real one.
@@ -70,29 +70,32 @@ type Route = { host: string; project: string };
 
 // Hosts are interpolated into `bash -c` command strings (verify) and into the
 // Caddyfile, so anything but a plain hostname must never get past discovery —
-// a workspace package.json is not trusted input on a run that holds sudo.
+// a project package.json is not trusted input on a run that holds sudo.
 const HOSTNAME_RE =
   /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
 async function discoverRoutes(): Promise<Route[]> {
-  const routes: Route[] = [];
+  const candidates = [join(repoRoot, "package.json")];
   for (const dir of ["apps", "packages"]) {
     const base = join(repoRoot, dir);
     if (!existsSync(base)) continue;
     for (const rel of new Bun.Glob("*/package.json").scanSync(base)) {
-      const pkg = (await Bun.file(join(base, rel)).json()) as {
-        name?: string;
-        devSite?: { host?: string };
-      };
-      const host = pkg.devSite?.host;
-      if (host) {
-        if (!HOSTNAME_RE.test(host)) {
-          throw new Error(
-            `devSite.host ${JSON.stringify(host)} in ${join(base, rel)} is not a plain hostname`,
-          );
-        }
-        routes.push({ host, project: pkg.name ?? rel });
+      candidates.push(join(base, rel));
+    }
+  }
+  const routes: Route[] = [];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    const pkg = (await Bun.file(path).json()) as {
+      name?: string;
+      devSite?: { host?: string };
+    };
+    const host = pkg.devSite?.host;
+    if (host) {
+      if (!HOSTNAME_RE.test(host)) {
+        throw new Error(`devSite.host ${JSON.stringify(host)} in ${path} is not a plain hostname`);
       }
+      routes.push({ host, project: pkg.name ?? relative(repoRoot, path) });
     }
   }
   return routes.sort((a, b) => a.host.localeCompare(b.host));
@@ -363,7 +366,8 @@ async function main() {
   const routes = await discoverRoutes();
   if (routes.length === 0) {
     console.error(
-      `No package.json#devSite routes found under apps/* or packages/* in ${repoRoot}. ` +
+      `No package.json#devSite routes found in ${repoRoot} ` +
+        "(checked package.json, apps/*/package.json, packages/*/package.json). " +
         "Run from the repo root.",
     );
     process.exit(1);

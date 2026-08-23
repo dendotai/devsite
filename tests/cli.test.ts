@@ -75,6 +75,29 @@ test("init --dry-run renders the managed region and touches nothing", () => {
   expect(r.stdout).toContain(">>> devsite v1");
 });
 
+test("a single-package repo: root package.json#devSite is discovered", () => {
+  const repo = mkdtempSync(join(tmpdir(), "devsite-single-"));
+  writeFileSync(
+    join(repo, "package.json"),
+    JSON.stringify({ name: "solo", devSite: { host: "solo.test.internal" } }),
+  );
+  const r = devsite(["init", "--dry-run"], { cwd: repo });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("solo.test.internal {");
+});
+
+test("root and workspace devSite hosts are both discovered", () => {
+  const repo = makeRepo();
+  writeFileSync(
+    join(repo, "package.json"),
+    JSON.stringify({ name: "rootproj", devSite: { host: "root.test.internal" } }),
+  );
+  const r = devsite(["init", "--dry-run"], { cwd: repo });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("root.test.internal {");
+  expect(r.stdout).toContain("web.test.internal {");
+});
+
 test("a host that is not a plain hostname is rejected at discovery", () => {
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo("a.internal; touch pwned") });
   expect(r.status).toBe(1);
