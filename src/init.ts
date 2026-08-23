@@ -68,6 +68,12 @@ const dryRun = process.argv.includes("--dry-run");
 
 type Route = { host: string; project: string };
 
+// Hosts are interpolated into `bash -c` command strings (verify) and into the
+// Caddyfile, so anything but a plain hostname must never get past discovery —
+// a workspace package.json is not trusted input on a run that holds sudo.
+const HOSTNAME_RE =
+  /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+
 async function discoverRoutes(): Promise<Route[]> {
   const routes: Route[] = [];
   for (const dir of ["apps", "packages"]) {
@@ -79,7 +85,14 @@ async function discoverRoutes(): Promise<Route[]> {
         devSite?: { host?: string };
       };
       const host = pkg.devSite?.host;
-      if (host) routes.push({ host, project: pkg.name ?? rel });
+      if (host) {
+        if (!HOSTNAME_RE.test(host)) {
+          throw new Error(
+            `devSite.host ${JSON.stringify(host)} in ${join(base, rel)} is not a plain hostname`,
+          );
+        }
+        routes.push({ host, project: pkg.name ?? rel });
+      }
     }
   }
   return routes.sort((a, b) => a.host.localeCompare(b.host));

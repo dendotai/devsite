@@ -73,6 +73,13 @@ test("init --dry-run renders the managed region and touches nothing", () => {
   expect(r.stdout).toContain(">>> devsite v1");
 });
 
+test("a host that is not a plain hostname is rejected at discovery", () => {
+  const r = devsite(["init", "--dry-run"], { cwd: makeRepo("a.internal; touch pwned") });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("is not a plain hostname");
+  expect(r.stderr).toContain("a.internal; touch pwned");
+});
+
 // --- Caddyfile ownership: content outside the managed region is sacred ---
 
 test("pre-existing non-devsite content is never deleted (Homebrew default shape)", () => {
