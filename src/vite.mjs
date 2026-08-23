@@ -83,7 +83,15 @@ export function devsite() {
     apply: "serve",
     async config(userConfig) {
       const root = userConfig.root ?? process.cwd();
-      host = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).devSite?.host;
+      // A Vite root without a (readable, parseable) package.json simply has no
+      // devSite host — no-op, never crash the dev server over it.
+      let pkg;
+      try {
+        pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+      } catch {
+        return;
+      }
+      host = pkg.devSite?.host;
       if (!host) return;
       port = await freePort();
       return {
