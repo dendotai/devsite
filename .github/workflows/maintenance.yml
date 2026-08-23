@@ -1,0 +1,47 @@
+name: Maintenance
+
+# All lightweight repo-hygiene automation lives in this one workflow — one job
+# per concern, each gated on its own trigger/condition — so hygiene doesn't
+# fragment into a pile of tiny workflow files. To add an automation: add its
+# event under `on:`, and a new job with an `if:` gate for that event.
+#
+# Jobs converge the whole repo to their rule instead of touching only the
+# triggering object — so a missed event self-heals on the next run, and
+# `workflow_dispatch` (the manual "Run workflow" button) can apply everything
+# on demand.
+
+on:
+  issues:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+# Runs are repo-wide and idempotent; serialize them so overlapping closes
+# don't race each other.
+concurrency:
+  group: maintenance
+  cancel-in-progress: false
+
+jobs:
+  # Closed is the terminal state, so no live triage-state label survives it —
+  # otherwise closed issues keep showing up in label-filtered triage views.
+  # `wontfix` is deliberately kept: it records why the issue closed.
+  # Label roles: docs/agents/triage-labels.md.
+  strip-state-labels:
+    if: github.event_name == 'issues' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for label in needs-triage needs-info ready-for-agent ready-for-human tracking; do
+            gh issue list --repo "$REPO" --state closed --label "$label" \
+              --limit 500 --json number --jq '.[].number' |
+              while read -r number; do
+                gh issue edit "$number" --repo "$REPO" --remove-label "$label"
+                echo "removed $label from #$number"
+              done
+          done
