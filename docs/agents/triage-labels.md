@@ -15,4 +15,4 @@ When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the 
 ## Repo-specific labels
 
 - `tracking` — sixth state, applied by `/to-tickets` to a parent spec after it is split into child tickets. Not grabbable by `/next`; closes when all children close.
-- `p0`–`p3` — priority, orthogonal to the state labels. `p0` = critical, `p1` = high, `p2` = normal, `p3` = low. Assigned when a grill or `/triage` settles that an issue stays open. `/next` picks highest priority first, oldest within a priority; an issue with no priority label sorts after `p3`.
+- `p0`–`p3` — priority, orthogonal to the state labels. `p0` = critical (rare), `p1` = high, `p2` = normal (the default; an unlabeled issue sorts as `p2`), `p3` = low. Assigned when a grill or `/triage` settles that an issue stays open. `/next` picks highest priority first, oldest within a priority.
