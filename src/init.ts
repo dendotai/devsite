@@ -303,12 +303,18 @@ function verify(routes: Route[]) {
   // check reachability with -k and verify trust separately via the cert chain.
   // Any HTTP status counts: with no dev server running the placeholder answers
   // 503; the Vite plugin swaps in the real upstream at `bun dev` time.
-  const code = run(
+  // curl prints "000" as the http_code when the connection itself fails, so
+  // success needs both a zero exit status and a real status code.
+  const r = run(
     "bash",
     ["-c", `curl -k -sS -o /dev/null -w '%{http_code}' --max-time 8 https://${host}/`],
     true,
-  ).out;
-  check(Boolean(code), `https://${host} answers over TLS (Caddy up)`, `HTTP ${code || "—"}`);
+  );
+  check(
+    r.status === 0 && r.out !== "000",
+    `https://${host} answers over TLS (Caddy up)`,
+    `HTTP ${r.out || "—"}`,
+  );
 
   const served = servedIntermediateFp(host);
   const pinned = pinnedIntermediateFp();
