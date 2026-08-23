@@ -2,16 +2,17 @@
 //
 // `devsite init` (src/init.ts) is the one-time privileged bootstrap: local CA,
 // always-on Caddy service, and a placeholder route per `package.json#devSite`
-// host. This plugin is the per-run half: it picks a free ephemeral port, points
-// Vite at it, and live-updates the host's route through Caddy's admin API on
-// localhost — no sudo, no configured ports, so any number of projects can run
-// simultaneously.
+// host. This plugin is the per-run half: it has Vite bind an OS-assigned
+// ephemeral port (`port: 0`) and live-updates the host's route through Caddy's
+// admin API on localhost — no sudo, no configured ports, so any number of
+// projects can run simultaneously. The plugin never picks a port itself: the
+// number exists only once the server is bound (ADR 0001), so it is read in the
+// `listening` callback.
 //
 // Plain .mjs (not .ts): Vite's config loader externalizes bare imports and
 // hands them to the Node runtime, which won't execute TypeScript from
 // node_modules. Types live in vite.d.mts.
 import { readFileSync } from "node:fs";
-import net from "node:net";
 import { join } from "node:path";
 
 const ADMIN = "http://localhost:2019";
@@ -20,17 +21,6 @@ const ADMIN = "http://localhost:2019";
 // an empty origin and 403s; sending it explicitly satisfies the origin check.
 function caddy(path, init = {}) {
   return fetch(`${ADMIN}${path}`, { ...init, headers: { origin: ADMIN, ...init.headers } });
-}
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 function devsiteRoute(host, port) {
@@ -80,11 +70,10 @@ async function registerRoute(host, port) {
 
 export function devsite() {
   let host;
-  let port;
   return {
     name: "devsite",
     apply: "serve",
-    async config(userConfig) {
+    config(userConfig) {
       const root = userConfig.root ?? process.cwd();
       // A Vite root without a (readable, parseable) package.json simply has no
       // devSite host — no-op, never crash the dev server over it.
@@ -96,11 +85,11 @@ export function devsite() {
       }
       host = pkg.devSite?.host;
       if (!host) return;
-      port = await freePort();
       return {
         server: {
-          port,
-          strictPort: true,
+          // 0 = the OS assigns the port at bind time; there is no pre-picked
+          // number to race over. The real port is read in `configureServer`.
+          port: 0,
           // Listen beyond loopback so the Tailscale-reachable Caddy proxy
           // (https://<host>) can reach the dev server.
           host: true,
@@ -113,9 +102,12 @@ export function devsite() {
       };
     },
     configureServer(server) {
-      if (!host || !port) return;
-      const [h, p] = [host, port];
+      if (!host) return;
+      const h = host;
       server.httpServer?.once("listening", () => {
+        const addr = server.httpServer?.address();
+        const p = typeof addr === "object" && addr ? addr.port : undefined;
+        if (!p) return;
         registerRoute(h, p).then(
           () => server.config.logger.info(`devsite: https://${h} → localhost:${p}`),
           (err) =>

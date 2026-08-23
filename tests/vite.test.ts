@@ -1,6 +1,7 @@
 // The plugin's config hook, in-process. Contract: no devSite host at the Vite
 // root — including no package.json at all — means "do nothing".
-import { expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,25 +21,25 @@ function makeRoot(pkg?: object) {
   return root;
 }
 
-test("no package.json at the Vite root: no-op instead of an ENOENT crash", async () => {
+test("no package.json at the Vite root: no-op instead of an ENOENT crash", () => {
   const plugin = devsite();
-  await expect(configHook(plugin).call(plugin, { root: makeRoot() }, ENV)).resolves.toBeUndefined();
+  expect(configHook(plugin).call(plugin, { root: makeRoot() }, ENV)).toBeUndefined();
 });
 
-test("unparseable package.json: no-op", async () => {
+test("unparseable package.json: no-op", () => {
   const root = makeRoot();
   writeFileSync(join(root, "package.json"), "not json {");
   const plugin = devsite();
-  await expect(configHook(plugin).call(plugin, { root }, ENV)).resolves.toBeUndefined();
+  expect(configHook(plugin).call(plugin, { root }, ENV)).toBeUndefined();
 });
 
-test("package.json without a devSite host: no-op", async () => {
+test("package.json without a devSite host: no-op", () => {
   const plugin = devsite();
-  const result = await configHook(plugin).call(plugin, { root: makeRoot({ name: "x" }) }, ENV);
+  const result = configHook(plugin).call(plugin, { root: makeRoot({ name: "x" }) }, ENV);
   expect(result).toBeUndefined();
 });
 
-test("devSite.host present: Vite is pointed at a free port for that host", async () => {
+test("devSite.host present: Vite binds an OS-assigned port (port 0) for that host", async () => {
   const plugin = devsite();
   const result = await configHook(plugin).call(
     plugin,
@@ -46,6 +47,53 @@ test("devSite.host present: Vite is pointed at a free port for that host", async
     ENV,
   );
   expect(result?.server?.allowedHosts).toEqual(["web.test.internal"]);
-  expect(result?.server?.port).toBeGreaterThan(0);
-  expect(result?.server?.strictPort).toBe(true);
+  expect(result?.server?.port).toBe(0);
+  expect(result?.server?.strictPort).toBeUndefined();
+});
+
+// Listen-time registration: the port Caddy is told about must be the one the
+// server actually bound, read from httpServer.address() — never a pre-picked
+// number. fetch is stubbed so no real Caddy admin API is touched.
+afterEach(() => {
+  (globalThis.fetch as { mockRestore?: () => void }).mockRestore?.();
+});
+
+test("on listening, the Caddy route gets the server's bound port", async () => {
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    if (init?.method === "PATCH") return new Response("{}", { status: 200 });
+    // GET /config/apps/http/servers — one server already routing our host.
+    return Response.json({
+      srv0: {
+        listen: [":443"],
+        routes: [{ match: [{ host: ["web.test.internal"] }] }],
+      },
+    });
+  });
+
+  const plugin = devsite();
+  await configHook(plugin).call(
+    plugin,
+    { root: makeRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
+    ENV,
+  );
+
+  const httpServer = new EventEmitter() as EventEmitter & { address: () => { port: number } };
+  httpServer.address = () => ({ port: 54321 });
+  const logged: string[] = [];
+  const server = {
+    httpServer,
+    config: { logger: { info: (m: string) => logged.push(m), warn: (m: string) => logged.push(m) } },
+  };
+
+  const hook = plugin.configureServer;
+  if (typeof hook !== "function") throw new Error("configureServer hook is not callable");
+  hook.call(plugin, server as never);
+  httpServer.emit("listening");
+  // registerRoute is async; let its fetches settle.
+  await new Promise((r) => setTimeout(r, 0));
+
+  const patch = fetchSpy.mock.calls.find(([, init]) => init?.method === "PATCH");
+  expect(patch).toBeDefined();
+  expect(String(patch?.[1]?.body)).toContain("localhost:54321");
+  expect(logged.join("\n")).toContain("https://web.test.internal → localhost:54321");
 });
