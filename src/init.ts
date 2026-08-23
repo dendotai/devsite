@@ -25,8 +25,8 @@
  *
  * Run it as yourself (NOT via sudo) — it shells out to sudo only for the privileged
  * steps, so the password prompt lands in your terminal:
- *   bun run devsite init            # apply (prompts for sudo once)
- *   bun run devsite init --dry-run  # print the diff it would apply; touch nothing
+ *   bunx devsite init            # apply (prompts for sudo once)
+ *   bunx devsite init --dry-run  # print the diff it would apply; touch nothing
  *
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
@@ -362,7 +362,10 @@ function printChecklist(routes: Route[]) {
 async function main() {
   const routes = await discoverRoutes();
   if (routes.length === 0) {
-    console.error("No package.json#devSite routes found under apps/* or packages/*.");
+    console.error(
+      `No package.json#devSite routes found under apps/* or packages/* in ${repoRoot}. ` +
+        "Run from the repo root.",
+    );
     process.exit(1);
   }
   const ownHosts = new Set(routes.map((r) => r.host));

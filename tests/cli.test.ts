@@ -63,6 +63,8 @@ test("init passes the guard: no routes in cwd exits 1 with the discovery error",
   const r = devsite(["init"], { cwd: empty });
   expect(r.status).toBe(1);
   expect(r.stderr).toContain("No package.json#devSite routes");
+  // The message must name the searched folder — the wrong-cwd case must explain itself.
+  expect(r.stderr).toContain("devsite-empty-");
 });
 
 test("init --dry-run renders the managed region and touches nothing", () => {

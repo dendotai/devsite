@@ -66,7 +66,10 @@ async function registerRoute(host, port) {
   const https = Object.entries(servers).find(([, s]) =>
     (s.listen ?? []).some((l) => String(l).endsWith(":443")),
   );
-  if (!https) throw new Error("no :443 server in the Caddy config — run `bun run devsite init`");
+  if (!https)
+    throw new Error(
+      "no :443 server in the Caddy config — run `bunx devsite init` from the repo root",
+    );
   const post = await caddy(`/config/apps/http/servers/${https[0]}/routes`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -118,7 +121,7 @@ export function devsite() {
           (err) =>
             server.config.logger.warn(
               `devsite: could not register https://${h} with Caddy (${err instanceof Error ? err.message : err}). ` +
-                "Is the Caddy service running (`bun run devsite init` sets it up)? " +
+                "Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
                 "Falling back to the raw local URL below — HMR only works via the https host.",
             ),
         );
