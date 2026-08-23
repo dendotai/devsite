@@ -150,6 +150,12 @@ test("root sudo'ing (SUDO_USER=root) is still a root shell: refuse", () => {
   expect(r.stderr).toContain("without sudo");
 });
 
+test("an empty DEVSITE_UID export is not uid 0: the run stays a normal-user run", () => {
+  const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), env: { DEVSITE_UID: "" } });
+  expect(r.status).toBe(0);
+  expect(r.stdout).not.toContain("Running under sudo");
+});
+
 test("a non-root run ignores a stray SUDO_USER (nested shells keep it exported)", () => {
   const r = devsite(["init", "--dry-run"], {
     cwd: makeRepo(),

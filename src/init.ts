@@ -66,7 +66,8 @@ if (process.argv[2] !== "init") {
 }
 
 // Overridable so tests can exercise the root paths without actually being root.
-const uid = process.env.DEVSITE_UID !== undefined ? Number(process.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
+// An empty export must not count: Number("") is 0, which would read as root.
+const uid = process.env.DEVSITE_UID ? Number(process.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
 
 // The storage pin must always point at the *human's* home — under `sudo bunx
 // devsite init` the process home is /var/root, and pinning that mints a fresh
