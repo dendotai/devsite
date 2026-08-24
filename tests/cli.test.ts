@@ -1,5 +1,6 @@
-// Regression tests for `devsite init`, spawn-based because init.ts runs on
-// import; in-process coverage arrives with the run() split (#9).
+// Spawn-based end-to-end tests of the bin shim (src/cli.ts): the real process
+// boundary — exit codes, stdout/stderr routing. In-process coverage of
+// parse/dispatch lives in run.test.ts (#9).
 // DEVSITE_CADDYFILE points every run at a scratch file so no test ever reads
 // or races the machine-global Caddyfile.
 import { expect, test } from "bun:test";
@@ -8,7 +9,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
-const INIT = join(import.meta.dir, "..", "src", "init.ts");
+const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
 function devsite(
   args: string[],
@@ -23,7 +24,7 @@ function devsite(
   delete env.DEVSITE_UID;
   delete env.SUDO_USER;
   Object.assign(env, opts.env);
-  const r = spawnSync("bun", [INIT, ...args], { cwd: opts.cwd, encoding: "utf8", env });
+  const r = spawnSync("bun", [CLI, ...args], { cwd: opts.cwd, encoding: "utf8", env });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -43,24 +44,38 @@ function makeCaddyfile(content: string) {
   return p;
 }
 
-// --- subcommand guard: nothing but `init` may reach the privileged bootstrap ---
+// --- dispatch: nothing but `init` may reach the privileged bootstrap ---
 
 test("bare run prints usage and exits 1", () => {
   const r = devsite([]);
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("Usage: devsite init");
+  expect(r.stderr).toContain("Usage: devsite");
 });
 
-test("--help does not reach the bootstrap", () => {
+test("--help prints help to stdout and exits 0", () => {
   const r = devsite(["--help"]);
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("Usage: devsite init");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("Usage: devsite");
+  expect(r.stdout).toContain("init");
+});
+
+test("--version prints the version and exits 0", () => {
+  const r = devsite(["--version"]);
+  expect(r.status).toBe(0);
+  expect(r.stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
 });
 
 test("unknown subcommand prints usage and exits 1", () => {
   const r = devsite(["uninstall"]);
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("Usage: devsite init");
+  expect(r.stderr).toContain("Usage: devsite");
+});
+
+test("unknown flag prints usage and exits 1 — a typo'd --dry-run must not apply", () => {
+  const r = devsite(["init", "--dyr-run"], { cwd: makeRepo() });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("--dyr-run");
+  expect(r.stderr).toContain("Usage: devsite");
 });
 
 test("init passes the guard: no routes in cwd exits 1 with the discovery error", () => {
