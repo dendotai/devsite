@@ -1,10 +1,11 @@
 // In-process tests of the CLI surface: run(argv) → exit code (#9).
 // Spawn-based end-to-end coverage of the bin shim stays in cli.test.ts.
 import { expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../src/run";
+import { makeRepo } from "./helpers";
 
 // Capture console output around a run() call; console and cwd/env are restored
 // even when the assertion throws.
@@ -30,16 +31,6 @@ async function cli(argv: string[], opts: { cwd?: string; caddyfile?: string } = 
     warnSpy.mockRestore();
     errSpy.mockRestore();
   }
-}
-
-function makeRepo(host = "web.test.internal") {
-  const repo = mkdtempSync(join(tmpdir(), "devsite-repo-"));
-  mkdirSync(join(repo, "apps", "web"), { recursive: true });
-  writeFileSync(
-    join(repo, "apps", "web", "package.json"),
-    JSON.stringify({ name: "web", devSite: { host } }),
-  );
-  return repo;
 }
 
 test("--help prints help to stdout and exits 0", async () => {

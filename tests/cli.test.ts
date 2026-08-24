@@ -5,9 +5,10 @@
 // or races the machine-global Caddyfile.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { makeRepo } from "./helpers";
 
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -26,16 +27,6 @@ function devsite(
   Object.assign(env, opts.env);
   const r = spawnSync("bun", [CLI, ...args], { cwd: opts.cwd, encoding: "utf8", env });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
-}
-
-function makeRepo(host = "web.test.internal") {
-  const repo = mkdtempSync(join(tmpdir(), "devsite-repo-"));
-  mkdirSync(join(repo, "apps", "web"), { recursive: true });
-  writeFileSync(
-    join(repo, "apps", "web", "package.json"),
-    JSON.stringify({ name: "web", devSite: { host } }),
-  );
-  return repo;
 }
 
 function makeCaddyfile(content: string) {

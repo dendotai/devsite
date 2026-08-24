@@ -69,7 +69,7 @@ function realUserHome(): string | null {
   // nothing — and "root behind the sudo" is just a root shell with extra steps.
   if (user && user !== "root") {
     // The authoritative home, from Directory Services — not a guessed /Users/<name>.
-    const r = run("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], true);
+    const r = exec("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], true);
     const home = r.out.match(/^NFSHomeDirectory:\s*(.+)$/m)?.[1];
     if (r.status === 0 && home) {
       console.log(`Running under sudo — pinning certificate storage to ${user}'s home: ${home}`);
@@ -222,7 +222,7 @@ function composeCaddyfile(region: string, outside: string): string {
   return rest === "" ? `${region}\n` : `${region}\n\n${rest}\n`;
 }
 
-function run(cmd: string, args: string[], capture = false) {
+function exec(cmd: string, args: string[], capture = false) {
   const r = spawnSync(cmd, args, {
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: "utf8",
@@ -235,7 +235,7 @@ function diffAgainstCurrent(next: string, caddyfilePath: string): string | null 
   const tmp = join(tmpdir(), `Caddyfile.devsite.next.${process.pid}`);
   writeFileSync(tmp, next);
   const current = existsSync(caddyfilePath) ? caddyfilePath : "/dev/null";
-  const r = run(
+  const r = exec(
     "diff",
     ["-u", "-L", `${caddyfilePath} (current)`, "-L", `${caddyfilePath} (new)`, current, tmp],
     true,
@@ -254,7 +254,7 @@ async function confirm(question: string): Promise<boolean> {
 
 function sudo(args: string[]) {
   console.log(`  sudo ${args.join(" ")}`);
-  if (run("sudo", args).status !== 0) {
+  if (exec("sudo", args).status !== 0) {
     throw new Error(`\`sudo ${args.join(" ")}\` failed`);
   }
 }
@@ -273,17 +273,17 @@ function applyPrivileged(content: string, write: boolean, caddyfilePath: string)
     sudo(["cp", tmp, caddyfilePath]);
     sudo(["chmod", "644", caddyfilePath]);
   }
-  run("sudo", ["pkill", "-x", "caddy"]); // kill any non-service foreground Caddy; ok if none
+  exec("sudo", ["pkill", "-x", "caddy"]); // kill any non-service foreground Caddy; ok if none
   sudo(["brew", "services", "restart", "caddy"]);
   // Trust the pinned CA in the Mac keychain. Caddy's own auto-trust needs an
   // interactive prompt it can't get as a background service, so do it explicitly.
   console.log("  sudo caddy trust");
-  run("sudo", ["caddy", "trust"]); // best-effort; ok if already trusted
+  exec("sudo", ["caddy", "trust"]); // best-effort; ok if already trusted
 }
 
 function tailscale(args: string[]): string | null {
   for (const bin of ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"]) {
-    const r = run(bin, args, true);
+    const r = exec(bin, args, true);
     if (r.status === 0) return r.out;
   }
   return null;
@@ -298,7 +298,7 @@ function sha256Fp(opensslOut: string): string | null {
 }
 
 function servedIntermediateFp(host: string): string | null {
-  const r = run(
+  const r = exec(
     "bash",
     [
       "-c",
@@ -313,7 +313,7 @@ function servedIntermediateFp(host: string): string | null {
 function pinnedIntermediateFp(storageRoot: string): string | null {
   const p = join(storageRoot, "pki", "authorities", "local", "intermediate.crt");
   if (!existsSync(p)) return null;
-  const r = run("openssl", ["x509", "-in", p, "-noout", "-fingerprint", "-sha256"], true);
+  const r = exec("openssl", ["x509", "-in", p, "-noout", "-fingerprint", "-sha256"], true);
   return r.status === 0 ? sha256Fp(r.out) : null;
 }
 
@@ -326,7 +326,7 @@ function verify(routes: Route[], pki: Pki) {
   // 503; the Vite plugin swaps in the real upstream at `bun dev` time.
   // curl prints "000" as the http_code when the connection itself fails, so
   // success needs both a zero exit status and a real status code.
-  const r = run(
+  const r = exec(
     "bash",
     ["-c", `curl -k -sS -o /dev/null -w '%{http_code}' --max-time 8 https://${host}/`],
     true,
@@ -348,7 +348,7 @@ function verify(routes: Route[], pki: Pki) {
   const tsIp = tailscale(["ip", "-4"])?.split("\n")[0]?.trim();
   check(Boolean(tsIp), "Tailscale up on this Mac", tsIp ?? "tailscale not reachable");
   if (tsIp) {
-    const answered = run("dig", ["+short", "+time=3", "+tries=1", `@${tsIp}`, host], true).out;
+    const answered = exec("dig", ["+short", "+time=3", "+tries=1", `@${tsIp}`, host], true).out;
     check(
       answered === tsIp,
       "dnsmasq answers on the Tailscale IP (the phone's DNS path)",
