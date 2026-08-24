@@ -23,10 +23,13 @@
  *   - widens the internal leaf lifetime so certs don't lapse overnight,
  *   - runs Caddy as the always-on brew service.
  *
- * Run it as yourself (NOT via sudo) — it shells out to sudo only for the privileged
- * steps, so the password prompt lands in your terminal:
+ * Run it as yourself — it shells out to sudo only for the privileged steps, so
+ * the password prompt lands in your terminal:
  *   bunx devsite init            # apply (prompts for sudo once)
  *   bunx devsite init --dry-run  # print the diff it would apply; touch nothing
+ * A habitual `sudo bunx devsite init` still works: the run resolves the real
+ * user behind sudo (SUDO_USER) and pins storage to *their* home. Only a true
+ * root shell (no SUDO_USER) is refused.
  *
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
@@ -54,8 +57,6 @@ const KEPT_END = "\t# <<< kept <<<";
 
 // Installed under node_modules, so the repo root is where the CLI is invoked.
 const repoRoot = process.cwd();
-const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
-const caRootCert = join(storageRoot, "pki", "authorities", "local", "root.crt");
 
 // Only `init` exists; anything else (bare run, --help, a typo) must not reach
 // the privileged bootstrap.
@@ -63,6 +64,39 @@ if (process.argv[2] !== "init") {
   console.error("Usage: devsite init [--dry-run]");
   process.exit(1);
 }
+
+// Overridable so tests can exercise the root paths without actually being root.
+// An empty export must not count: Number("") is 0, which would read as root.
+const uid = process.env.DEVSITE_UID ? Number(process.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
+
+// The storage pin must always point at the *human's* home — under `sudo bunx
+// devsite init` the process home is /var/root, and pinning that mints a fresh
+// CA no device trusts. Resolve the real user behind sudo, or refuse when there
+// is no way back to one (a true root shell).
+function realUserHome(): string {
+  if (uid !== 0) return homedir();
+  const user = process.env.SUDO_USER;
+  // `sudo` records the invoking user; a root shell (`su`, root login) records
+  // nothing — and "root behind the sudo" is just a root shell with extra steps.
+  if (user && user !== "root") {
+    // The authoritative home, from Directory Services — not a guessed /Users/<name>.
+    const r = run("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], true);
+    const home = r.out.match(/^NFSHomeDirectory:\s*(.+)$/m)?.[1];
+    if (r.status === 0 && home) {
+      console.log(`Running under sudo — pinning certificate storage to ${user}'s home: ${home}`);
+      return home;
+    }
+  }
+  console.error(
+    "devsite init is running as root and cannot find your real user account.\n" +
+      "Run it as yourself, without sudo — it calls sudo itself for the privileged steps:\n" +
+      "  bunx devsite init",
+  );
+  process.exit(1);
+}
+
+const storageRoot = join(realUserHome(), "Library", "Application Support", "Caddy");
+const caRootCert = join(storageRoot, "pki", "authorities", "local", "root.crt");
 
 const dryRun = process.argv.includes("--dry-run");
 

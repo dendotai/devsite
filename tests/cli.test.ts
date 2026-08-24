@@ -5,20 +5,25 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
 const INIT = join(import.meta.dir, "..", "src", "init.ts");
 
-function devsite(args: string[], opts: { cwd?: string; caddyfile?: string } = {}) {
-  const r = spawnSync("bun", [INIT, ...args], {
-    cwd: opts.cwd,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      DEVSITE_CADDYFILE: opts.caddyfile ?? join(mkdtempSync(join(tmpdir(), "devsite-none-")), "Caddyfile"),
-    },
-  });
+function devsite(
+  args: string[],
+  opts: { cwd?: string; caddyfile?: string; env?: Record<string, string> } = {},
+) {
+  // Strip the identity variables from the inherited env so a test controls them
+  // fully via opts.env — an ambient SUDO_USER must never leak into a run.
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    DEVSITE_CADDYFILE: opts.caddyfile ?? join(mkdtempSync(join(tmpdir(), "devsite-none-")), "Caddyfile"),
+  };
+  delete env.DEVSITE_UID;
+  delete env.SUDO_USER;
+  Object.assign(env, opts.env);
+  const r = spawnSync("bun", [INIT, ...args], { cwd: opts.cwd, encoding: "utf8", env });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -103,6 +108,62 @@ test("a host that is not a plain hostname is rejected at discovery", () => {
   expect(r.status).toBe(1);
   expect(r.stderr).toContain("is not a plain hostname");
   expect(r.stderr).toContain("a.internal; touch pwned");
+});
+
+// --- running as root: resolve the real user behind sudo, or refuse (#12) ---
+// DEVSITE_UID pretends the uid so these run without actually being root.
+
+test("root with no SUDO_USER refuses: a true root shell cannot pin a wrong CA path", () => {
+  const r = devsite(["init"], { cwd: makeRepo(), env: { DEVSITE_UID: "0" } });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("without sudo");
+});
+
+test("under sudo the pinned storage is the real user's home, not root's", () => {
+  const r = devsite(["init", "--dry-run"], {
+    cwd: makeRepo(),
+    env: { DEVSITE_UID: "0", SUDO_USER: userInfo().username },
+  });
+  expect(r.status).toBe(0);
+  // The rendered region pins the storage; it must show the human's home.
+  expect(r.stdout).toContain(`root "${join(homedir(), "Library", "Application Support", "Caddy")}"`);
+  // The substitution announces itself.
+  expect(r.stdout).toContain(userInfo().username);
+  expect(r.stdout.toLowerCase()).toContain("sudo");
+});
+
+test("root with an unresolvable SUDO_USER refuses instead of guessing", () => {
+  const r = devsite(["init"], {
+    cwd: makeRepo(),
+    env: { DEVSITE_UID: "0", SUDO_USER: "devsite-no-such-user" },
+  });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("without sudo");
+});
+
+test("root sudo'ing (SUDO_USER=root) is still a root shell: refuse", () => {
+  const r = devsite(["init"], {
+    cwd: makeRepo(),
+    env: { DEVSITE_UID: "0", SUDO_USER: "root" },
+  });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("without sudo");
+});
+
+test("an empty DEVSITE_UID export is not uid 0: the run stays a normal-user run", () => {
+  const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), env: { DEVSITE_UID: "" } });
+  expect(r.status).toBe(0);
+  expect(r.stdout).not.toContain("Running under sudo");
+});
+
+test("a non-root run ignores a stray SUDO_USER (nested shells keep it exported)", () => {
+  const r = devsite(["init", "--dry-run"], {
+    cwd: makeRepo(),
+    env: { SUDO_USER: "devsite-no-such-user" },
+  });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`root "${join(homedir(), "Library", "Application Support", "Caddy")}"`);
+  expect(r.stdout).not.toContain("Running under sudo");
 });
 
 // --- Caddyfile ownership: content outside the managed region is sacred ---
