@@ -12,7 +12,7 @@ Issues live in this repo's GitHub Issues (via the `gh` CLI). See `docs/agents/is
 
 ### Triage labels
 
-Default five-role vocabulary, plus `tracking` and priority labels `p0`–`p3`. See `docs/agents/triage-labels.md`.
+Default five-role vocabulary, plus `tracking`, `in-progress`, and priority labels `p0`–`p3`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
