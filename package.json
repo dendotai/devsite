@@ -9,7 +9,7 @@
     "url": "git+https://github.com/dendotai/devsite.git"
   },
   "bin": {
-    "devsite": "./src/init.ts"
+    "devsite": "./src/cli.ts"
   },
   "exports": {
     "./vite": {

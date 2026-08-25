@@ -1,6 +1,6 @@
 // devsite Vite plugin — the dev-time half of devsite.
 //
-// `devsite init` (src/init.ts) is the one-time privileged bootstrap: local CA,
+// `devsite init` (src/commands/init.ts) is the one-time privileged bootstrap: local CA,
 // always-on Caddy service, and a placeholder route per `package.json#devSite`
 // host. This plugin is the per-run half: it has Vite bind an OS-assigned
 // ephemeral port (`port: 0`) and live-updates the host's route through Caddy's
