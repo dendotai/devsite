@@ -13,3 +13,14 @@ export function makeRepo(host = "web.test.internal") {
   );
   return repo;
 }
+
+// A throwaway directory with no devSite route anywhere.
+export function makeEmptyRepo() {
+  return mkdtempSync(join(tmpdir(), "devsite-empty-"));
+}
+
+// A path to a Caddyfile that does not exist, in its own scratch dir — dry
+// runs only ever read it, so one can serve a whole suite.
+export function scratchCaddyfile() {
+  return join(mkdtempSync(join(tmpdir(), "devsite-none-")), "Caddyfile");
+}

@@ -8,9 +8,12 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { makeRepo } from "./helpers";
+import { makeEmptyRepo, makeRepo, scratchCaddyfile } from "./helpers";
 
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");
+
+// One scratch Caddyfile path for the whole suite — nothing ever writes it.
+const SCRATCH = scratchCaddyfile();
 
 function devsite(
   args: string[],
@@ -20,7 +23,7 @@ function devsite(
   // fully via opts.env — an ambient SUDO_USER must never leak into a run.
   const env: Record<string, string | undefined> = {
     ...process.env,
-    DEVSITE_CADDYFILE: opts.caddyfile ?? join(mkdtempSync(join(tmpdir(), "devsite-none-")), "Caddyfile"),
+    DEVSITE_CADDYFILE: opts.caddyfile ?? SCRATCH,
   };
   delete env.DEVSITE_UID;
   delete env.SUDO_USER;
@@ -70,8 +73,7 @@ test("unknown flag prints usage and exits 1 — a typo'd --dry-run must not appl
 });
 
 test("init passes the guard: no routes in cwd exits 1 with the discovery error", () => {
-  const empty = mkdtempSync(join(tmpdir(), "devsite-empty-"));
-  const r = devsite(["init"], { cwd: empty });
+  const r = devsite(["init"], { cwd: makeEmptyRepo() });
   expect(r.status).toBe(1);
   expect(r.stderr).toContain("No package.json#devSite routes");
   // The message must name the searched folder — the wrong-cwd case must explain itself.

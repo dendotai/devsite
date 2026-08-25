@@ -227,10 +227,13 @@ function exec(cmd: string, args: string[], capture = false) {
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: "utf8",
   });
-  return { status: r.status ?? 1, out: (r.stdout ?? "").trim() };
+  return { status: r.status ?? 1, out: (r.stdout ?? "").trim(), error: r.error };
 }
 
-// null = the file already has exactly this content.
+// null = the file already has exactly this content. diff's contract: exit 0
+// identical, exit 1 different — a failed spawn or any other exit is trouble,
+// and must never read as "there is a change" and walk toward a privileged
+// write over a diff nobody saw.
 function diffAgainstCurrent(next: string, caddyfilePath: string): string | null {
   const tmp = join(tmpdir(), `Caddyfile.devsite.next.${process.pid}`);
   writeFileSync(tmp, next);
@@ -240,6 +243,11 @@ function diffAgainstCurrent(next: string, caddyfilePath: string): string | null 
     ["-u", "-L", `${caddyfilePath} (current)`, "-L", `${caddyfilePath} (new)`, current, tmp],
     true,
   );
+  if (r.error || r.status > 1) {
+    throw new Error(
+      `could not diff against ${caddyfilePath}: ${r.error?.message ?? `diff exited ${r.status}`}`,
+    );
+  }
   return r.status === 0 ? null : r.out;
 }
 
@@ -383,12 +391,19 @@ function printChecklist(routes: Route[], pki: Pki) {
 // No argv knowledge here — run.ts parses flags and passes options. Fatal
 // conditions return 1 (after explaining themselves); unexpected errors throw
 // and run.ts turns them into an exit code.
-export async function init({ dryRun }: { dryRun: boolean }): Promise<number> {
-  // Overridable so tests can run against a scratch file instead of the real one.
-  const caddyfilePath = process.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile";
+export async function init({
+  dryRun,
+  // Explicit seams for in-process tests; the defaults are what production uses.
   // Installed under node_modules, so the repo root is where the CLI is invoked.
-  const repoRoot = process.cwd();
-
+  cwd = process.cwd(),
+  // DEVSITE_CADDYFILE lets the spawn-based tests point a whole child process
+  // at a scratch file.
+  caddyfilePath = process.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile",
+}: {
+  dryRun: boolean;
+  cwd?: string;
+  caddyfilePath?: string;
+}): Promise<number> {
   const home = realUserHome();
   if (home === null) return 1;
   const storageRoot = join(home, "Library", "Application Support", "Caddy");
@@ -397,10 +412,10 @@ export async function init({ dryRun }: { dryRun: boolean }): Promise<number> {
     caRootCert: join(storageRoot, "pki", "authorities", "local", "root.crt"),
   };
 
-  const routes = await discoverRoutes(repoRoot);
+  const routes = await discoverRoutes(cwd);
   if (routes.length === 0) {
     console.error(
-      `No package.json#devSite routes found in ${repoRoot} ` +
+      `No package.json#devSite routes found in ${cwd} ` +
         "(checked package.json, apps/*/package.json, packages/*/package.json). " +
         "Run from the repo root.",
     );
