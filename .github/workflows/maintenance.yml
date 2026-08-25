@@ -37,7 +37,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          for label in needs-triage needs-info ready-for-agent ready-for-human tracking; do
+          for label in needs-triage needs-info ready-for-agent ready-for-human tracking in-progress; do
             gh issue list --repo "$REPO" --state closed --label "$label" \
               --limit 500 --json number --jq '.[].number' |
               while read -r number; do
