@@ -5,7 +5,12 @@ name: Publish
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]*"] # version tags only — a v2-experiment tag must not trigger
+
+# Publishes must not interleave; serialize, and never cancel one mid-publish.
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 permissions:
   contents: read

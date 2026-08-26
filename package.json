@@ -12,6 +12,7 @@
   "homepage": "https://github.com/dendotai/devsite#readme",
   "bugs": "https://github.com/dendotai/devsite/issues",
   "keywords": [
+    "bun",
     "vite",
     "vite-plugin",
     "caddy",
@@ -25,6 +26,9 @@
   },
   "bin": {
     "devsite": "./src/cli.ts"
+  },
+  "engines": {
+    "bun": ">=1.2"
   },
   "exports": {
     "./vite": {
