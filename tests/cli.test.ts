@@ -5,7 +5,7 @@
 // or races the machine-global Caddyfile.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { makeEmptyRepo, makeRepo, scratchCaddyfile } from "./helpers";
@@ -116,6 +116,33 @@ test("a host that is not a plain hostname is rejected at discovery", () => {
   expect(r.status).toBe(1);
   expect(r.stderr).toContain("is not a plain hostname");
   expect(r.stderr).toContain("a.internal; touch pwned");
+});
+
+test("two packages declaring the same devSite host are rejected at discovery", () => {
+  const repo = makeRepo(); // apps/web → web.test.internal
+  mkdirSync(join(repo, "apps", "api"), { recursive: true });
+  writeFileSync(
+    join(repo, "apps", "api", "package.json"),
+    JSON.stringify({ name: "api", devSite: { host: "web.test.internal" } }),
+  );
+  const r = devsite(["init", "--dry-run"], { cwd: repo });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("web.test.internal");
+  // The message must name both claimants so the fix is findable.
+  expect(r.stderr).toContain("api");
+  expect(r.stderr).toContain("web");
+});
+
+test("hosts differing only in case are still duplicates (DNS is case-insensitive)", () => {
+  const repo = makeRepo();
+  mkdirSync(join(repo, "apps", "api"), { recursive: true });
+  writeFileSync(
+    join(repo, "apps", "api", "package.json"),
+    JSON.stringify({ name: "api", devSite: { host: "WEB.test.internal" } }),
+  );
+  const r = devsite(["init", "--dry-run"], { cwd: repo });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("web.test.internal");
 });
 
 // --- running as root: resolve the real user behind sudo, or refuse (#12) ---
