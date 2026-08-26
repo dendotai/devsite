@@ -1,4 +1,6 @@
 # Publishes @den-ai/devsite to npm when a version tag (vX.Y.Z) is pushed.
+# Auth is trusted publishing (OIDC): npmjs.com trusts this exact workflow file
+# in this repo, so no token or secret exists anywhere. Provenance is automatic.
 # The full CI gate runs again here: a tag can point at any commit, so the
 # publish must not trust that CI already judged it.
 name: Publish
@@ -14,7 +16,7 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write # npm provenance attestation (OIDC)
+  id-token: write # OIDC token for npm trusted publishing
 
 jobs:
   publish:
@@ -34,11 +36,10 @@ jobs:
             echo "Tag v$tag_version does not match package.json version $pkg_version"
             exit 1
           fi
-      # npm (not bun) publishes: provenance needs npm >= 9.5, which node 22 ships.
+      # npm (not bun) publishes: trusted publishing needs npm >= 11.5.1, which
+      # node 24 ships. bun cannot publish via OIDC or emit provenance.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish
