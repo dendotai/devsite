@@ -127,20 +127,26 @@ test("root with no SUDO_USER refuses: a true root shell cannot pin a wrong CA pa
   expect(r.stderr).toContain("without sudo");
 });
 
-test("under sudo the pinned storage is the real user's home, not root's", () => {
-  const r = devsite(["init", "--dry-run"], {
-    cwd: makeRepo(),
-    env: { DEVSITE_UID: "0", SUDO_USER: userInfo().username },
-  });
-  expect(r.status).toBe(0);
-  // The rendered region pins the storage; it must show the human's home.
-  expect(r.stdout).toContain(
-    `root "${join(homedir(), "Library", "Application Support", "Caddy")}"`,
-  );
-  // The substitution announces itself.
-  expect(r.stdout).toContain(userInfo().username);
-  expect(r.stdout.toLowerCase()).toContain("sudo");
-});
+// darwin-only: the happy path resolves SUDO_USER's home through dscl (macOS
+// Directory Services), which Linux CI runners don't have — there the run
+// correctly refuses, which is the adjacent tests' territory.
+test.skipIf(process.platform !== "darwin")(
+  "under sudo the pinned storage is the real user's home, not root's",
+  () => {
+    const r = devsite(["init", "--dry-run"], {
+      cwd: makeRepo(),
+      env: { DEVSITE_UID: "0", SUDO_USER: userInfo().username },
+    });
+    expect(r.status).toBe(0);
+    // The rendered region pins the storage; it must show the human's home.
+    expect(r.stdout).toContain(
+      `root "${join(homedir(), "Library", "Application Support", "Caddy")}"`,
+    );
+    // The substitution announces itself.
+    expect(r.stdout).toContain(userInfo().username);
+    expect(r.stdout.toLowerCase()).toContain("sudo");
+  },
+);
 
 test("root with an unresolvable SUDO_USER refuses instead of guessing", () => {
   const r = devsite(["init"], {
