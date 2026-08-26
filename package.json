@@ -1,15 +1,34 @@
 {
-  "name": "@dendotai/devsite",
+  "name": "@den-ai/devsite",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
   "description": "Port-less dev URLs: one stable https://<name>.internal per project, with self-registered Caddy routes and phone access over Tailscale.",
+  "license": "MIT",
+  "author": "Den Kasyanov",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dendotai/devsite.git"
   },
+  "homepage": "https://github.com/dendotai/devsite#readme",
+  "bugs": "https://github.com/dendotai/devsite/issues",
+  "keywords": [
+    "bun",
+    "vite",
+    "vite-plugin",
+    "caddy",
+    "https",
+    "dev-server",
+    "local-development",
+    "tailscale"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "devsite": "./src/cli.ts"
+  },
+  "engines": {
+    "bun": ">=1.2"
   },
   "exports": {
     "./vite": {
