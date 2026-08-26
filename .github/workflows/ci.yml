@@ -28,9 +28,12 @@ jobs:
       - run: bun test
 
   # Commit prefixes decide published versions (semantic-release), so every PR
-  # commit must parse as a conventional commit.
+  # commit must parse as a conventional commit. Only where commits are born
+  # (PRs into dev): a dev->main promotion re-plays history that was already
+  # linted on its way into dev, plus pre-convention commits that can never
+  # be fixed.
   commitlint:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.base_ref != 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
