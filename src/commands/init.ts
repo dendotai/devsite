@@ -106,6 +106,10 @@ async function discoverRoutes(repoRoot: string): Promise<Route[]> {
     }
   }
   const routes: Route[] = [];
+  // Keyed lowercase: DNS is case-insensitive, and Caddy refuses a config with
+  // two site blocks for one address — that refusal would land only after the
+  // privileged write, as a dead always-on service.
+  const claimed = new Map<string, string>();
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     const pkg = (await Bun.file(path).json()) as {
@@ -117,7 +121,15 @@ async function discoverRoutes(repoRoot: string): Promise<Route[]> {
       if (!HOSTNAME_RE.test(host)) {
         throw new Error(`devSite.host ${JSON.stringify(host)} in ${path} is not a plain hostname`);
       }
-      routes.push({ host, project: pkg.name ?? relative(repoRoot, path) });
+      const project = pkg.name ?? relative(repoRoot, path);
+      const owner = claimed.get(host.toLowerCase());
+      if (owner !== undefined) {
+        throw new Error(
+          `devSite.host ${JSON.stringify(host.toLowerCase())} is declared by both ${owner} and ${project} — every project needs its own host`,
+        );
+      }
+      claimed.set(host.toLowerCase(), project);
+      routes.push({ host, project });
     }
   }
   return routes.sort((a, b) => a.host.localeCompare(b.host));
