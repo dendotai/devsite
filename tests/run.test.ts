@@ -7,39 +7,7 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { init } from "../src/commands/init";
-import type { CliContext } from "../src/context";
-import { run } from "../src/run";
-import { fakeStdin, makeEmptyRepo, makeRepo, scratchCaddyfile, sink } from "./helpers";
-
-// One scratch Caddyfile path for the whole suite — nothing ever writes it.
-const SCRATCH = scratchCaddyfile();
-// Default cwd for invocations that never look at it.
-const NOWHERE = makeEmptyRepo();
-
-type IoOpts = {
-  cwd?: string;
-  caddyfile?: string;
-  stdin?: CliContext["stdin"];
-};
-
-function makeIo(opts: IoOpts = {}) {
-  const stdout = sink();
-  const stderr = sink();
-  const ctx: CliContext = {
-    stdout,
-    stderr,
-    stdin: opts.stdin ?? fakeStdin("", false),
-    cwd: opts.cwd ?? NOWHERE,
-    env: { DEVSITE_CADDYFILE: opts.caddyfile ?? SCRATCH },
-  };
-  return { ctx, stdout, stderr };
-}
-
-async function cli(argv: string[], opts: IoOpts = {}) {
-  const { ctx, stdout, stderr } = makeIo(opts);
-  const status = await run(argv, ctx);
-  return { status, stdout: stdout.text(), stderr: stderr.text() };
-}
+import { cli, fakeStdin, makeEmptyRepo, makeIo, makeRepo, scratchCaddyfile } from "./helpers";
 
 test("--help prints help to stdout and exits 0", async () => {
   const r = await cli(["--help"]);
