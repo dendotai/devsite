@@ -10,26 +10,25 @@ const ENV = { command: "serve", mode: "development" } as const;
 
 test("no package.json at the Vite root: no-op instead of an ENOENT crash", () => {
   const plugin = devsite();
-  expect(viteConfigHook(plugin).call(plugin, { root: makeViteRoot() }, ENV)).toBeUndefined();
+  expect(viteConfigHook(plugin)({ root: makeViteRoot() }, ENV)).toBeUndefined();
 });
 
 test("unparseable package.json: no-op", () => {
   const root = makeViteRoot();
   writeFileSync(join(root, "package.json"), "not json {");
   const plugin = devsite();
-  expect(viteConfigHook(plugin).call(plugin, { root }, ENV)).toBeUndefined();
+  expect(viteConfigHook(plugin)({ root }, ENV)).toBeUndefined();
 });
 
 test("package.json without a devSite host: no-op", () => {
   const plugin = devsite();
-  const result = viteConfigHook(plugin).call(plugin, { root: makeViteRoot({ name: "x" }) }, ENV);
+  const result = viteConfigHook(plugin)({ root: makeViteRoot({ name: "x" }) }, ENV);
   expect(result).toBeUndefined();
 });
 
 test("devSite.host present: Vite binds an OS-assigned port (port 0) for that host", async () => {
   const plugin = devsite();
-  const result = await viteConfigHook(plugin).call(
-    plugin,
+  const result = await viteConfigHook(plugin)(
     { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
     ENV,
   );
@@ -46,7 +45,10 @@ afterEach(() => {
 });
 
 test("on listening, the Caddy route gets the server's bound port", async () => {
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+    _url: unknown,
+    init?: RequestInit,
+  ) => {
     if (init?.method === "PATCH") return new Response("{}", { status: 200 });
     // GET /config/apps/http/servers — one server already routing our host.
     return Response.json({
@@ -55,17 +57,18 @@ test("on listening, the Caddy route gets the server's bound port", async () => {
         routes: [{ match: [{ host: ["web.test.internal"] }] }],
       },
     });
-  });
+    // Bun's `typeof fetch` carries a `preconnect` static no plain function
+    // can satisfy — hence the double cast.
+  }) as unknown as typeof fetch);
 
   const plugin = devsite();
-  await viteConfigHook(plugin).call(
-    plugin,
+  await viteConfigHook(plugin)(
     { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
     ENV,
   );
 
   const fake = fakeViteServer(54321);
-  viteConfigureServerHook(plugin).call(plugin, fake.server as never);
+  viteConfigureServerHook(plugin)(fake.server as never);
   fake.httpServer.emit("listening");
   // registerRoute is async; let its fetches settle.
   await new Promise((r) => setTimeout(r, 0));

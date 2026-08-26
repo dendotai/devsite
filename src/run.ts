@@ -141,9 +141,7 @@ function parse(argv: string[]): Parsed {
   }
 }
 
-type Resolution =
-  | { ok: true; name: string; command: Command }
-  | { ok: false; message?: string };
+type Resolution = { ok: true; name: string; command: Command } | { ok: false; message?: string };
 
 function resolve({ commandName, values, positionals }: Parsed & { ok: true }): Resolution {
   // The flag form of a command wins over a positional (`devsite init --help`

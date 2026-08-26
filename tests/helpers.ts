@@ -88,13 +88,15 @@ export function makeViteRoot(pkg?: object) {
 export function viteConfigHook(plugin: Plugin) {
   const hook = plugin.config;
   if (typeof hook !== "function") throw new Error("config hook is not callable");
-  return hook;
+  // The hook never reads `this`; bind once so call sites stay plain (its
+  // declared thisArg is Vite's ConfigPluginContext, which no test builds).
+  return hook.bind(plugin as never);
 }
 
 export function viteConfigureServerHook(plugin: Plugin) {
   const hook = plugin.configureServer;
   if (typeof hook !== "function") throw new Error("configureServer hook is not callable");
-  return hook;
+  return hook.bind(plugin as never);
 }
 
 // A fake Vite dev server: an EventEmitter posing as httpServer with a fixed

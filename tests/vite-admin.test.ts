@@ -103,10 +103,10 @@ async function withAdmin<T>(url: string | undefined, fn: () => Promise<T>): Prom
 async function registerViaPlugin(port: number) {
   const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
   const plugin = devsite();
-  await viteConfigHook(plugin).call(plugin, { root }, { command: "serve", mode: "development" });
+  await viteConfigHook(plugin)({ root }, { command: "serve", mode: "development" });
 
   const fake = fakeViteServer(port);
-  viteConfigureServerHook(plugin).call(plugin, fake.server as never);
+  viteConfigureServerHook(plugin)(fake.server as never);
   fake.httpServer.emit("listening");
 
   const start = Date.now();
@@ -255,9 +255,10 @@ test("a Headers-instance caller keeps its headers; the pin still wins", async ()
 
 test("without the env override, the admin endpoint is the local default", async () => {
   await withAdmin(undefined, async () => {
-    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-      Response.json({}),
-    );
+    // The double cast bridges Bun's `typeof fetch` (it carries a `preconnect`
+    // static no plain function can satisfy).
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+      Response.json({})) as unknown as typeof fetch);
     let seen: string[];
     try {
       await caddy("/config/apps/http/servers");

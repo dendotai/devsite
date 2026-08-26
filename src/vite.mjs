@@ -11,7 +11,10 @@
 //
 // Plain .mjs (not .ts): Vite's config loader externalizes bare imports and
 // hands them to the Node runtime, which won't execute TypeScript from
-// node_modules. Types live in vite.d.mts.
+// node_modules. The published type surface lives in vite.types.d.mts — named
+// so it does NOT shadow this module in the typecheck program (tsc skips a .js
+// root file when an adjacent same-named .d.ts exists, and checkJs would then
+// never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -29,6 +32,10 @@ function adminBase() {
 // wins over any caller-supplied Origin in any casing (a plain spread is
 // case-sensitive and would keep both keys). Exported for the tests that
 // assert exactly that.
+/**
+ * @param {string} path
+ * @param {RequestInit} [init]
+ */
 export function caddy(path, init = {}) {
   const admin = adminBase();
   const headers = new Headers(init.headers);
@@ -36,6 +43,10 @@ export function caddy(path, init = {}) {
   return fetch(`${admin}${path}`, { ...init, headers });
 }
 
+/**
+ * @param {string} host
+ * @param {number} port
+ */
 function devsiteRoute(host, port) {
   return {
     match: [{ host: [host] }],
@@ -44,10 +55,19 @@ function devsiteRoute(host, port) {
   };
 }
 
+/**
+ * @param {string} host
+ * @param {number} port
+ */
 async function registerRoute(host, port) {
   const res = await caddy("/config/apps/http/servers");
   if (!res.ok) throw new Error(`Caddy admin API: HTTP ${res.status}`);
-  const servers = (await res.json()) ?? {};
+  // The slice of Caddy's config shape this function walks; everything else in
+  // the response is passed through untyped.
+  const servers =
+    /** @type {Record<string, { listen?: unknown[], routes?: { match?: { host?: string[] }[] }[] }>} */ (
+      (await res.json()) ?? {}
+    );
 
   for (const [name, srv] of Object.entries(servers)) {
     const i = (srv.routes ?? []).findIndex((r) =>
@@ -81,7 +101,11 @@ async function registerRoute(host, port) {
   if (!post.ok) throw new Error(`Caddy route append: HTTP ${post.status}`);
 }
 
+/** @returns {import("vite").Plugin} */
 export function devsite() {
+  // Assigned in one hook, read in another — the closure split defeats tsc's
+  // evolving-any inference, so the type is spelled out.
+  /** @type {string | undefined} */
   let host;
   return {
     name: "devsite",

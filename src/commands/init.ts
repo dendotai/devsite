@@ -44,7 +44,8 @@ const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews i
 // devsite's owned region of the Caddyfile. The begin marker carries a format
 // version so a future renderer change can't make older installed copies
 // mis-parse (and mangle) a newer region.
-const REGION_BEGIN = "# >>> devsite v1 — managed region; `devsite init` regenerates it, edits here are lost >>>";
+const REGION_BEGIN =
+  "# >>> devsite v1 — managed region; `devsite init` regenerates it, edits here are lost >>>";
 const REGION_END = "# <<< devsite <<<";
 const REGION_BEGIN_RE = /^# >>> devsite .*>>>[ \t]*$/m;
 const REGION_END_RE = /^# <<< devsite <<<[ \t]*$/m;
@@ -73,7 +74,9 @@ function realUserHome(ctx: CliContext): string | null {
     const r = exec("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], true);
     const home = r.out.match(/^NFSHomeDirectory:\s*(.+)$/m)?.[1];
     if (r.status === 0 && home) {
-      ctx.stdout.write(`Running under sudo — pinning certificate storage to ${user}'s home: ${home}\n`);
+      ctx.stdout.write(
+        `Running under sudo — pinning certificate storage to ${user}'s home: ${home}\n`,
+      );
       return home;
     }
   }
