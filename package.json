@@ -13,7 +13,7 @@
   },
   "exports": {
     "./vite": {
-      "types": "./src/vite.d.mts",
+      "types": "./src/vite.types.d.mts",
       "default": "./src/vite.mjs"
     }
   },
@@ -22,12 +22,15 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome format --write .",
     "test": "bun test"
   },
   "peerDependencies": {
     "vite": "^8.0.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.10",
     "@types/bun": "^1.2.21",
     "typescript": "^5.9.2",
     "vite": "^8.0.10"

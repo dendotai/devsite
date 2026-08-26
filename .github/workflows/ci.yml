@@ -1,0 +1,28 @@
+# CI — every PR (and every push to dev/main) proves typecheck, lint, and
+# tests. Repo-hygiene automation lives in maintenance.yml, deliberately kept
+# separate: this workflow only judges code.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+# A superseded push to the same ref only wastes runner minutes — cancel it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun test

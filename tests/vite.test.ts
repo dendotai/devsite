@@ -12,7 +12,9 @@ const ENV = { command: "serve", mode: "development" } as const;
 function configHook(plugin: ReturnType<typeof devsite>) {
   const hook = plugin.config;
   if (typeof hook !== "function") throw new Error("config hook is not callable");
-  return hook;
+  // The hook never reads `this`; bind once so call sites stay plain (its
+  // declared thisArg is Vite's ConfigPluginContext, which no test builds).
+  return hook.bind(plugin as never);
 }
 
 function makeRoot(pkg?: object) {
@@ -23,26 +25,25 @@ function makeRoot(pkg?: object) {
 
 test("no package.json at the Vite root: no-op instead of an ENOENT crash", () => {
   const plugin = devsite();
-  expect(configHook(plugin).call(plugin, { root: makeRoot() }, ENV)).toBeUndefined();
+  expect(configHook(plugin)({ root: makeRoot() }, ENV)).toBeUndefined();
 });
 
 test("unparseable package.json: no-op", () => {
   const root = makeRoot();
   writeFileSync(join(root, "package.json"), "not json {");
   const plugin = devsite();
-  expect(configHook(plugin).call(plugin, { root }, ENV)).toBeUndefined();
+  expect(configHook(plugin)({ root }, ENV)).toBeUndefined();
 });
 
 test("package.json without a devSite host: no-op", () => {
   const plugin = devsite();
-  const result = configHook(plugin).call(plugin, { root: makeRoot({ name: "x" }) }, ENV);
+  const result = configHook(plugin)({ root: makeRoot({ name: "x" }) }, ENV);
   expect(result).toBeUndefined();
 });
 
 test("devSite.host present: Vite binds an OS-assigned port (port 0) for that host", async () => {
   const plugin = devsite();
-  const result = await configHook(plugin).call(
-    plugin,
+  const result = await configHook(plugin)(
     { root: makeRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
     ENV,
   );
@@ -59,7 +60,10 @@ afterEach(() => {
 });
 
 test("on listening, the Caddy route gets the server's bound port", async () => {
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+    _url: unknown,
+    init?: RequestInit,
+  ) => {
     if (init?.method === "PATCH") return new Response("{}", { status: 200 });
     // GET /config/apps/http/servers — one server already routing our host.
     return Response.json({
@@ -68,11 +72,12 @@ test("on listening, the Caddy route gets the server's bound port", async () => {
         routes: [{ match: [{ host: ["web.test.internal"] }] }],
       },
     });
-  });
+    // Bun's `typeof fetch` carries a `preconnect` static no plain function
+    // can satisfy — hence the double cast.
+  }) as unknown as typeof fetch);
 
   const plugin = devsite();
-  await configHook(plugin).call(
-    plugin,
+  await configHook(plugin)(
     { root: makeRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
     ENV,
   );
@@ -82,12 +87,14 @@ test("on listening, the Caddy route gets the server's bound port", async () => {
   const logged: string[] = [];
   const server = {
     httpServer,
-    config: { logger: { info: (m: string) => logged.push(m), warn: (m: string) => logged.push(m) } },
+    config: {
+      logger: { info: (m: string) => logged.push(m), warn: (m: string) => logged.push(m) },
+    },
   };
 
   const hook = plugin.configureServer;
   if (typeof hook !== "function") throw new Error("configureServer hook is not callable");
-  hook.call(plugin, server as never);
+  hook.call(plugin as never, server as never);
   httpServer.emit("listening");
   // registerRoute is async; let its fetches settle.
   await new Promise((r) => setTimeout(r, 0));
