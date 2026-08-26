@@ -37,6 +37,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { type CliContext, processContext } from "../context";
 
 const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
 
@@ -60,14 +61,12 @@ type Pki = { storageRoot: string; caRootCert: string };
 // devsite init` the process home is /var/root, and pinning that mints a fresh
 // CA no device trusts. Resolve the real user behind sudo, or refuse (null)
 // when there is no way back to one (a true root shell).
-function realUserHome(): string | null {
+function realUserHome(ctx: CliContext): string | null {
   // Overridable so tests can exercise the root paths without actually being root.
   // An empty export must not count: Number("") is 0, which would read as root.
-  const uid = process.env.DEVSITE_UID
-    ? Number(process.env.DEVSITE_UID)
-    : (process.getuid?.() ?? -1);
+  const uid = ctx.env.DEVSITE_UID ? Number(ctx.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
   if (uid !== 0) return homedir();
-  const user = process.env.SUDO_USER;
+  const user = ctx.env.SUDO_USER;
   // `sudo` records the invoking user; a root shell (`su`, root login) records
   // nothing — and "root behind the sudo" is just a root shell with extra steps.
   if (user && user !== "root") {
@@ -75,14 +74,16 @@ function realUserHome(): string | null {
     const r = exec("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], true);
     const home = r.out.match(/^NFSHomeDirectory:\s*(.+)$/m)?.[1];
     if (r.status === 0 && home) {
-      console.log(`Running under sudo — pinning certificate storage to ${user}'s home: ${home}`);
+      ctx.stdout.write(
+        `Running under sudo — pinning certificate storage to ${user}'s home: ${home}\n`,
+      );
       return home;
     }
   }
-  console.error(
+  ctx.stderr.write(
     "devsite init is running as root and cannot find your real user account.\n" +
       "Run it as yourself, without sudo — it calls sudo itself for the privileged steps:\n" +
-      "  bunx devsite init",
+      "  bunx devsite init\n",
   );
   return null;
 }
@@ -254,8 +255,13 @@ function diffAgainstCurrent(next: string, caddyfilePath: string): string | null 
   return r.status === 0 ? null : r.out;
 }
 
-async function confirm(question: string): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+async function confirm(question: string, ctx: CliContext): Promise<boolean> {
+  // readline only ever calls output.write here (non-terminal prompts); the
+  // cast bridges Writer to the nominal stream type it asks for.
+  const rl = createInterface({
+    input: ctx.stdin,
+    output: ctx.stdout as unknown as NodeJS.WritableStream,
+  });
   try {
     return /^y(es)?$/i.test((await rl.question(question)).trim());
   } finally {
@@ -263,32 +269,32 @@ async function confirm(question: string): Promise<boolean> {
   }
 }
 
-function sudo(args: string[]) {
-  console.log(`  sudo ${args.join(" ")}`);
+function sudo(args: string[], ctx: CliContext) {
+  ctx.stdout.write(`  sudo ${args.join(" ")}\n`);
   if (exec("sudo", args).status !== 0) {
     throw new Error(`\`sudo ${args.join(" ")}\` failed`);
   }
 }
 
-function applyPrivileged(content: string, write: boolean, caddyfilePath: string) {
+function applyPrivileged(content: string, write: boolean, caddyfilePath: string, ctx: CliContext) {
   if (write) {
     const tmp = join(tmpdir(), `Caddyfile.devsite.${process.pid}`);
     writeFileSync(tmp, content);
     if (existsSync(caddyfilePath)) {
       // The world before devsite ever touched it — created once, never written again.
       if (!existsSync(`${caddyfilePath}.pre-devsite`)) {
-        sudo(["cp", caddyfilePath, `${caddyfilePath}.pre-devsite`]);
+        sudo(["cp", caddyfilePath, `${caddyfilePath}.pre-devsite`], ctx);
       }
-      sudo(["cp", caddyfilePath, `${caddyfilePath}.bak`]);
+      sudo(["cp", caddyfilePath, `${caddyfilePath}.bak`], ctx);
     }
-    sudo(["cp", tmp, caddyfilePath]);
-    sudo(["chmod", "644", caddyfilePath]);
+    sudo(["cp", tmp, caddyfilePath], ctx);
+    sudo(["chmod", "644", caddyfilePath], ctx);
   }
   exec("sudo", ["pkill", "-x", "caddy"]); // kill any non-service foreground Caddy; ok if none
-  sudo(["brew", "services", "restart", "caddy"]);
+  sudo(["brew", "services", "restart", "caddy"], ctx);
   // Trust the pinned CA in the Mac keychain. Caddy's own auto-trust needs an
   // interactive prompt it can't get as a background service, so do it explicitly.
-  console.log("  sudo caddy trust");
+  ctx.stdout.write("  sudo caddy trust\n");
   exec("sudo", ["caddy", "trust"]); // best-effort; ok if already trusted
 }
 
@@ -300,8 +306,8 @@ function tailscale(args: string[]): string | null {
   return null;
 }
 
-function check(ok: boolean, label: string, detail = "") {
-  console.log(`  ${ok ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}`);
+function check(ok: boolean, label: string, detail: string, ctx: CliContext) {
+  ctx.stdout.write(`  ${ok ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}\n`);
 }
 
 function sha256Fp(opensslOut: string): string | null {
@@ -328,7 +334,7 @@ function pinnedIntermediateFp(storageRoot: string): string | null {
   return r.status === 0 ? sha256Fp(r.out) : null;
 }
 
-function verify(routes: Route[], pki: Pki) {
+function verify(routes: Route[], pki: Pki, ctx: CliContext) {
   const host = routes[0]?.host;
   if (!host) return;
   // curl on macOS uses its own trust store, not the keychain devices trust, so
@@ -346,6 +352,7 @@ function verify(routes: Route[], pki: Pki) {
     r.status === 0 && r.out !== "000",
     `https://${host} answers over TLS (Caddy up)`,
     `HTTP ${r.out || "—"}`,
+    ctx,
   );
 
   const served = servedIntermediateFp(host);
@@ -354,60 +361,63 @@ function verify(routes: Route[], pki: Pki) {
     Boolean(served && pinned && served === pinned),
     "served cert chains to the pinned CA (what every trusting device sees)",
     served && pinned ? (served === pinned ? "match" : "MISMATCH") : "could not compare",
+    ctx,
   );
 
   const tsIp = tailscale(["ip", "-4"])?.split("\n")[0]?.trim();
-  check(Boolean(tsIp), "Tailscale up on this Mac", tsIp ?? "tailscale not reachable");
+  check(Boolean(tsIp), "Tailscale up on this Mac", tsIp ?? "tailscale not reachable", ctx);
   if (tsIp) {
     const answered = exec("dig", ["+short", "+time=3", "+tries=1", `@${tsIp}`, host], true).out;
     check(
       answered === tsIp,
       "dnsmasq answers on the Tailscale IP (the phone's DNS path)",
       answered || "no answer",
+      ctx,
     );
   }
   check(
     existsSync("/etc/resolver/internal"),
     "/etc/resolver/internal present (Mac resolves *.internal locally)",
+    "",
+    ctx,
   );
   check(
     existsSync(pki.caRootCert),
     "local CA root exists (this is what devices must trust)",
     pki.caRootCert,
+    ctx,
   );
 }
 
-function printChecklist(routes: Route[], pki: Pki) {
-  console.log("\nManual, per-device (one-time — can't be automated from here):");
-  console.log(
-    `  • Tailscale admin → DNS → split-DNS: domain 'internal' → this Mac's Tailscale IP.`,
+function printChecklist(routes: Route[], pki: Pki, ctx: CliContext) {
+  ctx.stdout.write(
+    [
+      "",
+      "Manual, per-device (one-time — can't be automated from here):",
+      `  • Tailscale admin → DNS → split-DNS: domain 'internal' → this Mac's Tailscale IP.`,
+      `  • On each phone: install AND trust the CA root, then reload https://${routes[0]?.host}`,
+      `      ${pki.caRootCert}`,
+      `      (iOS: install the profile, THEN Settings → General → About →`,
+      `       Certificate Trust Settings → toggle it ON — installing ≠ trusting.)`,
+      "",
+      "From here on your only surface is `bun dev` — it needs no sudo.",
+      "",
+    ].join("\n"),
   );
-  console.log(
-    `  • On each phone: install AND trust the CA root, then reload https://${routes[0]?.host}`,
-  );
-  console.log(`      ${pki.caRootCert}`);
-  console.log(`      (iOS: install the profile, THEN Settings → General → About →`);
-  console.log(`       Certificate Trust Settings → toggle it ON — installing ≠ trusting.)`);
-  console.log("\nFrom here on your only surface is `bun dev` — it needs no sudo.");
 }
 
-// No argv knowledge here — run.ts parses flags and passes options. Fatal
-// conditions return 1 (after explaining themselves); unexpected errors throw
-// and run.ts turns them into an exit code.
-export async function init({
-  dryRun,
-  // Explicit seams for in-process tests; the defaults are what production uses.
-  // Installed under node_modules, so the repo root is where the CLI is invoked.
-  cwd = process.cwd(),
-  // DEVSITE_CADDYFILE lets the spawn-based tests point a whole child process
-  // at a scratch file.
-  caddyfilePath = process.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile",
-}: {
-  dryRun: boolean;
-  cwd?: string;
-  caddyfilePath?: string;
-}): Promise<number> {
-  const home = realUserHome();
+// No argv knowledge here — run.ts parses flags and passes options plus the io
+// context. Fatal conditions return 1 (after explaining themselves); unexpected
+// errors throw and run.ts turns them into an exit code.
+export async function init(
+  { dryRun }: { dryRun: boolean },
+  ctx: CliContext = processContext(),
+): Promise<number> {
+  // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the
+  // repo root. DEVSITE_CADDYFILE points tests at a scratch file.
+  const cwd = ctx.cwd;
+  const caddyfilePath = ctx.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile";
+  const home = realUserHome(ctx);
   if (home === null) return 1;
   const storageRoot = join(home, "Library", "Application Support", "Caddy");
   const pki: Pki = {
@@ -417,10 +427,10 @@ export async function init({
 
   const routes = await discoverRoutes(cwd);
   if (routes.length === 0) {
-    console.error(
+    ctx.stderr.write(
       `No package.json#devSite routes found in ${cwd} ` +
         "(checked package.json, apps/*/package.json, packages/*/package.json). " +
-        "Run from the repo root.",
+        "Run from the repo root.\n",
     );
     return 1;
   }
@@ -465,17 +475,19 @@ export async function init({
     }
   }
 
-  console.log(`devsite init — ${routes.length} route(s):`);
-  for (const r of routes) console.log(`  ${r.host} → dev server's port at runtime  (${r.project})`);
+  ctx.stdout.write(`devsite init — ${routes.length} route(s):\n`);
+  for (const r of routes) {
+    ctx.stdout.write(`  ${r.host} → dev server's port at runtime  (${r.project})\n`);
+  }
   if (foreign.length > 0) {
-    console.log(`  + ${foreign.length} block(s) from other repos kept`);
+    ctx.stdout.write(`  + ${foreign.length} block(s) from other repos kept\n`);
   }
   if (merged) {
-    console.warn(
+    ctx.stderr.write(
       "\n⚠ Your Caddyfile already had its own global options block. Caddy allows only one, " +
         "so devsite moved its directives into the managed region (marked as kept — see the diff). " +
         "Note: `local_certs` gives EVERY site on this Caddy an internal-CA cert; " +
-        "a public site in this file will lose its real certificate.",
+        "a public site in this file will lose its real certificate.\n",
     );
   }
 
@@ -484,37 +496,37 @@ export async function init({
 
   if (dryRun) {
     if (diff === null) {
-      console.log(`\n--dry-run: ${caddyfilePath} is already up to date; nothing to write.`);
+      ctx.stdout.write(`\n--dry-run: ${caddyfilePath} is already up to date; nothing to write.\n`);
     } else {
-      console.log(`\n--dry-run: would write ${caddyfilePath}; the diff:\n\n${diff}`);
+      ctx.stdout.write(`\n--dry-run: would write ${caddyfilePath}; the diff:\n\n${diff}\n`);
     }
     return 0;
   }
 
   if (diff === null) {
-    console.log(
-      `\n${caddyfilePath} is already up to date — (re)starting the Caddy service (needs sudo)…`,
+    ctx.stdout.write(
+      `\n${caddyfilePath} is already up to date — (re)starting the Caddy service (needs sudo)…\n`,
     );
   } else {
-    console.log(`\nThe change to ${caddyfilePath}:\n\n${diff}\n`);
-    if (!process.stdin.isTTY) {
-      console.error(
+    ctx.stdout.write(`\nThe change to ${caddyfilePath}:\n\n${diff}\n\n`);
+    if (!ctx.stdin.isTTY) {
+      ctx.stderr.write(
         "stdin is not a TTY — cannot ask for confirmation; nothing written. " +
-          "Run interactively, or use --dry-run to inspect the diff.",
+          "Run interactively, or use --dry-run to inspect the diff.\n",
       );
       return 1;
     }
-    if (!(await confirm("Apply this change? [y/N] "))) {
-      console.error("Aborted — nothing written.");
+    if (!(await confirm("Apply this change? [y/N] ", ctx))) {
+      ctx.stderr.write("Aborted — nothing written.\n");
       return 1;
     }
-    console.log(
-      `\nWriting ${caddyfilePath} + (re)starting the always-on Caddy service (needs sudo)…`,
+    ctx.stdout.write(
+      `\nWriting ${caddyfilePath} + (re)starting the always-on Caddy service (needs sudo)…\n`,
     );
   }
-  applyPrivileged(content, diff !== null, caddyfilePath);
-  console.log("\nVerifying:");
-  verify(routes, pki);
-  printChecklist(routes, pki);
+  applyPrivileged(content, diff !== null, caddyfilePath, ctx);
+  ctx.stdout.write("\nVerifying:\n");
+  verify(routes, pki, ctx);
+  printChecklist(routes, pki, ctx);
   return 0;
 }
