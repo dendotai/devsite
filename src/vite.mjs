@@ -15,12 +15,25 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ADMIN = "http://localhost:2019";
+// Caddy's admin endpoint. DEVSITE_CADDY_ADMIN overrides it so tests can point
+// the plugin at a local mock; read per call, so the override needs no
+// import-order care. The default is Caddy's real local admin address.
+const DEFAULT_ADMIN = "http://localhost:2019";
+function adminBase() {
+  return process.env.DEVSITE_CADDY_ADMIN ?? DEFAULT_ADMIN;
+}
 
 // Node's fetch (undici) sends no Origin header and Caddy's admin API then sees
 // an empty origin and 403s; sending it explicitly satisfies the origin check.
-function caddy(path, init = {}) {
-  return fetch(`${ADMIN}${path}`, { ...init, headers: { origin: ADMIN, ...init.headers } });
+// Caller headers are normalized through Headers and the pin set last, so it
+// wins over any caller-supplied Origin in any casing (a plain spread is
+// case-sensitive and would keep both keys). Exported for the tests that
+// assert exactly that.
+export function caddy(path, init = {}) {
+  const admin = adminBase();
+  const headers = new Headers(init.headers);
+  headers.set("origin", admin);
+  return fetch(`${admin}${path}`, { ...init, headers });
 }
 
 function devsiteRoute(host, port) {
