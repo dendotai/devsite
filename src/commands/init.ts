@@ -43,7 +43,8 @@ const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews i
 // devsite's owned region of the Caddyfile. The begin marker carries a format
 // version so a future renderer change can't make older installed copies
 // mis-parse (and mangle) a newer region.
-const REGION_BEGIN = "# >>> devsite v1 — managed region; `devsite init` regenerates it, edits here are lost >>>";
+const REGION_BEGIN =
+  "# >>> devsite v1 — managed region; `devsite init` regenerates it, edits here are lost >>>";
 const REGION_END = "# <<< devsite <<<";
 const REGION_BEGIN_RE = /^# >>> devsite .*>>>[ \t]*$/m;
 const REGION_END_RE = /^# <<< devsite <<<[ \t]*$/m;
@@ -62,7 +63,9 @@ type Pki = { storageRoot: string; caRootCert: string };
 function realUserHome(): string | null {
   // Overridable so tests can exercise the root paths without actually being root.
   // An empty export must not count: Number("") is 0, which would read as root.
-  const uid = process.env.DEVSITE_UID ? Number(process.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
+  const uid = process.env.DEVSITE_UID
+    ? Number(process.env.DEVSITE_UID)
+    : (process.getuid?.() ?? -1);
   if (uid !== 0) return homedir();
   const user = process.env.SUDO_USER;
   // `sudo` records the invoking user; a root shell (`su`, root login) records
@@ -489,7 +492,9 @@ export async function init({
   }
 
   if (diff === null) {
-    console.log(`\n${caddyfilePath} is already up to date — (re)starting the Caddy service (needs sudo)…`);
+    console.log(
+      `\n${caddyfilePath} is already up to date — (re)starting the Caddy service (needs sudo)…`,
+    );
   } else {
     console.log(`\nThe change to ${caddyfilePath}:\n\n${diff}\n`);
     if (!process.stdin.isTTY) {
@@ -503,7 +508,9 @@ export async function init({
       console.error("Aborted — nothing written.");
       return 1;
     }
-    console.log(`\nWriting ${caddyfilePath} + (re)starting the always-on Caddy service (needs sudo)…`);
+    console.log(
+      `\nWriting ${caddyfilePath} + (re)starting the always-on Caddy service (needs sudo)…`,
+    );
   }
   applyPrivileged(content, diff !== null, caddyfilePath);
   console.log("\nVerifying:");
