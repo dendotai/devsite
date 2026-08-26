@@ -25,11 +25,15 @@ function adminBase() {
 
 // Node's fetch (undici) sends no Origin header and Caddy's admin API then sees
 // an empty origin and 403s; sending it explicitly satisfies the origin check.
-// The pin is spread AFTER caller headers so it always wins. Exported for the
-// tests that assert exactly that.
+// Caller headers are normalized through Headers and the pin set last, so it
+// wins over any caller-supplied Origin in any casing (a plain spread is
+// case-sensitive and would keep both keys). Exported for the tests that
+// assert exactly that.
 export function caddy(path, init = {}) {
   const admin = adminBase();
-  return fetch(`${admin}${path}`, { ...init, headers: { ...init.headers, origin: admin } });
+  const headers = new Headers(init.headers);
+  headers.set("origin", admin);
+  return fetch(`${admin}${path}`, { ...init, headers });
 }
 
 function devsiteRoute(host, port) {

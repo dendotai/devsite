@@ -11,6 +11,7 @@ export function devsite(): Plugin;
 /**
  * @internal Exported for tests. Fetch against the Caddy admin API
  * (`DEVSITE_CADDY_ADMIN`, defaulting to the local admin address) with the
- * Origin header pinned to that base — the pin wins over caller headers.
+ * Origin header pinned to that base — the pin wins over caller headers in
+ * any casing or headers shape.
  */
 export function caddy(path: string, init?: RequestInit): Promise<Response>;

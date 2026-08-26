@@ -4,14 +4,11 @@
 // pinned header fails every test here, not one assertion. Tests point the
 // plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite
 // exists to cover).
-import { expect, test } from "bun:test";
-import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { expect, spyOn, test } from "bun:test";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { caddy, devsite } from "../src/vite.mjs";
+import { fakeViteServer, makeViteRoot, viteConfigHook, viteConfigureServerHook } from "./helpers";
 
 const HOST = "web.test.internal";
 
@@ -80,7 +77,11 @@ async function startMockCaddy(opts: MockOpts = {}) {
   return {
     url,
     requests,
-    close: () => new Promise((r) => server.close(r)),
+    close: () => {
+      // Drop any keep-alive connections first so close() cannot hang teardown.
+      server.closeAllConnections();
+      return new Promise((r) => server.close(r));
+    },
   };
 }
 
@@ -100,37 +101,20 @@ async function withAdmin<T>(url: string | undefined, fn: () => Promise<T>): Prom
 // Drive the plugin end to end: config hook, then configureServer with a fake
 // bound server, then wait until registration logged an outcome (info or warn).
 async function registerViaPlugin(port: number) {
-  const root = mkdtempSync(join(tmpdir(), "devsite-vite-admin-"));
-  writeFileSync(
-    join(root, "package.json"),
-    JSON.stringify({ name: "web", devSite: { host: HOST } }),
-  );
+  const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
   const plugin = devsite();
-  const config = plugin.config;
-  if (typeof config !== "function") throw new Error("config hook is not callable");
-  await config.call(plugin, { root }, { command: "serve", mode: "development" });
+  await viteConfigHook(plugin).call(plugin, { root }, { command: "serve", mode: "development" });
 
-  const httpServer = new EventEmitter() as EventEmitter & { address: () => { port: number } };
-  httpServer.address = () => ({ port });
-  const infos: string[] = [];
-  const warns: string[] = [];
-  const server = {
-    httpServer,
-    config: {
-      logger: { info: (m: string) => infos.push(m), warn: (m: string) => warns.push(m) },
-    },
-  };
-  const hook = plugin.configureServer;
-  if (typeof hook !== "function") throw new Error("configureServer hook is not callable");
-  hook.call(plugin, server as never);
-  httpServer.emit("listening");
+  const fake = fakeViteServer(port);
+  viteConfigureServerHook(plugin).call(plugin, fake.server as never);
+  fake.httpServer.emit("listening");
 
   const start = Date.now();
-  while (infos.length === 0 && warns.length === 0) {
+  while (fake.infos.length === 0 && fake.warns.length === 0) {
     if (Date.now() - start > 3000) throw new Error("registration never settled");
     await new Promise((r) => setTimeout(r, 5));
   }
-  return { infos, warns };
+  return { infos: fake.infos, warns: fake.warns };
 }
 
 test("the mock mirrors Caddy: any request without an Origin header is 403", async () => {
@@ -222,17 +206,22 @@ test("write rejected: a warning, and the dev server keeps running", async () => 
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50127));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain("could not register");
+    // The 500 from the write, specifically — a 403 (lost Origin) must not
+    // satisfy this test.
+    expect(warns.join("\n")).toContain("HTTP 500");
   } finally {
     await mock.close();
   }
 });
 
-test("the pinned Origin wins over a caller-supplied Origin header", async () => {
+test("the pinned Origin wins over a caller-supplied Origin header, any casing", async () => {
   const mock = await startMockCaddy();
   try {
     await withAdmin(mock.url, async () => {
+      // Capitalized on purpose: a plain object spread is case-sensitive and
+      // would keep both keys, sending "http://evil.example, <admin>".
       const res = await caddy("/config/apps/http/servers", {
-        headers: { origin: "http://evil.example", "x-extra": "kept" },
+        headers: { Origin: "http://evil.example", "x-extra": "kept" },
       });
       expect(res.status).toBe(200);
     });
@@ -246,18 +235,36 @@ test("the pinned Origin wins over a caller-supplied Origin header", async () => 
   }
 });
 
+test("a Headers-instance caller keeps its headers; the pin still wins", async () => {
+  const mock = await startMockCaddy();
+  try {
+    await withAdmin(mock.url, async () => {
+      const res = await caddy("/config/apps/http/servers", {
+        headers: new Headers({ origin: "http://evil.example", "x-extra": "kept" }),
+      });
+      expect(res.status).toBe(200);
+    });
+    const req = mock.requests[0];
+    if (!req) throw new Error("nothing reached the mock");
+    expect(req.headers.origin).toBe(mock.url);
+    expect(req.headers["x-extra"]).toBe("kept");
+  } finally {
+    await mock.close();
+  }
+});
+
 test("without the env override, the admin endpoint is the local default", async () => {
   await withAdmin(undefined, async () => {
-    const seen: string[] = [];
-    const spy = globalThis.fetch;
-    globalThis.fetch = (async (url: string | URL | Request) => {
-      seen.push(String(url));
-      return Response.json({});
-    }) as typeof fetch;
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({}),
+    );
+    let seen: string[];
     try {
       await caddy("/config/apps/http/servers");
+      // Read before mockRestore — restoring also clears the recorded calls.
+      seen = fetchSpy.mock.calls.map(([url]) => String(url));
     } finally {
-      globalThis.fetch = spy;
+      fetchSpy.mockRestore();
     }
     expect(seen).toEqual(["http://localhost:2019/config/apps/http/servers"]);
   });
