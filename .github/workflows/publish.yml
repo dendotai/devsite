@@ -1,0 +1,39 @@
+# Publishes @dendotai/devsite to npm when a version tag (vX.Y.Z) is pushed.
+# The full CI gate runs again here: a tag can point at any commit, so the
+# publish must not trust that CI already judged it.
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance attestation (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun test
+      - name: Verify tag matches package.json version
+        run: |
+          pkg_version="$(jq -r .version package.json)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "Tag v$tag_version does not match package.json version $pkg_version"
+            exit 1
+          fi
+      # npm (not bun) publishes: provenance needs npm >= 9.5, which node 22 ships.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
