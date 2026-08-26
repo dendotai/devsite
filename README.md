@@ -6,7 +6,7 @@ With a stock dev server, a project's address is a port number. `localhost:3000` 
 
 <!-- TODO: demo GIF — ~20 s screen recording: `devsite init` → `bun dev` → https://myapp.internal opens on the desktop → the same URL opens on a phone. -->
 
-> **Status:** pre-1.0, being extracted from two working projects. Not yet published to npm, and the API may still move. The commands below show the intended published usage.
+> **Status:** pre-1.0, being extracted from two working projects. The API may still move.
 
 ## How it works
 

@@ -26,3 +26,16 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
+
+  # Commit prefixes decide published versions (semantic-release), so every PR
+  # commit must parse as a conventional commit.
+  commitlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # commitlint walks the PR's commit range
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bunx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
