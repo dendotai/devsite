@@ -41,6 +41,8 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: npx semantic-release
+      # Major pinned: a new semantic-release major must arrive via a reviewed
+      # edit here, not silently at the next release. OIDC publish needs >= 25.
+      - run: npx semantic-release@25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
