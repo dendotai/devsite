@@ -1,5 +1,5 @@
 {
-  "name": "@dendotai/devsite",
+  "name": "@den-ai/devsite",
   "version": "0.0.0",
   "type": "module",
   "description": "Port-less dev URLs: one stable https://<name>.internal per project, with self-registered Caddy routes and phone access over Tailscale.",

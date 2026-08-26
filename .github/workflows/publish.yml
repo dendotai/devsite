@@ -1,4 +1,4 @@
-# Publishes @dendotai/devsite to npm when a version tag (vX.Y.Z) is pushed.
+# Publishes @den-ai/devsite to npm when a version tag (vX.Y.Z) is pushed.
 # The full CI gate runs again here: a tag can point at any commit, so the
 # publish must not trust that CI already judged it.
 name: Publish

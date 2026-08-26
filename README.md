@@ -87,7 +87,7 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
 
    ```ts
    // vite.config.ts
-   import { devsite } from "@dendotai/devsite/vite";
+   import { devsite } from "@den-ai/devsite/vite";
 
    export default defineConfig({
      plugins: [devsite()],
