@@ -22,6 +22,7 @@ concurrency:
 permissions:
   contents: write # semantic-release pushes tags and creates GitHub releases
   id-token: write # OIDC token for npm trusted publishing
+  pull-requests: write # the retitle step edits the merged PR's title
 
 jobs:
   publish:
@@ -46,3 +47,28 @@ jobs:
       - run: npx semantic-release@25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Stamp the released version onto the PR whose merge triggered this run,
+      # so the PR list reads "Promote dev to main: … (v1.2.3)". Cosmetic and
+      # best-effort: by this point the release is already published, so a
+      # failure here must not paint the whole run red (continue-on-error).
+      - name: Retitle the merged PR with the released version
+        continue-on-error: true
+        run: |
+          git fetch --tags --quiet
+          tag=$(git tag --points-at "$GITHUB_SHA" | grep '^v' | head -1 || true)
+          if [ -z "$tag" ]; then
+            echo "no release tag on $GITHUB_SHA — nothing was released; skipping"
+            exit 0
+          fi
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number' || true)
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "no PR behind $GITHUB_SHA (direct push?); skipping"
+            exit 0
+          fi
+          title=$(gh pr view "$pr" --json title --jq .title)
+          case "$title" in
+            *"($tag)") echo "PR #$pr already carries ($tag)" ;;
+            *) gh pr edit "$pr" --title "$title ($tag)" ;;
+          esac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
