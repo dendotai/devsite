@@ -169,7 +169,7 @@ Note: removing a `devSite` field and re-running `devsite init` does **not** remo
 
 ## Requirements
 
-- **Bun** — the CLI is TypeScript executed directly by Bun.
+- **Node.js ≥ 22** — the published CLI runs under plain Node (`npx devsite init` works without bun). Developing the repo itself still uses bun.
 - **Caddy ≥ 2**, installed through Homebrew (`devsite init` manages it with `brew services`).
 - **Vite** — the plugin is developed against Vite 8.
 - **macOS on Apple Silicon**, currently. The Homebrew prefix `/opt/homebrew` and macOS paths are hardcoded; supporting Linux or Intel Macs requires making them configurable, which has not been done yet. Windows is out of scope.
