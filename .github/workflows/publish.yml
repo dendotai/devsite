@@ -47,10 +47,12 @@ jobs:
       - run: npx semantic-release@25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Stamp the released version onto the PR whose merge triggered this run,
-      # so the PR list reads "Promote dev to main: … (v1.2.3)". Cosmetic and
-      # best-effort: by this point the release is already published, so a
-      # failure here must not paint the whole run red (continue-on-error).
+      # PRs to main are opened as "Release TBD" — the version does not exist
+      # until this run computes it. Once npm has the release, this step writes
+      # the real title ("Release v1.2.3") onto the PR whose merge triggered the
+      # run. Cosmetic and best-effort: by this point the release is already
+      # published, so a failure here must not paint the whole run red
+      # (continue-on-error).
       - name: Retitle the merged PR with the released version
         continue-on-error: true
         run: |
@@ -65,10 +67,11 @@ jobs:
             echo "no PR behind $GITHUB_SHA (direct push?); skipping"
             exit 0
           fi
-          title=$(gh pr view "$pr" --json title --jq .title)
-          case "$title" in
-            *"($tag)") echo "PR #$pr already carries ($tag)" ;;
-            *) gh pr edit "$pr" --title "$title ($tag)" ;;
-          esac
+          title="Release $tag"
+          if [ "$(gh pr view "$pr" --json title --jq .title)" = "$title" ]; then
+            echo "PR #$pr is already titled \"$title\""
+          else
+            gh pr edit "$pr" --title "$title"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
