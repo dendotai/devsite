@@ -42,10 +42,10 @@
     ]
   },
   "bin": {
-    "devsite": "./src/cli.ts"
+    "devsite": "./dist/cli.js"
   },
   "engines": {
-    "bun": ">=1.2"
+    "node": ">=22"
   },
   "exports": {
     "./vite": {
@@ -54,9 +54,12 @@
     }
   },
   "files": [
+    "dist",
     "src"
   ],
   "scripts": {
+    "build": "bun build src/cli.ts --outdir dist --target=node --banner '#!/usr/bin/env node'",
+    "prepack": "bun run build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write .",

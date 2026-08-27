@@ -33,7 +33,7 @@
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, globSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -96,12 +96,12 @@ type Route = { host: string; project: string };
 const HOSTNAME_RE =
   /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
-async function discoverRoutes(repoRoot: string): Promise<Route[]> {
+function discoverRoutes(repoRoot: string): Route[] {
   const candidates = [join(repoRoot, "package.json")];
   for (const dir of ["apps", "packages"]) {
     const base = join(repoRoot, dir);
     if (!existsSync(base)) continue;
-    for (const rel of new Bun.Glob("*/package.json").scanSync(base)) {
+    for (const rel of globSync("*/package.json", { cwd: base })) {
       candidates.push(join(base, rel));
     }
   }
@@ -112,7 +112,7 @@ async function discoverRoutes(repoRoot: string): Promise<Route[]> {
   const claimed = new Map<string, string>();
   for (const path of candidates) {
     if (!existsSync(path)) continue;
-    const pkg = (await Bun.file(path).json()) as {
+    const pkg = JSON.parse(readFileSync(path, "utf8")) as {
       name?: string;
       devSite?: { host?: string };
     };
@@ -437,7 +437,7 @@ export async function init(
     caRootCert: join(storageRoot, "pki", "authorities", "local", "root.crt"),
   };
 
-  const routes = await discoverRoutes(cwd);
+  const routes = discoverRoutes(cwd);
   if (routes.length === 0) {
     ctx.stderr.write(
       `No package.json#devSite routes found in ${cwd} ` +
