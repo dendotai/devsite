@@ -32,6 +32,9 @@
  *
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
+// Adding a version-sensitive node API here (fs.glob is the only one so far,
+// Node 22+)? Check engines.node in package.json, and consider a node-version
+// matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
 import { spawnSync } from "node:child_process";
 import { existsSync, globSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";

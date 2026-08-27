@@ -28,6 +28,9 @@ jobs:
       - run: bun test
       # The published CLI must run under plain Node (engines.node floor), not
       # just under bun — build it and smoke-run the artifact.
+      # One node version on purpose: only fs.glob is version-sensitive today.
+      # If the CLI grows more node-API surface, promote this to a small matrix
+      # (floor + current, e.g. [22, 24]).
       - uses: actions/setup-node@v4
         with:
           node-version: 22
