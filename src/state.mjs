@@ -8,7 +8,7 @@
 // Plain .mjs for the same reason as vite.mjs (its only importer): Vite's
 // config loader hands bare imports to the Node runtime, which won't execute
 // TypeScript from node_modules.
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -43,9 +43,19 @@ export async function stampLastUsed(host) {
   try {
     const parsed = JSON.parse(await readFile(file, "utf8"));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stamps = parsed;
-  } catch {
-    // Missing or unparseable — the data is advisory; start fresh.
+  } catch (err) {
+    // Missing or unparseable — the data is advisory; start fresh. Any other
+    // read failure (EMFILE, EIO, …) must rethrow: writing from {} after one
+    // would silently drop every other host's entry.
+    if (!(err instanceof SyntaxError) && /** @type {{code?: string}} */ (err).code !== "ENOENT") {
+      throw err;
+    }
   }
   stamps[host] = new Date().toISOString().slice(0, 10);
-  await writeFile(file, `${JSON.stringify(stamps, null, 2)}\n`);
+  // Write-then-rename, per-pid tmp name: a reader (or a kill mid-write) never
+  // sees a truncated file. Two concurrent stampers can still lose one date to
+  // the other — acceptable for advisory data; a corrupted file is not.
+  const tmp = join(dir, `.last-used.${process.pid}.tmp`);
+  await writeFile(tmp, `${JSON.stringify(stamps, null, 2)}\n`);
+  await rename(tmp, file);
 }
