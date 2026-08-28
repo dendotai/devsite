@@ -8,6 +8,13 @@ import type { Plugin } from "vite";
 import type { CliContext } from "../src/context";
 import { run } from "../src/run";
 
+// The Vite plugin stamps a last-used date into the DEVSITE_STATE_DIR state
+// file on every dev-server start (#48). Every suite imports this module, so
+// defaulting the override here (unconditionally — an inherited shell value
+// would be the developer's real dir) guarantees no test can ever write the
+// real state file. Suites that assert on the stamp re-point it per test.
+process.env.DEVSITE_STATE_DIR = mkdtempSync(join(tmpdir(), "devsite-state-default-"));
+
 // An in-memory Writer: records everything written, hands it back as one string.
 export function sink() {
   const chunks: string[] = [];

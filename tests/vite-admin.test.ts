@@ -88,17 +88,23 @@ async function startMockCaddy(opts: MockOpts = {}) {
   };
 }
 
-// Point the plugin at the mock for the duration of fn; always restore.
-async function withAdmin<T>(url: string | undefined, fn: () => Promise<T>): Promise<T> {
-  const prev = process.env.DEVSITE_CADDY_ADMIN;
-  if (url === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
-  else process.env.DEVSITE_CADDY_ADMIN = url;
+// Set (or, for undefined, unset) one env var for the duration of fn; always
+// restore.
+async function withEnv<T>(name: string, value: string | undefined, fn: () => Promise<T>) {
+  const prev = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
   try {
     return await fn();
   } finally {
-    if (prev === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
-    else process.env.DEVSITE_CADDY_ADMIN = prev;
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
   }
+}
+
+// Point the plugin at the mock for the duration of fn.
+function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
+  return withEnv("DEVSITE_CADDY_ADMIN", url, fn);
 }
 
 // Drive the plugin end to end: config hook, then configureServer with a fake
@@ -120,17 +126,11 @@ async function registerViaPlugin(port: number) {
   return { infos: fake.infos, warns: fake.warns };
 }
 
-// Point the plugin's last-used stamp at a scratch state dir for the duration
-// of fn; always restore.
-async function withStateDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
-  const prev = process.env.DEVSITE_STATE_DIR;
-  process.env.DEVSITE_STATE_DIR = dir;
-  try {
-    return await fn();
-  } finally {
-    if (prev === undefined) delete process.env.DEVSITE_STATE_DIR;
-    else process.env.DEVSITE_STATE_DIR = prev;
-  }
+// Point the plugin's last-used stamp at this test's own state dir for the
+// duration of fn (helpers.ts already defaults the var to a shared scratch
+// dir so no test can write the real state file).
+function withStateDir<T>(dir: string, fn: () => Promise<T>) {
+  return withEnv("DEVSITE_STATE_DIR", dir, fn);
 }
 
 // The stamp is fire-and-forget, so it can land after registration logs its
