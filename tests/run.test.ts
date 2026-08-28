@@ -5,7 +5,7 @@
 // stays in cli.test.ts.
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { init } from "../src/commands/init";
 import { cli, fakeStdin, makeEmptyRepo, makeIo, makeRepo, scratchCaddyfile } from "./helpers";
 
@@ -90,11 +90,11 @@ test("init is dispatched: no routes in cwd returns 1 with the discovery error", 
   expect(r.stderr).toContain("No package.json#devSite routes");
 });
 
-test("init --dry-run through the io context: renders the region, returns 0", async () => {
+test("init --dry-run through the io context: renders the tree diff, returns 0", async () => {
   const { ctx, stdout } = makeIo({ cwd: makeRepo(), caddyfile: scratchCaddyfile() });
   const status = await init({ dryRun: true }, ctx);
   expect(status).toBe(0);
-  expect(stdout.text()).toContain("--dry-run: would write");
+  expect(stdout.text()).toContain("--dry-run: would change");
   expect(stdout.text()).toContain("web.test.internal {");
 });
 
@@ -116,6 +116,7 @@ test("a non-TTY run with a pending diff refuses and writes nothing", async () =>
   expect(r.status).toBe(1);
   expect(r.stderr).toContain("stdin is not a TTY");
   expect(existsSync(caddyfile)).toBe(false);
+  expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });
 
 test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () => {
@@ -129,4 +130,5 @@ test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () 
   expect(r.stdout).toContain("Apply this change?");
   expect(r.stderr).toContain("Aborted — nothing written");
   expect(existsSync(caddyfile)).toBe(false);
+  expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });
