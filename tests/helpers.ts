@@ -56,13 +56,15 @@ export async function cli(argv: string[], opts: IoOpts = {}) {
   return { status, stdout: stdout.text(), stderr: stderr.text() };
 }
 
-// A throwaway repo whose apps/web/package.json declares a devSite host.
-export function makeRepo(host = "web.test.internal") {
+// A throwaway repo whose apps/web/package.json declares a devSite host. The
+// project name matters to rename cleanup: same project + new host = rename;
+// a different project name = an unrelated repo.
+export function makeRepo(host = "web.test.internal", project = "web") {
   const repo = mkdtempSync(join(tmpdir(), "devsite-repo-"));
   mkdirSync(join(repo, "apps", "web"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "web", "package.json"),
-    JSON.stringify({ name: "web", devSite: { host } }),
+    JSON.stringify({ name: project, devSite: { host } }),
   );
   return repo;
 }
