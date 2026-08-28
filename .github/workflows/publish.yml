@@ -42,6 +42,11 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      # Build once up front so dist/cli.js exists when npm first reads the
+      # manifest (silences "No bin file found"); prepack rebuilds it anyway
+      # after semantic-release writes the real version, so this copy is never
+      # what ships.
+      - run: bun run build
       # Major pinned: a new semantic-release major must arrive via a reviewed
       # edit here, not silently at the next release. OIDC publish needs >= 25.
       - run: npx semantic-release@25

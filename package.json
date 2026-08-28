@@ -42,7 +42,7 @@
     ]
   },
   "bin": {
-    "devsite": "./dist/cli.js"
+    "devsite": "dist/cli.js"
   },
   "engines": {
     "node": ">=22"
