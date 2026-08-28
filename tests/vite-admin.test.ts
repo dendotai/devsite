@@ -107,32 +107,6 @@ function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
   return withEnv("DEVSITE_CADDY_ADMIN", url, fn);
 }
 
-// Drive the plugin end to end: config hook, then configureServer with a fake
-// bound server, then wait until registration logged an outcome (info or warn).
-async function registerViaPlugin(port: number) {
-  const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
-  const plugin = devsite();
-  await viteConfigHook(plugin)({ root }, { command: "serve", mode: "development" });
-
-  const fake = fakeViteServer(port);
-  viteConfigureServerHook(plugin)(fake.server as never);
-  fake.httpServer.emit("listening");
-
-  const start = Date.now();
-  while (fake.infos.length === 0 && fake.warns.length === 0) {
-    if (Date.now() - start > 3000) throw new Error("registration never settled");
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  return { infos: fake.infos, warns: fake.warns };
-}
-
-// Point the plugin's last-used stamp at this test's own state dir for the
-// duration of fn (helpers.ts already defaults the var to a shared scratch
-// dir so no test can write the real state file).
-function withStateDir<T>(dir: string, fn: () => Promise<T>) {
-  return withEnv("DEVSITE_STATE_DIR", dir, fn);
-}
-
 // The stamp is fire-and-forget, so it can land after registration logs its
 // outcome — poll until the condition holds.
 async function pollFor(cond: () => boolean, what: string) {
@@ -143,16 +117,42 @@ async function pollFor(cond: () => boolean, what: string) {
   }
 }
 
-function readStamps(dir: string): Record<string, string> {
-  return JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
+// Drive the plugin end to end: config hook, then configureServer with a fake
+// bound server, then wait until registration logged its outcome. The wait is
+// registration-specific on purpose: the fire-and-forget stamp can log its
+// "could not record" warn first, and that must not end the wait early.
+async function registerViaPlugin(port: number) {
+  const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
+  const plugin = devsite();
+  await viteConfigHook(plugin)({ root }, { command: "serve", mode: "development" });
+
+  const fake = fakeViteServer(port);
+  viteConfigureServerHook(plugin)(fake.server as never);
+  fake.httpServer.emit("listening");
+
+  await pollFor(
+    () => fake.infos.length > 0 || fake.warns.some((w) => w.includes("could not register")),
+    "registration",
+  );
+  return { infos: fake.infos, warns: fake.warns };
 }
 
-function stampFileExists(dir: string) {
+// Point the plugin's last-used stamp at this test's own state dir for the
+// duration of fn (tests/setup.ts already defaults the var to a shared scratch
+// dir so no test can write the real state file).
+function withStateDir<T>(dir: string, fn: () => Promise<T>) {
+  return withEnv("DEVSITE_STATE_DIR", dir, fn);
+}
+
+// The stamp file's content; undefined before the first write. stampLastUsed
+// writes atomically (write + rename), so a reader never sees a partial file —
+// a SyntaxError here is a real regression and propagates.
+function readStamps(dir: string): Record<string, string> | undefined {
   try {
-    readStamps(dir);
-    return true;
-  } catch {
-    return false;
+    return JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
+  } catch (err) {
+    if ((err as { code?: string }).code === "ENOENT") return undefined;
+    throw err;
   }
 }
 
@@ -164,9 +164,9 @@ test("a dev-server start stamps the host's last-used date", async () => {
   try {
     const before = new Date().toISOString().slice(0, 10);
     await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50223)));
-    await pollFor(() => stampFileExists(stateDir), "stamp write");
+    await pollFor(() => readStamps(stateDir) !== undefined, "stamp write");
     const after = new Date().toISOString().slice(0, 10);
-    const stamp = readStamps(stateDir)[HOST];
+    const stamp = readStamps(stateDir)?.[HOST];
     if (!stamp) throw new Error(`no entry for ${HOST} in the stamp file`);
     // Either side of a midnight rollover during the test run is a pass.
     expect([before, after]).toContain(stamp);
@@ -186,8 +186,9 @@ test("repeated starts update the entry; other hosts' entries are preserved", asy
   );
   try {
     await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50224)));
-    await pollFor(() => readStamps(stateDir)[HOST] !== "2001-01-01", "stamp update");
+    await pollFor(() => readStamps(stateDir)?.[HOST] !== "2001-01-01", "stamp update");
     const stamps = readStamps(stateDir);
+    if (!stamps) throw new Error("stamp file disappeared");
     expect(stamps["other.test.internal"]).toBe("2002-02-02");
     expect(stamps[HOST]).not.toBe("2001-01-01");
   } finally {
