@@ -17,6 +17,7 @@
 // never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stampLastUsed } from "./state.mjs";
 
 // Caddy's admin endpoint. DEVSITE_CADDY_ADMIN overrides it so tests can point
 // the plugin at a local mock; read per call, so the override needs no
@@ -145,6 +146,13 @@ export function devsite() {
         const addr = server.httpServer?.address();
         const p = typeof addr === "object" && addr ? addr.port : undefined;
         if (!p) return;
+        // Last-used stamp (#48): fire-and-forget, independent of the Caddy
+        // registration outcome — the dev server started either way.
+        stampLastUsed(h).catch((err) =>
+          server.config.logger.warn(
+            `devsite: could not record last-used date for ${h} (${err instanceof Error ? err.message : err})`,
+          ),
+        );
         registerRoute(h, p).then(
           () => server.config.logger.info(`devsite: https://${h} → localhost:${p}`),
           (err) =>

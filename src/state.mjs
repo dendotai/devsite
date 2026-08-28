@@ -1,0 +1,51 @@
+// devsite's user-space state: per-host last-used dates (#48).
+//
+// Each dev-server start stamps `host → date` into last-used.json here, so a
+// future `clean`/`doctor` can flag hosts unseen for N days. No reader ships
+// yet — the data only accrues. User-space by design: the Vite plugin runs
+// unprivileged and cannot touch the sudo-owned devsite.d files.
+//
+// Plain .mjs for the same reason as vite.mjs (its only importer): Vite's
+// config loader hands bare imports to the Node runtime, which won't execute
+// TypeScript from node_modules.
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * The devsite state directory: DEVSITE_STATE_DIR wins, then the platform
+ * default — darwin: ~/Library/Application Support/devsite; elsewhere the XDG
+ * state dir ($XDG_STATE_HOME, default ~/.local/state) + /devsite.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @param {string} [platform]
+ * @param {string} [home]
+ */
+export function resolveStateDir(env = process.env, platform = process.platform, home = homedir()) {
+  if (env.DEVSITE_STATE_DIR) return env.DEVSITE_STATE_DIR;
+  if (platform === "darwin") return join(home, "Library", "Application Support", "devsite");
+  return join(env.XDG_STATE_HOME || join(home, ".local", "state"), "devsite");
+}
+
+/**
+ * Record that `host`'s dev server started today (UTC date). Read-modify-write
+ * of last-used.json: other hosts' entries are preserved; a missing or corrupt
+ * file starts fresh. Rejects on write failure — the caller decides how loudly.
+ *
+ * @param {string} host
+ */
+export async function stampLastUsed(host) {
+  const dir = resolveStateDir();
+  const file = join(dir, "last-used.json");
+  await mkdir(dir, { recursive: true });
+  /** @type {Record<string, string>} */
+  let stamps = {};
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stamps = parsed;
+  } catch {
+    // Missing or unparseable — the data is advisory; start fresh.
+  }
+  stamps[host] = new Date().toISOString().slice(0, 10);
+  await writeFile(file, `${JSON.stringify(stamps, null, 2)}\n`);
+}

@@ -5,8 +5,11 @@
 // plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite
 // exists to cover).
 import { expect, spyOn, test } from "bun:test";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { caddy, devsite } from "../src/vite.mjs";
 import { fakeViteServer, makeViteRoot, viteConfigHook, viteConfigureServerHook } from "./helpers";
 
@@ -116,6 +119,102 @@ async function registerViaPlugin(port: number) {
   }
   return { infos: fake.infos, warns: fake.warns };
 }
+
+// Point the plugin's last-used stamp at a scratch state dir for the duration
+// of fn; always restore.
+async function withStateDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.DEVSITE_STATE_DIR;
+  process.env.DEVSITE_STATE_DIR = dir;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.DEVSITE_STATE_DIR;
+    else process.env.DEVSITE_STATE_DIR = prev;
+  }
+}
+
+// The stamp is fire-and-forget, so it can land after registration logs its
+// outcome — poll until the condition holds.
+async function pollFor(cond: () => boolean, what: string) {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > 3000) throw new Error(`${what} never happened`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+function readStamps(dir: string): Record<string, string> {
+  return JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
+}
+
+function stampFileExists(dir: string) {
+  try {
+    readStamps(dir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("a dev-server start stamps the host's last-used date", async () => {
+  const mock = await startMockCaddy({
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
+  });
+  const stateDir = mkdtempSync(join(tmpdir(), "devsite-state-"));
+  try {
+    const before = new Date().toISOString().slice(0, 10);
+    await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50223)));
+    await pollFor(() => stampFileExists(stateDir), "stamp write");
+    const after = new Date().toISOString().slice(0, 10);
+    const stamp = readStamps(stateDir)[HOST];
+    if (!stamp) throw new Error(`no entry for ${HOST} in the stamp file`);
+    // Either side of a midnight rollover during the test run is a pass.
+    expect([before, after]).toContain(stamp);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("repeated starts update the entry; other hosts' entries are preserved", async () => {
+  const mock = await startMockCaddy({
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
+  });
+  const stateDir = mkdtempSync(join(tmpdir(), "devsite-state-"));
+  writeFileSync(
+    join(stateDir, "last-used.json"),
+    JSON.stringify({ [HOST]: "2001-01-01", "other.test.internal": "2002-02-02" }),
+  );
+  try {
+    await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50224)));
+    await pollFor(() => readStamps(stateDir)[HOST] !== "2001-01-01", "stamp update");
+    const stamps = readStamps(stateDir);
+    expect(stamps["other.test.internal"]).toBe("2002-02-02");
+    expect(stamps[HOST]).not.toBe("2001-01-01");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a stamp write failure warns and does not break route registration", async () => {
+  const mock = await startMockCaddy({
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
+  });
+  // A state "dir" nested under a plain file: mkdir fails with ENOTDIR.
+  const scratch = mkdtempSync(join(tmpdir(), "devsite-state-"));
+  const blocker = join(scratch, "not-a-dir");
+  writeFileSync(blocker, "");
+  try {
+    const { infos, warns } = await withAdmin(mock.url, () =>
+      withStateDir(join(blocker, "devsite"), () => registerViaPlugin(50225)),
+    );
+    // Route registration succeeded regardless.
+    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50225`);
+    await pollFor(() => warns.join("\n").includes("last-used"), "stamp warning");
+    expect(warns.join("\n")).toContain("could not record");
+  } finally {
+    await mock.close();
+  }
+});
 
 test("the mock mirrors Caddy: any request without an Origin header is 403", async () => {
   const mock = await startMockCaddy();
