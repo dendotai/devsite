@@ -5,10 +5,18 @@
 // plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite
 // exists to cover).
 import { expect, spyOn, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { caddy, devsite } from "../src/vite.mjs";
-import { fakeViteServer, makeViteRoot, viteConfigHook, viteConfigureServerHook } from "./helpers";
+import {
+  fakeViteServer,
+  makeStateDir,
+  makeViteRoot,
+  viteConfigHook,
+  viteConfigureServerHook,
+} from "./helpers";
 
 const HOST = "web.test.internal";
 
@@ -85,21 +93,26 @@ async function startMockCaddy(opts: MockOpts = {}) {
   };
 }
 
-// Point the plugin at the mock for the duration of fn; always restore.
-async function withAdmin<T>(url: string | undefined, fn: () => Promise<T>): Promise<T> {
-  const prev = process.env.DEVSITE_CADDY_ADMIN;
-  if (url === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
-  else process.env.DEVSITE_CADDY_ADMIN = url;
+async function withEnv<T>(name: string, value: string | undefined, fn: () => Promise<T>) {
+  const prev = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
   try {
     return await fn();
   } finally {
-    if (prev === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
-    else process.env.DEVSITE_CADDY_ADMIN = prev;
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
   }
 }
 
+function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
+  return withEnv("DEVSITE_CADDY_ADMIN", url, fn);
+}
+
 // Drive the plugin end to end: config hook, then configureServer with a fake
-// bound server, then wait until registration logged an outcome (info or warn).
+// bound server, then await the plugin's settled signal — route registration
+// and the last-used stamp have both finished (logged, wrote, or warned) when
+// it resolves, so no assertion below needs to poll.
 async function registerViaPlugin(port: number) {
   const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
   const plugin = devsite();
@@ -109,13 +122,75 @@ async function registerViaPlugin(port: number) {
   viteConfigureServerHook(plugin)(fake.server as never);
   fake.httpServer.emit("listening");
 
-  const start = Date.now();
-  while (fake.infos.length === 0 && fake.warns.length === 0) {
-    if (Date.now() - start > 3000) throw new Error("registration never settled");
-    await new Promise((r) => setTimeout(r, 5));
-  }
+  await plugin.api.settled;
   return { infos: fake.infos, warns: fake.warns };
 }
+
+// tests/setup.ts defaults DEVSITE_STATE_DIR to a shared scratch dir; suites
+// that assert on the stamp re-point it here per test.
+function withStateDir<T>(dir: string, fn: () => Promise<T>) {
+  return withEnv("DEVSITE_STATE_DIR", dir, fn);
+}
+
+function readStamps(dir: string): Record<string, string> {
+  return JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
+}
+
+test("a dev-server start stamps the host's last-used date", async () => {
+  const mock = await startMockCaddy({
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
+  });
+  const stateDir = makeStateDir();
+  try {
+    const before = new Date().toISOString().slice(0, 10);
+    await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50223)));
+    const after = new Date().toISOString().slice(0, 10);
+    const stamp = readStamps(stateDir)[HOST];
+    if (!stamp) throw new Error(`no entry for ${HOST} in the stamp file`);
+    // Either side of a midnight rollover during the test run is a pass.
+    expect([before, after]).toContain(stamp);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("repeated starts update the entry; other hosts' entries are preserved", async () => {
+  const mock = await startMockCaddy({
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
+  });
+  const stateDir = makeStateDir();
+  writeFileSync(
+    join(stateDir, "last-used.json"),
+    JSON.stringify({ [HOST]: "2001-01-01", "other.test.internal": "2002-02-02" }),
+  );
+  try {
+    await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50224)));
+    const stamps = readStamps(stateDir);
+    expect(stamps["other.test.internal"]).toBe("2002-02-02");
+    expect(stamps[HOST]).not.toBe("2001-01-01");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a stamp write failure warns and does not break route registration", async () => {
+  const mock = await startMockCaddy({
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
+  });
+  // A state "dir" nested under a plain file: mkdir fails with ENOTDIR.
+  const blocker = join(makeStateDir(), "not-a-dir");
+  writeFileSync(blocker, "");
+  try {
+    const { infos, warns } = await withAdmin(mock.url, () =>
+      withStateDir(join(blocker, "devsite"), () => registerViaPlugin(50225)),
+    );
+    // Route registration succeeded regardless.
+    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50225`);
+    expect(warns.join("\n")).toContain("could not record");
+  } finally {
+    await mock.close();
+  }
+});
 
 test("the mock mirrors Caddy: any request without an Origin header is 403", async () => {
   const mock = await startMockCaddy();

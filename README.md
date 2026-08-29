@@ -154,7 +154,7 @@ What `devsite init` changes (it prints every privileged command as it runs it):
 - `~/Library/Application Support/Caddy` — Caddy's certificate storage, pinned here.
 - Your system trust store — Caddy's local CA root is added via `sudo caddy trust`.
 
-What the Vite plugin changes: nothing on disk. It only edits Caddy's in-memory running config over the localhost admin API.
+What the Vite plugin changes: it edits Caddy's in-memory running config over the localhost admin API, and it records the host's last-used date in `~/Library/Application Support/devsite/last-used.json` on every dev-server start (advisory data for a future `clean`/`doctor`; `DEVSITE_STATE_DIR` overrides the directory).
 
 **Undoing it** — there is no `devsite uninstall` command yet, so removal is manual:
 
@@ -164,6 +164,7 @@ sudo brew services stop caddy           # stop the background service
 sudo rm -rf /opt/homebrew/etc/devsite.d # devsite's own directory
 sudo rm /opt/homebrew/etc/Caddyfile     # or remove the import line + devsite's global directives / restore Caddyfile.pre-devsite
 rm -rf ~/Library/Application\ Support/Caddy
+rm -rf ~/Library/Application\ Support/devsite # last-used dates (Vite plugin)
 sudo rm /etc/resolver/internal          # plus the dnsmasq config, if you set them up
 ```
 

@@ -11,7 +11,14 @@ export type CliContext = {
   // confirm() reads the answer here; isTTY decides whether asking is possible.
   stdin: NodeJS.ReadableStream & { isTTY?: boolean };
   cwd: string;
-  env: Record<string, string | undefined>;
+  // The named keys are the full set of env vars the CLI reads; the index
+  // signature is what lets process.env (and test env objects) assign.
+  env: {
+    DEVSITE_UID?: string;
+    SUDO_USER?: string;
+    DEVSITE_CADDYFILE?: string;
+    [key: string]: string | undefined;
+  };
 };
 
 export function processContext(): CliContext {

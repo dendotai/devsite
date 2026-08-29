@@ -17,10 +17,11 @@
 // never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stampLastUsed } from "./state.mjs";
 
-// Caddy's admin endpoint. DEVSITE_CADDY_ADMIN overrides it so tests can point
-// the plugin at a local mock; read per call, so the override needs no
-// import-order care. The default is Caddy's real local admin address.
+// DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the
+// plugin at a local mock; read per call, so the override needs no
+// import-order care.
 const DEFAULT_ADMIN = "http://localhost:2019";
 function adminBase() {
   return process.env.DEVSITE_CADDY_ADMIN ?? DEFAULT_ADMIN;
@@ -101,15 +102,28 @@ async function registerRoute(host, port) {
   if (!post.ok) throw new Error(`Caddy route append: HTTP ${post.status}`);
 }
 
-/** @returns {import("vite").Plugin} */
+/**
+ * `api.settled` is a test seam with no stability promise: it resolves once
+ * the listening callback's async work (last-used stamp + route registration)
+ * has settled, so tests can await it instead of polling logger output. It
+ * stays pending if the server never reaches `listening`.
+ *
+ * @returns {import("vite").Plugin & { api: { settled: Promise<void> } }}
+ */
 export function devsite() {
   // Assigned in one hook, read in another — the closure split defeats tsc's
   // evolving-any inference, so the type is spelled out.
   /** @type {string | undefined} */
   let host;
+  let settle = () => {};
+  /** @type {Promise<void>} */
+  const settled = new Promise((r) => {
+    settle = r;
+  });
   return {
     name: "devsite",
     apply: "serve",
+    api: { settled },
     config(userConfig) {
       const root = userConfig.root ?? process.cwd();
       // A Vite root without a (readable, parseable) package.json simply has no
@@ -139,13 +153,26 @@ export function devsite() {
       };
     },
     configureServer(server) {
-      if (!host) return;
+      if (!host) {
+        settle();
+        return;
+      }
       const h = host;
       server.httpServer?.once("listening", () => {
         const addr = server.httpServer?.address();
         const p = typeof addr === "object" && addr ? addr.port : undefined;
-        if (!p) return;
-        registerRoute(h, p).then(
+        if (!p) {
+          settle();
+          return;
+        }
+        // Last-used stamp (#48): fire-and-forget, independent of the Caddy
+        // registration outcome — the dev server started either way.
+        const stamped = stampLastUsed(h).catch((err) =>
+          server.config.logger.warn(
+            `devsite: could not record last-used date for ${h} (${err instanceof Error ? err.message : err})`,
+          ),
+        );
+        const registered = registerRoute(h, p).then(
           () => server.config.logger.info(`devsite: https://${h} → localhost:${p}`),
           (err) =>
             server.config.logger.warn(
@@ -154,6 +181,8 @@ export function devsite() {
                 "Falling back to the raw local URL below — HMR only works via the https host.",
             ),
         );
+        // Both branches above are handled, so neither promise can reject.
+        void Promise.all([stamped, registered]).then(settle);
       });
     },
   };

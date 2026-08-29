@@ -1,4 +1,8 @@
 // Shared fixtures for the CLI and Vite-plugin test suites.
+// The setup import is a belt-and-braces double of the bunfig.toml preload:
+// the DEVSITE_STATE_DIR guard holds even when bun test runs from a cwd
+// where bunfig.toml is not picked up.
+import "./setup";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,7 +12,6 @@ import type { Plugin } from "vite";
 import type { CliContext } from "../src/context";
 import { run } from "../src/run";
 
-// An in-memory Writer: records everything written, hands it back as one string.
 export function sink() {
   const chunks: string[] = [];
   return {
@@ -72,6 +75,11 @@ export function makeRepo(host = "web.test.internal", project = "web") {
 // A throwaway directory with no devSite route anywhere.
 export function makeEmptyRepo() {
   return mkdtempSync(join(tmpdir(), "devsite-empty-"));
+}
+
+// A fresh scratch dir for suites that point DEVSITE_STATE_DIR per test.
+export function makeStateDir() {
+  return mkdtempSync(join(tmpdir(), "devsite-state-"));
 }
 
 // A Caddyfile path in its own fresh scratch dir. Starts nonexistent; suites

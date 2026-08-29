@@ -1,0 +1,4 @@
+[test]
+# Points DEVSITE_STATE_DIR at a scratch dir before any suite loads — see
+# tests/setup.ts.
+preload = ["./tests/setup.ts"]
