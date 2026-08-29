@@ -12,7 +12,6 @@ import type { Plugin } from "vite";
 import type { CliContext } from "../src/context";
 import { run } from "../src/run";
 
-// An in-memory Writer: records everything written, hands it back as one string.
 export function sink() {
   const chunks: string[] = [];
   return {

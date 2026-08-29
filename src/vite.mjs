@@ -19,9 +19,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stampLastUsed } from "./state.mjs";
 
-// Caddy's admin endpoint. DEVSITE_CADDY_ADMIN overrides it so tests can point
-// the plugin at a local mock; read per call, so the override needs no
-// import-order care. The default is Caddy's real local admin address.
+// DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the
+// plugin at a local mock; read per call, so the override needs no
+// import-order care.
 const DEFAULT_ADMIN = "http://localhost:2019";
 function adminBase() {
   return process.env.DEVSITE_CADDY_ADMIN ?? DEFAULT_ADMIN;

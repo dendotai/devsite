@@ -13,11 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * The devsite state directory: DEVSITE_STATE_DIR wins, then the platform
- * default — darwin: ~/Library/Application Support/devsite; elsewhere the XDG
- * state dir ($XDG_STATE_HOME, default ~/.local/state) + /devsite.
- *
- * @param {Record<string, string | undefined>} [env]
+ * @param {{ DEVSITE_STATE_DIR?: string; XDG_STATE_HOME?: string; [key: string]: string | undefined }} [env]
  * @param {string} [platform]
  * @param {string} [home]
  */
@@ -28,9 +24,8 @@ export function resolveStateDir(env = process.env, platform = process.platform, 
 }
 
 /**
- * Record that `host`'s dev server started today (UTC date). Read-modify-write
- * of last-used.json: other hosts' entries are preserved; a missing or corrupt
- * file starts fresh. Rejects on write failure — the caller decides how loudly.
+ * Stamp `host → today` (UTC date) into last-used.json, preserving other
+ * hosts' entries. Rejects on failure — the caller decides how loudly.
  *
  * @param {string} host
  */

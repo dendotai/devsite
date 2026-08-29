@@ -88,8 +88,6 @@ async function startMockCaddy(opts: MockOpts = {}) {
   };
 }
 
-// Set (or, for undefined, unset) one env var for the duration of fn; always
-// restore.
 async function withEnv<T>(name: string, value: string | undefined, fn: () => Promise<T>) {
   const prev = process.env[name];
   if (value === undefined) delete process.env[name];
@@ -102,7 +100,6 @@ async function withEnv<T>(name: string, value: string | undefined, fn: () => Pro
   }
 }
 
-// Point the plugin at the mock for the duration of fn.
 function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
   return withEnv("DEVSITE_CADDY_ADMIN", url, fn);
 }
@@ -137,9 +134,8 @@ async function registerViaPlugin(port: number) {
   return { infos: fake.infos, warns: fake.warns };
 }
 
-// Point the plugin's last-used stamp at this test's own state dir for the
-// duration of fn (tests/setup.ts already defaults the var to a shared scratch
-// dir so no test can write the real state file).
+// tests/setup.ts defaults DEVSITE_STATE_DIR to a shared scratch dir; suites
+// that assert on the stamp re-point it here per test.
 function withStateDir<T>(dir: string, fn: () => Promise<T>) {
   return withEnv("DEVSITE_STATE_DIR", dir, fn);
 }
