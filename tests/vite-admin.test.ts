@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { COULD_NOT_RECORD, COULD_NOT_REGISTER, caddy, devsite } from "../src/vite.mjs";
+import { caddy, devsite } from "../src/vite.mjs";
 import {
   fakeViteServer,
   makeStateDir,
@@ -109,20 +109,10 @@ function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
   return withEnv("DEVSITE_CADDY_ADMIN", url, fn);
 }
 
-// The stamp is fire-and-forget, so it can land after registration logs its
-// outcome — poll until the condition holds.
-async function pollFor(cond: () => boolean, what: string) {
-  const start = Date.now();
-  while (!cond()) {
-    if (Date.now() - start > 3000) throw new Error(`${what} never happened`);
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
-
 // Drive the plugin end to end: config hook, then configureServer with a fake
-// bound server, then wait until registration logged its outcome. The wait is
-// registration-specific on purpose: the fire-and-forget stamp can log its
-// "could not record" warn first, and that must not end the wait early.
+// bound server, then await the plugin's settled signal — route registration
+// and the last-used stamp have both finished (logged, wrote, or warned) when
+// it resolves, so no assertion below needs to poll.
 async function registerViaPlugin(port: number) {
   const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
   const plugin = devsite();
@@ -132,10 +122,7 @@ async function registerViaPlugin(port: number) {
   viteConfigureServerHook(plugin)(fake.server as never);
   fake.httpServer.emit("listening");
 
-  await pollFor(
-    () => fake.infos.length > 0 || fake.warns.some((w) => w.includes(COULD_NOT_REGISTER)),
-    "registration",
-  );
+  await plugin.api.settled;
   return { infos: fake.infos, warns: fake.warns };
 }
 
@@ -145,16 +132,8 @@ function withStateDir<T>(dir: string, fn: () => Promise<T>) {
   return withEnv("DEVSITE_STATE_DIR", dir, fn);
 }
 
-// The stamp file's content; undefined before the first write. stampLastUsed
-// writes atomically (write + rename), so a reader never sees a partial file —
-// a SyntaxError here is a real regression and propagates.
-function readStamps(dir: string): Record<string, string> | undefined {
-  try {
-    return JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
-  } catch (err) {
-    if ((err as { code?: string }).code === "ENOENT") return undefined;
-    throw err;
-  }
+function readStamps(dir: string): Record<string, string> {
+  return JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
 }
 
 test("a dev-server start stamps the host's last-used date", async () => {
@@ -165,9 +144,8 @@ test("a dev-server start stamps the host's last-used date", async () => {
   try {
     const before = new Date().toISOString().slice(0, 10);
     await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50223)));
-    await pollFor(() => readStamps(stateDir) !== undefined, "stamp write");
     const after = new Date().toISOString().slice(0, 10);
-    const stamp = readStamps(stateDir)?.[HOST];
+    const stamp = readStamps(stateDir)[HOST];
     if (!stamp) throw new Error(`no entry for ${HOST} in the stamp file`);
     // Either side of a midnight rollover during the test run is a pass.
     expect([before, after]).toContain(stamp);
@@ -187,9 +165,7 @@ test("repeated starts update the entry; other hosts' entries are preserved", asy
   );
   try {
     await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50224)));
-    await pollFor(() => readStamps(stateDir)?.[HOST] !== "2001-01-01", "stamp update");
     const stamps = readStamps(stateDir);
-    if (!stamps) throw new Error("stamp file disappeared");
     expect(stamps["other.test.internal"]).toBe("2002-02-02");
     expect(stamps[HOST]).not.toBe("2001-01-01");
   } finally {
@@ -210,8 +186,7 @@ test("a stamp write failure warns and does not break route registration", async 
     );
     // Route registration succeeded regardless.
     expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50225`);
-    await pollFor(() => warns.join("\n").includes(COULD_NOT_RECORD), "stamp warning");
-    expect(warns.join("\n")).toContain(COULD_NOT_RECORD);
+    expect(warns.join("\n")).toContain("could not record");
   } finally {
     await mock.close();
   }
@@ -278,7 +253,7 @@ test("config fetch fails: a warning, and the dev server keeps running", async ()
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50125));
     expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain(COULD_NOT_REGISTER);
+    expect(warns.join("\n")).toContain("could not register");
     expect(warns.join("\n")).toContain("HTTP 500");
   } finally {
     await mock.close();
@@ -290,7 +265,7 @@ test("no :443 server in the config: a warning pointing at `devsite init`", async
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50126));
     expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain(COULD_NOT_REGISTER);
+    expect(warns.join("\n")).toContain("could not register");
     expect(warns.join("\n")).toContain("devsite init");
   } finally {
     await mock.close();
@@ -305,7 +280,7 @@ test("write rejected: a warning, and the dev server keeps running", async () => 
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50127));
     expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain(COULD_NOT_REGISTER);
+    expect(warns.join("\n")).toContain("could not register");
     // The 500 from the write, specifically — a 403 (lost Origin) must not
     // satisfy this test.
     expect(warns.join("\n")).toContain("HTTP 500");
