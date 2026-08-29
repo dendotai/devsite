@@ -19,6 +19,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stampLastUsed } from "./state.mjs";
 
+// The test suite keys its poll predicates and assertions on these warn
+// fragments — shared constants, so a rewording cannot silently desync them.
+export const COULD_NOT_REGISTER = "could not register";
+export const COULD_NOT_RECORD = "could not record";
+
 // DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the
 // plugin at a local mock; read per call, so the override needs no
 // import-order care.
@@ -150,14 +155,14 @@ export function devsite() {
         // registration outcome — the dev server started either way.
         stampLastUsed(h).catch((err) =>
           server.config.logger.warn(
-            `devsite: could not record last-used date for ${h} (${err instanceof Error ? err.message : err})`,
+            `devsite: ${COULD_NOT_RECORD} last-used date for ${h} (${err instanceof Error ? err.message : err})`,
           ),
         );
         registerRoute(h, p).then(
           () => server.config.logger.info(`devsite: https://${h} → localhost:${p}`),
           (err) =>
             server.config.logger.warn(
-              `devsite: could not register https://${h} with Caddy (${err instanceof Error ? err.message : err}). ` +
+              `devsite: ${COULD_NOT_REGISTER} https://${h} with Caddy (${err instanceof Error ? err.message : err}). ` +
                 "Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
                 "Falling back to the raw local URL below — HMR only works via the https host.",
             ),

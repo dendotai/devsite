@@ -23,21 +23,31 @@ export function resolveStateDir(env = process.env, platform = process.platform, 
   return join(env.XDG_STATE_HOME || join(home, ".local", "state"), "devsite");
 }
 
+let stampSeq = 0;
+
 /**
  * Stamp `host → today` (UTC date) into last-used.json, preserving other
  * hosts' entries. Rejects on failure — the caller decides how loudly.
  *
+ * The `dir` default is evaluated at call time, synchronously — so an
+ * env-based redirect (tests) cannot be restored out from under a stamp that
+ * is still in flight, and callers can inject a dir directly.
+ *
  * @param {string} host
+ * @param {string} [dir]
  */
-export async function stampLastUsed(host) {
-  const dir = resolveStateDir();
+export async function stampLastUsed(host, dir = resolveStateDir()) {
   const file = join(dir, "last-used.json");
   await mkdir(dir, { recursive: true });
+  // Null prototype, so every host name is stampable — on a plain object,
+  // assigning to "__proto__" is a silent no-op.
   /** @type {Record<string, string>} */
-  let stamps = {};
+  const stamps = Object.create(null);
   try {
     const parsed = JSON.parse(await readFile(file, "utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stamps = parsed;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      Object.assign(stamps, parsed);
+    }
   } catch (err) {
     // Missing or unparseable — the data is advisory; start fresh. Any other
     // read failure (EMFILE, EIO, …) must rethrow: writing from {} after one
@@ -47,10 +57,12 @@ export async function stampLastUsed(host) {
     }
   }
   stamps[host] = new Date().toISOString().slice(0, 10);
-  // Write-then-rename, per-pid tmp name: a reader (or a kill mid-write) never
-  // sees a truncated file. Two concurrent stampers can still lose one date to
-  // the other — acceptable for advisory data; a corrupted file is not.
-  const tmp = join(dir, `.last-used.${process.pid}.tmp`);
+  // Write-then-rename: a reader (or a kill mid-write) never sees a truncated
+  // file. The tmp name is unique per call — pid against other processes, the
+  // counter against concurrent stamps in this one. Concurrent stampers can
+  // still lose one date to the other — acceptable for advisory data; a
+  // corrupted file is not.
+  const tmp = join(dir, `.last-used.${process.pid}.${stampSeq++}.tmp`);
   await writeFile(tmp, `${JSON.stringify(stamps, null, 2)}\n`);
   await rename(tmp, file);
 }

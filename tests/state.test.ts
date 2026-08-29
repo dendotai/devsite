@@ -1,9 +1,11 @@
-// The state-dir resolver (#48): DEVSITE_STATE_DIR wins, then the platform
-// default. Pure function — env, platform, and home are injected so no test
-// touches the real home directory.
+// The state-dir resolver and the last-used stamp (#48). Everything is
+// injected — env/platform/home for the resolver, the target dir for the
+// stamp — so no test touches the real home directory.
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveStateDir } from "../src/state.mjs";
+import { resolveStateDir, stampLastUsed } from "../src/state.mjs";
+import { makeStateDir } from "./helpers";
 
 test("DEVSITE_STATE_DIR overrides everything, on any platform", () => {
   expect(resolveStateDir({ DEVSITE_STATE_DIR: "/custom/state" }, "darwin", "/Users/x")).toBe(
@@ -36,4 +38,20 @@ test("an empty DEVSITE_STATE_DIR does not override", () => {
   expect(resolveStateDir({ DEVSITE_STATE_DIR: "" }, "linux", "/home/x")).toBe(
     join("/home/x", ".local", "state", "devsite"),
   );
+});
+
+test("any host name lands in the stamp file, __proto__ included", async () => {
+  const dir = makeStateDir();
+  await stampLastUsed("__proto__", dir);
+  const stamps = JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
+  expect(Object.keys(stamps)).toContain("__proto__");
+});
+
+test("concurrent stamps in one process never corrupt the file", async () => {
+  const dir = makeStateDir();
+  await Promise.all([stampLastUsed("a.internal", dir), stampLastUsed("b.internal", dir)]);
+  // One date may lose to the other (advisory data); the file must stay
+  // parseable and non-empty.
+  const stamps = JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
+  expect(Object.keys(stamps).length).toBeGreaterThanOrEqual(1);
 });

@@ -77,6 +77,11 @@ export function makeEmptyRepo() {
   return mkdtempSync(join(tmpdir(), "devsite-empty-"));
 }
 
+// A fresh scratch dir for suites that point DEVSITE_STATE_DIR per test.
+export function makeStateDir() {
+  return mkdtempSync(join(tmpdir(), "devsite-state-"));
+}
+
 // A Caddyfile path in its own fresh scratch dir. Starts nonexistent; suites
 // that only dry-run share one, the round-trip suite writes and patches it.
 export function scratchCaddyfile() {

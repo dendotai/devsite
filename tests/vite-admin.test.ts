@@ -5,13 +5,18 @@
 // plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite
 // exists to cover).
 import { expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { caddy, devsite } from "../src/vite.mjs";
-import { fakeViteServer, makeViteRoot, viteConfigHook, viteConfigureServerHook } from "./helpers";
+import { COULD_NOT_RECORD, COULD_NOT_REGISTER, caddy, devsite } from "../src/vite.mjs";
+import {
+  fakeViteServer,
+  makeStateDir,
+  makeViteRoot,
+  viteConfigHook,
+  viteConfigureServerHook,
+} from "./helpers";
 
 const HOST = "web.test.internal";
 
@@ -128,7 +133,7 @@ async function registerViaPlugin(port: number) {
   fake.httpServer.emit("listening");
 
   await pollFor(
-    () => fake.infos.length > 0 || fake.warns.some((w) => w.includes("could not register")),
+    () => fake.infos.length > 0 || fake.warns.some((w) => w.includes(COULD_NOT_REGISTER)),
     "registration",
   );
   return { infos: fake.infos, warns: fake.warns };
@@ -156,7 +161,7 @@ test("a dev-server start stamps the host's last-used date", async () => {
   const mock = await startMockCaddy({
     servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
   });
-  const stateDir = mkdtempSync(join(tmpdir(), "devsite-state-"));
+  const stateDir = makeStateDir();
   try {
     const before = new Date().toISOString().slice(0, 10);
     await withAdmin(mock.url, () => withStateDir(stateDir, () => registerViaPlugin(50223)));
@@ -175,7 +180,7 @@ test("repeated starts update the entry; other hosts' entries are preserved", asy
   const mock = await startMockCaddy({
     servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
   });
-  const stateDir = mkdtempSync(join(tmpdir(), "devsite-state-"));
+  const stateDir = makeStateDir();
   writeFileSync(
     join(stateDir, "last-used.json"),
     JSON.stringify({ [HOST]: "2001-01-01", "other.test.internal": "2002-02-02" }),
@@ -197,8 +202,7 @@ test("a stamp write failure warns and does not break route registration", async 
     servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
   });
   // A state "dir" nested under a plain file: mkdir fails with ENOTDIR.
-  const scratch = mkdtempSync(join(tmpdir(), "devsite-state-"));
-  const blocker = join(scratch, "not-a-dir");
+  const blocker = join(makeStateDir(), "not-a-dir");
   writeFileSync(blocker, "");
   try {
     const { infos, warns } = await withAdmin(mock.url, () =>
@@ -206,8 +210,8 @@ test("a stamp write failure warns and does not break route registration", async 
     );
     // Route registration succeeded regardless.
     expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50225`);
-    await pollFor(() => warns.join("\n").includes("last-used"), "stamp warning");
-    expect(warns.join("\n")).toContain("could not record");
+    await pollFor(() => warns.join("\n").includes(COULD_NOT_RECORD), "stamp warning");
+    expect(warns.join("\n")).toContain(COULD_NOT_RECORD);
   } finally {
     await mock.close();
   }
@@ -274,7 +278,7 @@ test("config fetch fails: a warning, and the dev server keeps running", async ()
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50125));
     expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain("could not register");
+    expect(warns.join("\n")).toContain(COULD_NOT_REGISTER);
     expect(warns.join("\n")).toContain("HTTP 500");
   } finally {
     await mock.close();
@@ -286,7 +290,7 @@ test("no :443 server in the config: a warning pointing at `devsite init`", async
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50126));
     expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain("could not register");
+    expect(warns.join("\n")).toContain(COULD_NOT_REGISTER);
     expect(warns.join("\n")).toContain("devsite init");
   } finally {
     await mock.close();
@@ -301,7 +305,7 @@ test("write rejected: a warning, and the dev server keeps running", async () => 
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50127));
     expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain("could not register");
+    expect(warns.join("\n")).toContain(COULD_NOT_REGISTER);
     // The 500 from the write, specifically — a 403 (lost Origin) must not
     // satisfy this test.
     expect(warns.join("\n")).toContain("HTTP 500");

@@ -9,6 +9,13 @@ import type { Plugin } from "vite";
 export function devsite(): Plugin;
 
 /**
+ * @internal Exported for tests: the warn-message fragments the suite's poll
+ * predicates and assertions key on.
+ */
+export const COULD_NOT_REGISTER: string;
+export const COULD_NOT_RECORD: string;
+
+/**
  * @internal Exported for tests. Fetch against the Caddy admin API
  * (`DEVSITE_CADDY_ADMIN`, defaulting to the local admin address) with the
  * Origin header pinned to that base — the pin wins over caller headers in
