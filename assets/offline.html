@@ -1,0 +1,266 @@
+<!doctype html>
+<!--
+  devsite offline page — design source.
+
+  `devsite init` renders devsite.d/fragments/offline.caddy from this file on
+  every run. Substitution tokens (replaced by init, never by Caddy syntax):
+    __HOST__         the site host, e.g. myapp.localhost
+    __PROJECT__      the project name
+    __CMD__          the command that starts the dev server
+    __STATUS_CODE__  502 (connection lost) or 503 (server never started)
+
+  Constraint from the renderer: no tight brace pattern that Caddy could read
+  as a placeholder. Every CSS/JS brace is followed by a newline or a space.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:,">
+<title>__HOST__ · offline</title>
+<style>
+  :root {
+    --bg: #0e1013;
+    --ink: #d9d6cf;
+    --dim: #80868f;
+    --line: #23262b;
+    --accent: #64b6ac; /* 502: waiting */
+  }
+
+  body[data-status="503"] {
+    --accent: #e2a65a; /* 503: action needed */
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100svh;
+    padding: 2.5rem 1.5rem;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--ink);
+    background:
+      radial-gradient(90rem 40rem at 15% -10%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%),
+      var(--bg);
+    display: grid;
+    place-items: center;
+  }
+
+  /* faint scanlines */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(0, 0, 0, 0.18) 3px 4px);
+  }
+
+  .watermark {
+    position: fixed;
+    right: -0.05em;
+    bottom: -0.18em;
+    font-size: 42vmin;
+    font-weight: 700;
+    line-height: 1;
+    color: transparent;
+    -webkit-text-stroke: 1px color-mix(in srgb, var(--accent) 16%, transparent);
+    user-select: none;
+    pointer-events: none;
+  }
+
+  main {
+    width: min(60ch, 100%);
+    position: relative;
+  }
+
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 1ch;
+    color: var(--dim);
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 0.9rem;
+    margin-bottom: 2.2rem;
+  }
+
+  .brand b {
+    color: var(--ink);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.35;
+    margin: 0 0 1rem;
+    text-wrap: balance;
+  }
+
+  h1 em {
+    font-style: normal;
+    color: var(--accent);
+  }
+
+  p {
+    margin: 0 0 1rem;
+    color: var(--dim);
+  }
+
+  .cmd {
+    display: flex;
+    gap: 1ch;
+    align-items: baseline;
+    margin: 1.4rem 0 0;
+    padding: 0.85rem 1.1rem;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    background: rgba(255, 255, 255, 0.02);
+    overflow-x: auto;
+  }
+
+  .cmd .prompt {
+    color: var(--accent);
+    user-select: none;
+  }
+
+  .cmd code {
+    white-space: pre;
+  }
+
+  /* variant switch: default shows 502; a 503 status flips both blocks */
+  .v503 {
+    display: none;
+  }
+
+  body[data-status="503"] .v503 {
+    display: block;
+  }
+
+  body[data-status="503"] .v502 {
+    display: none;
+  }
+
+  .status {
+    display: flex;
+    align-items: flex-start;
+    gap: 1ch;
+    margin-top: 2.6rem;
+    color: var(--dim);
+    font-size: 0.85rem;
+  }
+
+  #tries {
+    white-space: nowrap;
+  }
+
+  .dot {
+    flex: none;
+    margin-top: 0.5em;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  .brand, section, .status {
+    opacity: 0;
+    animation: rise 0.5s ease-out forwards;
+  }
+
+  section {
+    animation-delay: 0.1s;
+  }
+
+  .status {
+    animation-delay: 0.2s;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @keyframes pulse {
+    0%, 100% {
+      opacity: 1;
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+    50% {
+      opacity: 0.5;
+      box-shadow: 0 0 0 6px transparent;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .brand, section, .status {
+      animation: none;
+      opacity: 1;
+    }
+    .dot {
+      animation: none;
+    }
+  }
+</style>
+</head>
+<body data-status="__STATUS_CODE__">
+
+<div class="watermark" aria-hidden="true">__STATUS_CODE__</div>
+
+<main>
+  <header class="brand"><b>devsite</b><span>__PROJECT__</span></header>
+
+  <section class="v503">
+    <h1>dev server for <em>__HOST__</em> is not running</h1>
+    <p>Start it with:</p>
+    <div class="cmd"><span class="prompt">$</span><code>__CMD__</code></div>
+  </section>
+
+  <section class="v502">
+    <h1>lost connection to the dev server</h1>
+    <p>It may be restarting. This page reconnects on its own.</p>
+  </section>
+
+  <div class="status">
+    <span class="dot" aria-hidden="true"></span>
+    <span>waiting for <span style="color: var(--ink)">__HOST__</span> — reloads when it answers<span id="tries"></span></span>
+  </div>
+</main>
+
+<script>
+  (function () {
+    var tries = 0;
+    var label = document.getElementById("tries");
+    function check() {
+      fetch("/", { cache: "no-store" }).then(function (res) {
+        if (res.ok) {
+          location.reload();
+          return;
+        }
+        bump();
+      }).catch(bump);
+    }
+    function bump() {
+      tries += 1;
+      label.textContent = " · attempt " + tries;
+    }
+    setInterval(check, 2000);
+    check();
+  })();
+</script>
+
+</body>
+</html>
