@@ -1,6 +1,4 @@
-# CI — every PR (and every push to dev/main) proves typecheck, lint, and
-# tests. Repo-hygiene automation lives in maintenance.yml, deliberately kept
-# separate: this workflow only judges code.
+# CI — every PR (and every push to dev/main) proves typecheck, lint, and tests. Repo-hygiene automation lives in maintenance.yml, deliberately kept separate: this workflow only judges code.
 name: CI
 
 on:
@@ -26,22 +24,15 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
-      # The published CLI must run under plain Node (engines.node floor), not
-      # just under bun — build it and smoke-run the artifact.
-      # One node version on purpose: only fs.glob is version-sensitive today.
-      # If the CLI grows more node-API surface, promote this to a small matrix
-      # (floor + current, e.g. [22, 24]).
+      # The published CLI must run under plain Node (engines.node floor), not just under bun — build it and smoke-run the artifact.
+      # One node version on purpose: only fs.glob is version-sensitive today. If the CLI grows more node-API surface, promote this to a small matrix (floor + current, e.g. [22, 24]).
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: bun run build
       - run: node dist/cli.js --help
 
-  # Commit prefixes decide published versions (semantic-release), so every PR
-  # commit must parse as a conventional commit. Only where commits are born
-  # (PRs into dev): a dev->main promotion re-plays history that was already
-  # linted on its way into dev, plus pre-convention commits that can never
-  # be fixed.
+  # Commit prefixes decide published versions (semantic-release), so every PR commit must parse as a conventional commit. Only where commits are born (PRs into dev): a dev->main promotion re-plays history that was already linted on its way into dev, plus pre-convention commits that can never be fixed.
   commitlint:
     if: github.event_name == 'pull_request' && github.base_ref != 'main'
     runs-on: ubuntu-latest

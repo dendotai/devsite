@@ -1,8 +1,5 @@
-// Spawn-based end-to-end tests of the bin shim (src/cli.ts): the real process
-// boundary — exit codes, stdout/stderr routing. In-process coverage of
-// parse/dispatch lives in run.test.ts (#9).
-// DEVSITE_CADDYFILE points every run at a scratch file so no test ever reads
-// or races the machine-global Caddyfile.
+// Spawn-based end-to-end tests of the bin shim (src/cli.ts): the real process boundary — exit codes, stdout/stderr routing. In-process coverage of parse/dispatch lives in run.test.ts (#9).
+// DEVSITE_CADDYFILE points every run at a scratch file so no test ever reads or races the machine-global Caddyfile.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -19,8 +16,7 @@ function devsite(
   args: string[],
   opts: { cwd?: string; caddyfile?: string; env?: Record<string, string> } = {},
 ) {
-  // Strip the identity variables from the inherited env so a test controls them
-  // fully via opts.env — an ambient SUDO_USER must never leak into a run.
+  // Strip the identity variables from the inherited env so a test controls them fully via opts.env — an ambient SUDO_USER must never leak into a run.
   const env: Record<string, string | undefined> = {
     ...process.env,
     DEVSITE_CADDYFILE: opts.caddyfile ?? SCRATCH,
@@ -155,9 +151,7 @@ test("root with no SUDO_USER refuses: a true root shell cannot pin a wrong CA pa
   expect(r.stderr).toContain("without sudo");
 });
 
-// darwin-only: the happy path resolves SUDO_USER's home through dscl (macOS
-// Directory Services), which Linux CI runners don't have — there the run
-// correctly refuses, which is the adjacent tests' territory.
+// darwin-only: the happy path resolves SUDO_USER's home through dscl (macOS Directory Services), which Linux CI runners don't have — there the run correctly refuses, which is the adjacent tests' territory.
 test.skipIf(process.platform !== "darwin")(
   "under sudo the pinned storage is the real user's home, not root's",
   () => {

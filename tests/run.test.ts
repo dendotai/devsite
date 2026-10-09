@@ -1,8 +1,5 @@
 // In-process tests of the CLI surface: run(argv, ctx) → exit code (#9).
-// The io context (#26) makes these pure: output lands in in-memory sinks, cwd
-// and env are plain values, stdin is a pre-loaded stream — no console spies,
-// no chdir, no env mutation. Spawn-based end-to-end coverage of the bin shim
-// stays in cli.test.ts.
+// The io context (#26) makes these pure: output lands in in-memory sinks, cwd and env are plain values, stdin is a pre-loaded stream — no console spies, no chdir, no env mutation. Spawn-based end-to-end coverage of the bin shim stays in cli.test.ts.
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";

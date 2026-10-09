@@ -1,14 +1,6 @@
-// Round-trip tests pinning `devsite init`'s ownership contract (#27, #47):
-// everything devsite does not own survives a re-init byte-for-byte, and
-// devsite's own state lives in devsite.d/ — the user's Caddyfile carries one
-// import line and nothing else of devsite's.
+// Round-trip tests pinning `devsite init`'s ownership contract (#27, #47): everything devsite does not own survives a re-init byte-for-byte, and devsite's own state lives in devsite.d/ — the user's Caddyfile carries one import line and nothing else of devsite's.
 //
-// The suite observes init only through its public surface — an in-process
-// run(["init", "--dry-run"]) and the multi-file unified diff it prints —
-// applies that diff to a scratch tree with patch(1), and asserts the
-// resulting tree's bytes. No init internals are imported, so the suite
-// survives (and guards) an ownership rewrite. patch(1) is exact: the patched
-// tree holds the same bytes a confirmed real run would write.
+// The suite observes init only through its public surface — an in-process run(["init", "--dry-run"]) and the multi-file unified diff it prints — applies that diff to a scratch tree with patch(1), and asserts the resulting tree's bytes. No init internals are imported, so the suite survives (and guards) an ownership rewrite. patch(1) is exact: the patched tree holds the same bytes a confirmed real run would write.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -26,9 +18,7 @@ async function dryRunDiff(cwd: string, caddyfile: string): Promise<string | null
   return m[1];
 }
 
-// One round trip: dry-run, apply the diff to the tree, report whether
-// anything was pending — callers that spliced state assert `changed` so a
-// false "already up to date" can never pass vacuously.
+// One round trip: dry-run, apply the diff to the tree, report whether anything was pending — callers that spliced state assert `changed` so a false "already up to date" can never pass vacuously.
 async function reInit(cwd: string, caddyfile: string) {
   const diff = await dryRunDiff(cwd, caddyfile);
   if (diff !== null) {
@@ -41,9 +31,7 @@ async function reInit(cwd: string, caddyfile: string) {
       encoding: "utf8",
     });
     if (r.status !== 0) throw new Error(`patch failed: ${r.stderr}`);
-    // Fidelity anchor: after applying, init must report nothing left to
-    // write — proving the patched tree is exactly what a confirmed real run
-    // would render, not merely what the printed diff said.
+    // Fidelity anchor: after applying, init must report nothing left to write — proving the patched tree is exactly what a confirmed real run would render, not merely what the printed diff said.
     if ((await dryRunDiff(cwd, caddyfile)) !== null) {
       throw new Error("patched tree does not converge to init's own rendering");
     }
@@ -62,8 +50,7 @@ function readTree(caddyfile: string): Record<string, string> {
   return tree;
 }
 
-// A Caddyfile whose target exists from the start — patch needs a file to
-// patch, and an empty file renders identically to a missing one.
+// A Caddyfile whose target exists from the start — patch needs a file to patch, and an empty file renders identically to a missing one.
 function makeCaddyfile(content = "") {
   const p = join(mkdtempSync(join(tmpdir(), "devsite-tree-")), "Caddyfile");
   writeFileSync(p, content);
@@ -72,10 +59,7 @@ function makeCaddyfile(content = "") {
 
 const IMPORT_LINE = "import devsite.d/*.caddy # devsite";
 
-// A site block in devsite's own rendered shape — what `devsite init` writes
-// for a host, and what older formats held inline. Deliberately hand-written,
-// not imported: the black-box claim above forbids reaching into the renderer,
-// so this shape must track renderHostFile in src/commands/init.ts by hand.
+// A site block in devsite's own rendered shape — what `devsite init` writes for a host, and what older formats held inline. Deliberately hand-written, not imported: the black-box claim above forbids reaching into the renderer, so this shape must track renderHostFile in src/commands/init.ts by hand.
 function devsiteBlock(host: string, project: string) {
   return [
     `# ${project}`,
@@ -90,9 +74,7 @@ function devsiteBlock(host: string, project: string) {
   ].join("\n");
 }
 
-// The global options block devsite creates in the Caddyfile when the user has
-// none — hand-written to track planCaddyfile in src/commands/init.ts, for the
-// same black-box reason.
+// The global options block devsite creates in the Caddyfile when the user has none — hand-written to track planCaddyfile in src/commands/init.ts, for the same black-box reason.
 function devsiteGlobalBlock() {
   const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
   return [
@@ -108,8 +90,7 @@ function devsiteGlobalBlock() {
   ].join("\n");
 }
 
-// devsite's v1 format: the marker-delimited managed region, as the previous
-// devsite version rendered it (hand-written for the same black-box reason).
+// devsite's v1 format: the marker-delimited managed region, as the previous devsite version rendered it (hand-written for the same black-box reason).
 function v1Region(opts: { kept?: string[]; blocks?: string[] } = {}) {
   return [
     "# >>> devsite v1 — managed region; `devsite init` regenerates it, edits here are lost >>>",
@@ -140,8 +121,7 @@ test("fresh init: the Caddyfile gets the global block and the import line; hosts
   const first = await reInit(repo, caddyfile);
   expect(first.changed).toBe(true);
   const tree = readTree(caddyfile);
-  // No user global block, so devsite creates one — in the Caddyfile, where
-  // global options normally live; the import line follows it.
+  // No user global block, so devsite creates one — in the Caddyfile, where global options normally live; the import line follows it.
   expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
   expect(tree["devsite.d/web.test.internal.caddy"]).toBe(
     `${devsiteBlock("web.test.internal", "web")}\n`,
@@ -259,8 +239,7 @@ test("v0-format migration: one run, foreign blocks move byte-for-byte, own host 
   const { changed } = await reInit(repo, caddyfile);
   expect(changed).toBe(true);
   const tree = readTree(caddyfile);
-  // The old devsite global block (nothing of the user's inside) re-renders
-  // fresh — its stale storage root must not survive the migration.
+  // The old devsite global block (nothing of the user's inside) re-renders fresh — its stale storage root must not survive the migration.
   expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
   expect(tree["devsite.d/other1.internal.caddy"]).toBe(`${foreign1}\n`);
   expect(tree["devsite.d/other2.internal.caddy"]).toBe(`${foreign2}\n`);
@@ -292,8 +271,7 @@ test("v1-region migration: foreign blocks move byte-for-byte, kept directives re
   expect(tree.Caddyfile).not.toContain(">>> devsite");
   expect(tree.Caddyfile).not.toContain("<<< devsite");
   expect(tree.Caddyfile).toContain(userSite);
-  // The kept directive lives in a user-owned global block, with devsite's two
-  // directives beside it — so 00-global.caddy must not exist.
+  // The kept directive lives in a user-owned global block, with devsite's two directives beside it — so 00-global.caddy must not exist.
   expect(tree.Caddyfile).toContain("\temail den@example.com");
   expect(tree.Caddyfile).toContain("\tlocal_certs");
   expect(tree["devsite.d/00-global.caddy"]).toBeUndefined();
@@ -349,8 +327,7 @@ test("rename cleanup: the stale host file of a still-present project is deleted,
 });
 
 test("a migrated foreign block never overwrites that host's existing devsite.d file", async () => {
-  // An upgraded sibling already wrote its own file; the old region still
-  // holds a stale copy of the same host. The file wins.
+  // An upgraded sibling already wrote its own file; the old region still holds a stale copy of the same host. The file wins.
   const fileContent = `${devsiteBlock("other.internal", "otherproj")}\n`;
   const staleBlock = devsiteBlock("other.internal", "otherproj-renamed-since");
   const caddyfile = makeCaddyfile(`${v1Region({ blocks: [staleBlock] })}\n`);

@@ -1,6 +1,4 @@
-// The state-dir resolver and the last-used stamp (#48). Everything is
-// injected — env/platform/home for the resolver, the target dir for the
-// stamp — so no test touches the real home directory.
+// The state-dir resolver and the last-used stamp (#48). Everything is injected — env/platform/home for the resolver, the target dir for the stamp — so no test touches the real home directory.
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -50,8 +48,7 @@ test("any host name lands in the stamp file, __proto__ included", async () => {
 test("concurrent stamps in one process never corrupt the file", async () => {
   const dir = makeStateDir();
   await Promise.all([stampLastUsed("a.internal", dir), stampLastUsed("b.internal", dir)]);
-  // One date may lose to the other (advisory data); the file must stay
-  // parseable and non-empty.
+  // One date may lose to the other (advisory data); the file must stay parseable and non-empty.
   const stamps = JSON.parse(readFileSync(join(dir, "last-used.json"), "utf8"));
   expect(Object.keys(stamps).length).toBeGreaterThanOrEqual(1);
 });

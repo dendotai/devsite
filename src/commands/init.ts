@@ -2,51 +2,25 @@
  * devsite init — one-time machine bootstrap for *.internal dev URLs over Tailscale.
  *
  * Design notes:
- *   - No ports. `package.json#devSite` declares only a host; each host gets a
- *     `respond 503` placeholder, and the devsite Vite plugin (vite.mjs) swaps in
- *     a live `reverse_proxy` to a free ephemeral port at `bun dev` time via
- *     Caddy's admin API. Any number of projects can run at once.
- *   - devsite owns the `devsite.d/` directory next to the Caddyfile — one
- *     `<host>.caddy` file per host, first line `# <project>`. The user's
- *     Caddyfile is edited exactly once, ever: a single
- *     `import devsite.d/*.caddy # devsite` line (the glob covers future files).
- *     Registering or renaming hosts only writes `devsite.d/` files; nothing in
- *     the user's file is ever re-parsed or regenerated. Global options live in
- *     the Caddyfile's own global options block, where every Caddy user expects
- *     them: devsite creates the block (once) when the user has none, or adds
- *     its two directives into the user's block (once). A block the user has
- *     touched is never rewritten — later runs only presence-check; a block
- *     that is purely devsite's own rendering re-renders fresh.
- *   - Older formats (v0 plain blocks, the v1 marker region) migrate in the same
- *     confirmed run: devsite-rendered blocks (recognized by their `respond
- *     "devsite: …" 503` placeholder) move into `devsite.d/` files — other
- *     projects' blocks byte-for-byte — and the old markers disappear.
- *   - Every write shows one multi-file diff and asks first. The first Caddyfile
- *     write ever saves `Caddyfile.pre-devsite` and no code path touches it
- *     again; `.bak` holds the Caddyfile before the latest run.
+ *   - No ports. `package.json#devSite` declares only a host; each host gets a `respond 503` placeholder, and the devsite Vite plugin (vite.mjs) swaps in a live `reverse_proxy` to a free ephemeral port at `bun dev` time via Caddy's admin API. Any number of projects can run at once.
+ *   - devsite owns the `devsite.d/` directory next to the Caddyfile — one `<host>.caddy` file per host, first line `# <project>`. The user's Caddyfile is edited exactly once, ever: a single `import devsite.d/*.caddy # devsite` line (the glob covers future files). Registering or renaming hosts only writes `devsite.d/` files; nothing in the user's file is ever re-parsed or regenerated. Global options live in the Caddyfile's own global options block, where every Caddy user expects them: devsite creates the block (once) when the user has none, or adds its two directives into the user's block (once). A block the user has touched is never rewritten — later runs only presence-check; a block that is purely devsite's own rendering re-renders fresh.
+ *   - Older formats (v0 plain blocks, the v1 marker region) migrate in the same confirmed run: devsite-rendered blocks (recognized by their `respond "devsite: …" 503` placeholder) move into `devsite.d/` files — other projects' blocks byte-for-byte — and the old markers disappear.
+ *   - Every write shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
  *
  * Owns the privileged Caddy setup so nobody has to assemble it by hand. It:
- *   - renders `devsite.d/` from every package.json#devSite (repo root, apps/*,
- *     packages/*) and imports it from /opt/homebrew/etc/Caddyfile,
- *   - pins Caddy's PKI storage to a fixed path so the local CA is identical no matter
- *     which user runs Caddy (a root service vs a foreground process) — the drift that
- *     silently broke phone cert-trust after a restart,
+ *   - renders `devsite.d/` from every package.json#devSite (repo root, apps/*, packages/*) and imports it from /opt/homebrew/etc/Caddyfile,
+ *   - pins Caddy's PKI storage to a fixed path so the local CA is identical no matter which user runs Caddy (a root service vs a foreground process) — the drift that silently broke phone cert-trust after a restart,
  *   - widens the internal leaf lifetime so certs don't lapse overnight,
  *   - runs Caddy as the always-on brew service.
  *
- * Run it as yourself — it shells out to sudo only for the privileged steps, so
- * the password prompt lands in your terminal:
+ * Run it as yourself — it shells out to sudo only for the privileged steps, so the password prompt lands in your terminal:
  *   bunx devsite init            # apply (prompts for sudo once)
  *   bunx devsite init --dry-run  # print the diff it would apply; touch nothing
- * A habitual `sudo bunx devsite init` still works: the run resolves the real
- * user behind sudo (SUDO_USER) and pins storage to *their* home. Only a true
- * root shell (no SUDO_USER) is refused.
+ * A habitual `sudo bunx devsite init` still works: the run resolves the real user behind sudo (SUDO_USER) and pins storage to *their* home. Only a true root shell (no SUDO_USER) is refused.
  *
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
-// Adding a version-sensitive node API here (fs.glob is the only one so far,
-// Node 22+)? Check engines.node in package.json, and consider a node-version
-// matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
+// Adding a version-sensitive node API here (fs.glob is the only one so far, Node 22+)? Check engines.node in package.json, and consider a node-version matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
 import { spawnSync } from "node:child_process";
 import { existsSync, globSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -56,14 +30,10 @@ import { type CliContext, processContext } from "../context";
 
 const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
 
-// The one line devsite ever puts in the user's Caddyfile. The trailing comment
-// tags the line for humans; the presence check tolerates it moving or losing
-// the comment.
+// The one line devsite ever puts in the user's Caddyfile. The trailing comment tags the line for humans; the presence check tolerates it moving or losing the comment.
 const IMPORT_LINE = "import devsite.d/*.caddy # devsite";
 const IMPORT_RE = /^import devsite\.d\/\*\.caddy(?:[ \t]+#.*)?$/m;
-// A pre-release devsite.d design kept the global options in this file; the
-// name stays reserved (and any such file is deleted) so a stray copy can
-// never inject a second global block.
+// A pre-release devsite.d design kept the global options in this file; the name stays reserved (and any such file is deleted) so a stray copy can never inject a second global block.
 const GLOBAL_FILE = "00-global.caddy";
 
 // Older devsite formats, recognized only to migrate away from them.
@@ -77,18 +47,14 @@ const KEPT_END = "\t# <<< kept <<<";
 // Where the pinned PKI storage lives; derived from the *human's* home once per run.
 type Pki = { storageRoot: string; caRootCert: string };
 
-// The storage pin must always point at the *human's* home — under `sudo bunx
-// devsite init` the process home is /var/root, and pinning that mints a fresh
-// CA no device trusts. Resolve the real user behind sudo, or refuse (null)
-// when there is no way back to one (a true root shell).
+// The storage pin must always point at the *human's* home — under `sudo bunx devsite init` the process home is /var/root, and pinning that mints a fresh CA no device trusts. Resolve the real user behind sudo, or refuse (null) when there is no way back to one (a true root shell).
 function realUserHome(ctx: CliContext): string | null {
   // Overridable so tests can exercise the root paths without actually being root.
   // An empty export must not count: Number("") is 0, which would read as root.
   const uid = ctx.env.DEVSITE_UID ? Number(ctx.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
   if (uid !== 0) return homedir();
   const user = ctx.env.SUDO_USER;
-  // `sudo` records the invoking user; a root shell (`su`, root login) records
-  // nothing — and "root behind the sudo" is just a root shell with extra steps.
+  // `sudo` records the invoking user; a root shell (`su`, root login) records nothing — and "root behind the sudo" is just a root shell with extra steps.
   if (user && user !== "root") {
     // The authoritative home, from Directory Services — not a guessed /Users/<name>.
     const r = exec("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], true);
@@ -110,10 +76,7 @@ function realUserHome(ctx: CliContext): string | null {
 
 type Route = { host: string; project: string };
 
-// Hosts are interpolated into `bash -c` command strings (verify) and into
-// devsite.d filenames, so anything but a plain hostname must never get past
-// discovery — a project package.json is not trusted input on a run that holds
-// sudo.
+// Hosts are interpolated into `bash -c` command strings (verify) and into devsite.d filenames, so anything but a plain hostname must never get past discovery — a project package.json is not trusted input on a run that holds sudo.
 const HOSTNAME_RE =
   /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
@@ -127,9 +90,7 @@ function discoverRoutes(repoRoot: string): Route[] {
     }
   }
   const routes: Route[] = [];
-  // Keyed lowercase: DNS is case-insensitive, and Caddy refuses a config with
-  // two site blocks for one address — that refusal would land only after the
-  // privileged write, as a dead always-on service.
+  // Keyed lowercase: DNS is case-insensitive, and Caddy refuses a config with two site blocks for one address — that refusal would land only after the privileged write, as a dead always-on service.
   const claimed = new Map<string, string>();
   for (const path of candidates) {
     if (!existsSync(path)) continue;
@@ -160,10 +121,7 @@ function discoverRoutes(repoRoot: string): Route[] {
   return routes.sort((a, b) => a.host.localeCompare(b.host));
 }
 
-// devsite-rendered site blocks: `# <project>\n<host> {` at column 0, holding
-// the devsite 503 placeholder. The placeholder check matters outside the v1
-// region: there the comment+block shape alone also matches user content (any
-// site block with a comment directly above it), which must never be migrated.
+// devsite-rendered site blocks: `# <project>\n<host> {` at column 0, holding the devsite 503 placeholder. The placeholder check matters outside the v1 region: there the comment+block shape alone also matches user content (any site block with a comment directly above it), which must never be migrated.
 const DEVSITE_BLOCK_RE = /^# .+\n(\S+) \{\n[\s\S]*?\n\}/gm;
 const PLACEHOLDER_RE = /^\trespond "devsite: /m;
 
@@ -187,9 +145,7 @@ function splitRegion(text: string): { region: string | null; outside: string } {
   return { region: text.slice(b.index, end), outside: text.slice(0, b.index) + text.slice(end) };
 }
 
-// A global options block is a bare `{` at column 0 (Caddy allows at most one,
-// and it must precede every site block). Nested braces are indented in any
-// conventionally formatted file, so the first column-0 `}` closes it.
+// A global options block is a bare `{` at column 0 (Caddy allows at most one, and it must precede every site block). Nested braces are indented in any conventionally formatted file, so the first column-0 `}` closes it.
 function findGlobalBlock(
   text: string,
 ): { start: number; end: number; full: string; inner: string } | null {
@@ -198,8 +154,7 @@ function findGlobalBlock(
   return { start: m.index, end: m.index + m[0].length, full: m[0], inner: m[1] ?? "" };
 }
 
-// What survives of a global options block once devsite's own directives and
-// comments are dropped — empty means the block was devsite's own rendering.
+// What survives of a global options block once devsite's own directives and comments are dropped — empty means the block was devsite's own rendering.
 function foreignGlobalDirectives(inner: string): string[] {
   const withoutStorage = inner.replace(/^[ \t]*storage file_system \{[\s\S]*?^[ \t]*\}\n?/m, "");
   return withoutStorage
@@ -231,9 +186,7 @@ function storagePinLines(pki: Pki): string[] {
   ];
 }
 
-// Placeholder only — the devsite Vite plugin swaps in a reverse_proxy to the
-// dev server's ephemeral port at runtime via the admin API. The first line
-// (`# <project>`) is the file's ownership record, read by rename cleanup.
+// Placeholder only — the devsite Vite plugin swaps in a reverse_proxy to the dev server's ephemeral port at runtime via the admin API. The first line (`# <project>`) is the file's ownership record, read by rename cleanup.
 function renderHostFile(r: Route): string {
   return [
     `# ${r.project}`,
@@ -254,8 +207,7 @@ function exec(cmd: string, args: string[], capture = false) {
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: "utf8",
   });
-  // outRaw exists for diff output, where trimming could eat a meaningful
-  // trailing context line (a lone space) and corrupt the patch.
+  // outRaw exists for diff output, where trimming could eat a meaningful trailing context line (a lone space) and corrupt the patch.
   return {
     status: r.status ?? 1,
     out: (r.stdout ?? "").trim(),
@@ -264,8 +216,7 @@ function exec(cmd: string, args: string[], capture = false) {
   };
 }
 
-// One planned file operation; next === null deletes the file. rel is the path
-// relative to the Caddyfile's directory — the label patch(1) applies against.
+// One planned file operation; next === null deletes the file. rel is the path relative to the Caddyfile's directory — the label patch(1) applies against.
 type Change = { rel: string; abs: string; next: string | null };
 
 let tmpSeq = 0;
@@ -275,9 +226,7 @@ function writeTmp(content: string): string {
   return p;
 }
 
-// diff's contract: exit 0 identical, exit 1 different — a failed spawn or any
-// other exit is trouble, and must never read as "there is a change" and walk
-// toward a privileged write over a diff nobody saw.
+// diff's contract: exit 0 identical, exit 1 different — a failed spawn or any other exit is trouble, and must never read as "there is a change" and walk toward a privileged write over a diff nobody saw.
 function unifiedDiff(c: Change): string {
   const current = existsSync(c.abs) ? c.abs : "/dev/null";
   const currentLabel = current === "/dev/null" ? "/dev/null" : c.rel;
@@ -291,8 +240,7 @@ function unifiedDiff(c: Change): string {
 }
 
 async function confirm(question: string, ctx: CliContext): Promise<boolean> {
-  // readline only ever calls output.write here (non-terminal prompts); the
-  // cast bridges Writer to the nominal stream type it asks for.
+  // readline only ever calls output.write here (non-terminal prompts); the cast bridges Writer to the nominal stream type it asks for.
   const rl = createInterface({
     input: ctx.stdin,
     output: ctx.stdout as unknown as NodeJS.WritableStream,
@@ -337,8 +285,7 @@ function applyPrivileged(
   }
   exec("sudo", ["pkill", "-x", "caddy"]); // kill any non-service foreground Caddy; ok if none
   sudo(["brew", "services", "restart", "caddy"], ctx);
-  // Trust the pinned CA in the Mac keychain. Caddy's own auto-trust needs an
-  // interactive prompt it can't get as a background service, so do it explicitly.
+  // Trust the pinned CA in the Mac keychain. Caddy's own auto-trust needs an interactive prompt it can't get as a background service, so do it explicitly.
   ctx.stdout.write("  sudo caddy trust\n");
   exec("sudo", ["caddy", "trust"]); // best-effort; ok if already trusted
 }
@@ -382,12 +329,9 @@ function pinnedIntermediateFp(storageRoot: string): string | null {
 function verify(routes: Route[], pki: Pki, ctx: CliContext) {
   const host = routes[0]?.host;
   if (!host) return;
-  // curl on macOS uses its own trust store, not the keychain devices trust, so
-  // check reachability with -k and verify trust separately via the cert chain.
-  // Any HTTP status counts: with no dev server running the placeholder answers
-  // 503; the Vite plugin swaps in the real upstream at `bun dev` time.
-  // curl prints "000" as the http_code when the connection itself fails, so
-  // success needs both a zero exit status and a real status code.
+  // curl on macOS uses its own trust store, not the keychain devices trust, so check reachability with -k and verify trust separately via the cert chain.
+  // Any HTTP status counts: with no dev server running the placeholder answers 503; the Vite plugin swaps in the real upstream at `bun dev` time.
+  // curl prints "000" as the http_code when the connection itself fails, so success needs both a zero exit status and a real status code.
   const r = exec(
     "bash",
     ["-c", `curl -k -sS -o /dev/null -w '%{http_code}' --max-time 8 https://${host}/`],
@@ -451,14 +395,11 @@ function printChecklist(routes: Route[], pki: Pki, ctx: CliContext) {
   );
 }
 
-// The planned end state of the user's Caddyfile, plus what the planning
-// learned along the way (migrated foreign blocks, whether the user owns the
-// global block, whether the local_certs warning applies).
+// The planned end state of the user's Caddyfile, plus what the planning learned along the way (migrated foreign blocks, whether the user owns the global block, whether the local_certs warning applies).
 type CaddyfilePlan = {
   next: string;
   migrated: { host: string; block: string }[];
-  // Non-null when the plan puts local_certs into a block the user owns — the
-  // path-specific first half of the warning; init appends the blast radius.
+  // Non-null when the plan puts local_certs into a block the user owns — the path-specific first half of the warning; init appends the blast radius.
   globalWarning: string | null;
 };
 
@@ -475,12 +416,10 @@ function planCaddyfile(existing: string, ownHosts: Set<string>, pki: Pki): Caddy
   let outside = rawOutside;
   let migrated: { host: string; block: string }[];
   if (region !== null) {
-    // v1: everything devsite-rendered lives inside the region; foreign hosts'
-    // blocks move to devsite.d byte-for-byte, own hosts re-render fresh.
+    // v1: everything devsite-rendered lives inside the region; foreign hosts' blocks move to devsite.d byte-for-byte, own hosts re-render fresh.
     migrated = devsiteBlocks(region).filter((b) => !ownHosts.has(b.host));
   } else {
-    // v0 (or a partial hand-rolled state): devsite-rendered blocks sit in the
-    // open file, recognizable by their 503 placeholder.
+    // v0 (or a partial hand-rolled state): devsite-rendered blocks sit in the open file, recognizable by their 503 placeholder.
     const blocks = devsiteBlocks(outside);
     for (const b of blocks) outside = outside.replace(b.block, "");
     outside = outside
@@ -495,15 +434,10 @@ function planCaddyfile(existing: string, ownHosts: Set<string>, pki: Pki): Caddy
   }
   const kept = keptDirectivesIn(region);
 
-  // The global options block lives in the Caddyfile — Caddy allows exactly
-  // one, first in the file. Three cases:
-  //   - none: devsite creates one with its two directives (plus any v1 "kept"
-  //     user directives returning home).
-  //   - purely devsite's own rendering (v0, or created by a previous run —
-  //     nothing of the user's inside): re-render fresh, so a stale storage
-  //     root can't survive a migration.
-  //   - anything the user touched: preserved byte-for-byte; devsite only
-  //     appends what's missing, once, and never rewrites it again.
+  // The global options block lives in the Caddyfile — Caddy allows exactly one, first in the file. Three cases:
+  //   - none: devsite creates one with its two directives (plus any v1 "kept" user directives returning home).
+  //   - purely devsite's own rendering (v0, or created by a previous run — nothing of the user's inside): re-render fresh, so a stale storage root can't survive a migration.
+  //   - anything the user touched: preserved byte-for-byte; devsite only appends what's missing, once, and never rewrites it again.
   let globalWarning: string | null = null;
   const g = findGlobalBlock(outside);
   let needBlock = g === null;
@@ -556,15 +490,12 @@ function planCaddyfile(existing: string, ownHosts: Set<string>, pki: Pki): Caddy
   return { next: `${trimmed}\n`, migrated, globalWarning };
 }
 
-// No argv knowledge here — run.ts parses flags and passes options plus the io
-// context. Fatal conditions return 1 (after explaining themselves); unexpected
-// errors throw and run.ts turns them into an exit code.
+// No argv knowledge here — run.ts parses flags and passes options plus the io context. Fatal conditions return 1 (after explaining themselves); unexpected errors throw and run.ts turns them into an exit code.
 export async function init(
   { dryRun }: { dryRun: boolean },
   ctx: CliContext = processContext(),
 ): Promise<number> {
-  // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the
-  // repo root. DEVSITE_CADDYFILE points tests at a scratch file.
+  // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the repo root. DEVSITE_CADDYFILE points tests at a scratch file.
   const cwd = ctx.cwd;
   const caddyfilePath = ctx.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile";
   const caddyDir = dirname(caddyfilePath);
@@ -592,10 +523,7 @@ export async function init(
   const existing = existsSync(caddyfilePath) ? readFileSync(caddyfilePath, "utf8") : "";
   const plan = planCaddyfile(existing, ownHosts, pki);
 
-  // The devsite.d tree this run wants: own hosts re-render fresh; migrated
-  // foreign blocks land byte-for-byte, but never over a file that already
-  // exists (an upgraded sibling project's own writes are newer than the block
-  // still sitting in the old region).
+  // The devsite.d tree this run wants: own hosts re-render fresh; migrated foreign blocks land byte-for-byte, but never over a file that already exists (an upgraded sibling project's own writes are newer than the block still sitting in the old region).
   const desired = new Map<string, string>();
   for (const r of routes) desired.set(`${r.host}.caddy`, renderHostFile(r));
   for (const b of plan.migrated) {
@@ -605,10 +533,7 @@ export async function init(
     }
   }
 
-  // Deletions: a stray 00-global.caddy (reserved name — see GLOBAL_FILE), and
-  // — the rename cleanup — a host file whose `# <project>` header names a
-  // project of THIS run but whose host is no longer declared. Files of other
-  // projects are never touched.
+  // Deletions: a stray 00-global.caddy (reserved name — see GLOBAL_FILE), and — the rename cleanup — a host file whose `# <project>` header names a project of THIS run but whose host is no longer declared. Files of other projects are never touched.
   const deletions: string[] = [];
   if (existsSync(devsiteDir)) {
     for (const name of globSync("*.caddy", { cwd: devsiteDir })) {
@@ -655,8 +580,7 @@ export async function init(
     );
   }
 
-  // Each piece ends with its own newline; concatenation is one multi-file
-  // unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
+  // Each piece ends with its own newline; concatenation is one multi-file unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
   const diff = changes.map(unifiedDiff).join("");
 
   if (dryRun) {

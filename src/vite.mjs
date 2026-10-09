@@ -1,38 +1,19 @@
 // devsite Vite plugin — the dev-time half of devsite.
 //
-// `devsite init` (src/commands/init.ts) is the one-time privileged bootstrap: local CA,
-// always-on Caddy service, and a placeholder route per `package.json#devSite`
-// host. This plugin is the per-run half: it has Vite bind an OS-assigned
-// ephemeral port (`port: 0`) and live-updates the host's route through Caddy's
-// admin API on localhost — no sudo, no configured ports, so any number of
-// projects can run simultaneously. The plugin never picks a port itself: the
-// number exists only once the server is bound (ADR 0001), so it is read in the
-// `listening` callback.
+// `devsite init` (src/commands/init.ts) is the one-time privileged bootstrap: local CA, always-on Caddy service, and a placeholder route per `package.json#devSite` host. This plugin is the per-run half: it has Vite bind an OS-assigned ephemeral port (`port: 0`) and live-updates the host's route through Caddy's admin API on localhost — no sudo, no configured ports, so any number of projects can run simultaneously. The plugin never picks a port itself: the number exists only once the server is bound (ADR 0001), so it is read in the `listening` callback.
 //
-// Plain .mjs (not .ts): Vite's config loader externalizes bare imports and
-// hands them to the Node runtime, which won't execute TypeScript from
-// node_modules. The published type surface lives in vite.types.d.mts — named
-// so it does NOT shadow this module in the typecheck program (tsc skips a .js
-// root file when an adjacent same-named .d.ts exists, and checkJs would then
-// never look at this file); the exports map wires the two together.
+// Plain .mjs (not .ts): Vite's config loader externalizes bare imports and hands them to the Node runtime, which won't execute TypeScript from node_modules. The published type surface lives in vite.types.d.mts — named so it does NOT shadow this module in the typecheck program (tsc skips a .js root file when an adjacent same-named .d.ts exists, and checkJs would then never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stampLastUsed } from "./state.mjs";
 
-// DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the
-// plugin at a local mock; read per call, so the override needs no
-// import-order care.
+// DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the plugin at a local mock; read per call, so the override needs no import-order care.
 const DEFAULT_ADMIN = "http://localhost:2019";
 function adminBase() {
   return process.env.DEVSITE_CADDY_ADMIN ?? DEFAULT_ADMIN;
 }
 
-// Node's fetch (undici) sends no Origin header and Caddy's admin API then sees
-// an empty origin and 403s; sending it explicitly satisfies the origin check.
-// Caller headers are normalized through Headers and the pin set last, so it
-// wins over any caller-supplied Origin in any casing (a plain spread is
-// case-sensitive and would keep both keys). Exported for the tests that
-// assert exactly that.
+// Node's fetch (undici) sends no Origin header and Caddy's admin API then sees an empty origin and 403s; sending it explicitly satisfies the origin check. Caller headers are normalized through Headers and the pin set last, so it wins over any caller-supplied Origin in any casing (a plain spread is case-sensitive and would keep both keys). Exported for the tests that assert exactly that.
 /**
  * @param {string} path
  * @param {RequestInit} [init]
@@ -63,8 +44,7 @@ function devsiteRoute(host, port) {
 async function registerRoute(host, port) {
   const res = await caddy("/config/apps/http/servers");
   if (!res.ok) throw new Error(`Caddy admin API: HTTP ${res.status}`);
-  // The slice of Caddy's config shape this function walks; everything else in
-  // the response is passed through untyped.
+  // The slice of Caddy's config shape this function walks; everything else in the response is passed through untyped.
   const servers =
     /** @type {Record<string, { listen?: unknown[], routes?: { match?: { host?: string[] }[] }[] }>} */ (
       (await res.json()) ?? {}
@@ -85,8 +65,7 @@ async function registerRoute(host, port) {
     }
   }
 
-  // Host not in the running config (devsite init not run for it yet) — append
-  // to the :443 server so this session still works; init makes it permanent.
+  // Host not in the running config (devsite init not run for it yet) — append to the :443 server so this session still works; init makes it permanent.
   const https = Object.entries(servers).find(([, s]) =>
     (s.listen ?? []).some((l) => String(l).endsWith(":443")),
   );
@@ -103,16 +82,12 @@ async function registerRoute(host, port) {
 }
 
 /**
- * `api.settled` is a test seam with no stability promise: it resolves once
- * the listening callback's async work (last-used stamp + route registration)
- * has settled, so tests can await it instead of polling logger output. It
- * stays pending if the server never reaches `listening`.
+ * `api.settled` is a test seam with no stability promise: it resolves once the listening callback's async work (last-used stamp + route registration) has settled, so tests can await it instead of polling logger output. It stays pending if the server never reaches `listening`.
  *
  * @returns {import("vite").Plugin & { api: { settled: Promise<void> } }}
  */
 export function devsite() {
-  // Assigned in one hook, read in another — the closure split defeats tsc's
-  // evolving-any inference, so the type is spelled out.
+  // Assigned in one hook, read in another — the closure split defeats tsc's evolving-any inference, so the type is spelled out.
   /** @type {string | undefined} */
   let host;
   let settle = () => {};
@@ -126,8 +101,7 @@ export function devsite() {
     api: { settled },
     config(userConfig) {
       const root = userConfig.root ?? process.cwd();
-      // A Vite root without a (readable, parseable) package.json simply has no
-      // devSite host — no-op, never crash the dev server over it.
+      // A Vite root without a (readable, parseable) package.json simply has no devSite host — no-op, never crash the dev server over it.
       let pkg;
       try {
         pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -138,16 +112,13 @@ export function devsite() {
       if (!host) return;
       return {
         server: {
-          // 0 = the OS assigns the port at bind time; there is no pre-picked
-          // number to race over. The real port is read in `configureServer`.
+          // 0 = the OS assigns the port at bind time; there is no pre-picked number to race over. The real port is read in `configureServer`.
           port: 0,
           // Listen beyond loopback so the Tailscale-reachable Caddy proxy
           // (https://<host>) can reach the dev server.
           host: true,
           allowedHosts: [host],
-          // Caddy terminates TLS on :443 and proxies to the dev port, so the
-          // HMR client must connect back over wss to the proxy host, not the
-          // raw port. Browse via https://<host> everywhere so HMR works.
+          // Caddy terminates TLS on :443 and proxies to the dev port, so the HMR client must connect back over wss to the proxy host, not the raw port. Browse via https://<host> everywhere so HMR works.
           ws: { host, protocol: "wss", clientPort: 443 },
         },
       };
@@ -165,8 +136,7 @@ export function devsite() {
           settle();
           return;
         }
-        // Last-used stamp (#48): fire-and-forget, independent of the Caddy
-        // registration outcome — the dev server started either way.
+        // Last-used stamp (#48): fire-and-forget, independent of the Caddy registration outcome — the dev server started either way.
         const stamped = stampLastUsed(h).catch((err) =>
           server.config.logger.warn(
             `devsite: could not record last-used date for ${h} (${err instanceof Error ? err.message : err})`,

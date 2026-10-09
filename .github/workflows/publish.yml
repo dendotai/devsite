@@ -1,13 +1,7 @@
-# Releases @den-ai/devsite from main. semantic-release computes the version
-# from the commits since the last release tag (fix -> patch, feat -> minor,
-# BREAKING CHANGE -> major), pushes the tag, writes GitHub release notes, and
-# publishes to npm — or exits without releasing when nothing releasable landed.
-# package.json stays at 0.0.0 on purpose: the real version lives in git tags
-# and on npm, so no release commits ever land on main.
-# Auth is trusted publishing (OIDC): npmjs.com trusts this exact workflow file
-# in this repo, so no token or secret exists anywhere. Provenance is automatic.
-# The full CI gate runs again here: a push to main may merge commits CI judged
-# separately, so the release must not trust green PRs alone.
+# Releases @den-ai/devsite from main. semantic-release computes the version from the commits since the last release tag (fix -> patch, feat -> minor, BREAKING CHANGE -> major), pushes the tag, writes GitHub release notes, and publishes to npm — or exits without releasing when nothing releasable landed.
+# package.json stays at 0.0.0 on purpose: the real version lives in git tags and on npm, so no release commits ever land on main.
+# Auth is trusted publishing (OIDC): npmjs.com trusts this exact workflow file in this repo, so no token or secret exists anywhere. Provenance is automatic.
+# The full CI gate runs again here: a push to main may merge commits CI judged separately, so the release must not trust green PRs alone.
 name: Publish
 
 on:
@@ -36,28 +30,18 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
-      # npm (not bun) publishes: trusted publishing needs npm >= 11.5.1, which
-      # node 24 ships. bun cannot publish via OIDC or emit provenance.
+      # npm (not bun) publishes: trusted publishing needs npm >= 11.5.1, which node 24 ships. bun cannot publish via OIDC or emit provenance.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      # Build once up front so dist/cli.js exists when npm first reads the
-      # manifest (silences "No bin file found"); prepack rebuilds it anyway
-      # after semantic-release writes the real version, so this copy is never
-      # what ships.
+      # Build once up front so dist/cli.js exists when npm first reads the manifest (silences "No bin file found"); prepack rebuilds it anyway after semantic-release writes the real version, so this copy is never what ships.
       - run: bun run build
-      # Major pinned: a new semantic-release major must arrive via a reviewed
-      # edit here, not silently at the next release. OIDC publish needs >= 25.
+      # Major pinned: a new semantic-release major must arrive via a reviewed edit here, not silently at the next release. OIDC publish needs >= 25.
       - run: npx semantic-release@25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # PRs to main are opened as "Release TBD" — the version does not exist
-      # until this run computes it. Once npm has the release, this step writes
-      # the real title ("Release v1.2.3") onto the PR whose merge triggered the
-      # run. Cosmetic and best-effort: by this point the release is already
-      # published, so a failure here must not paint the whole run red
-      # (continue-on-error).
+      # PRs to main are opened as "Release TBD" — the version does not exist until this run computes it. Once npm has the release, this step writes the real title ("Release v1.2.3") onto the PR whose merge triggered the run. Cosmetic and best-effort: by this point the release is already published, so a failure here must not paint the whole run red (continue-on-error).
       - name: Retitle the merged PR with the released version
         continue-on-error: true
         run: |
