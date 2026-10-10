@@ -1,7 +1,5 @@
 // Shared fixtures for the CLI and Vite-plugin test suites.
-// The setup import is a belt-and-braces double of the bunfig.toml preload:
-// the DEVSITE_STATE_DIR guard holds even when bun test runs from a cwd
-// where bunfig.toml is not picked up.
+// The setup import is a belt-and-braces double of the bunfig.toml preload: the DEVSITE_STATE_DIR guard holds even when bun test runs from a cwd where bunfig.toml is not picked up.
 import "./setup";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -23,8 +21,7 @@ export function sink() {
   };
 }
 
-// A stdin pre-loaded with `input`, posing as a TTY (or not) — what the
-// interactive confirm flow reads.
+// A stdin pre-loaded with `input`, posing as a TTY (or not) — what the interactive confirm flow reads.
 export function fakeStdin(input: string, isTTY: boolean) {
   const s = Readable.from([input]) as Readable & { isTTY?: boolean };
   s.isTTY = isTTY;
@@ -37,8 +34,7 @@ export type IoOpts = {
   stdin?: CliContext["stdin"];
 };
 
-// A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so
-// the ambient identity variables (DEVSITE_UID, SUDO_USER) can never leak in.
+// A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so the ambient identity variables (DEVSITE_UID, SUDO_USER) can never leak in.
 export function makeIo(opts: IoOpts = {}) {
   const stdout = sink();
   const stderr = sink();
@@ -59,9 +55,7 @@ export async function cli(argv: string[], opts: IoOpts = {}) {
   return { status, stdout: stdout.text(), stderr: stderr.text() };
 }
 
-// A throwaway repo whose apps/web/package.json declares a devSite host. The
-// project name matters to rename cleanup: same project + new host = rename;
-// a different project name = an unrelated repo.
+// A throwaway repo whose apps/web/package.json declares a devSite host. The project name matters to rename cleanup: same project + new host = rename; a different project name = an unrelated repo.
 export function makeRepo(host = "web.test.internal", project = "web") {
   const repo = mkdtempSync(join(tmpdir(), "devsite-repo-"));
   mkdirSync(join(repo, "apps", "web"), { recursive: true });
@@ -82,8 +76,7 @@ export function makeStateDir() {
   return mkdtempSync(join(tmpdir(), "devsite-state-"));
 }
 
-// A Caddyfile path in its own fresh scratch dir. Starts nonexistent; suites
-// that only dry-run share one, the round-trip suite writes and patches it.
+// A Caddyfile path in its own fresh scratch dir. Starts nonexistent; suites that only dry-run share one, the round-trip suite writes and patches it.
 export function scratchCaddyfile() {
   return join(mkdtempSync(join(tmpdir(), "devsite-none-")), "Caddyfile");
 }
@@ -98,8 +91,7 @@ export function makeViteRoot(pkg?: object) {
 export function viteConfigHook(plugin: Plugin) {
   const hook = plugin.config;
   if (typeof hook !== "function") throw new Error("config hook is not callable");
-  // The hook never reads `this`; bind once so call sites stay plain (its
-  // declared thisArg is Vite's ConfigPluginContext, which no test builds).
+  // The hook never reads `this`; bind once so call sites stay plain (its declared thisArg is Vite's ConfigPluginContext, which no test builds).
   return hook.bind(plugin as never);
 }
 
@@ -109,8 +101,7 @@ export function viteConfigureServerHook(plugin: Plugin) {
   return hook.bind(plugin as never);
 }
 
-// A fake Vite dev server: an EventEmitter posing as httpServer with a fixed
-// bound port, plus the captured logger output.
+// A fake Vite dev server: an EventEmitter posing as httpServer with a fixed bound port, plus the captured logger output.
 export function fakeViteServer(port: number) {
   const httpServer = new EventEmitter() as EventEmitter & { address: () => { port: number } };
   httpServer.address = () => ({ port });

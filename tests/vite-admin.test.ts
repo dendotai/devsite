@@ -1,9 +1,4 @@
-// The Vite plugin's route registration against a real local mock of the
-// Caddy admin API (#28). The mock mirrors Caddy's contract: any request
-// without an Origin header is 403'd — so a refactor that silently loses the
-// pinned header fails every test here, not one assertion. Tests point the
-// plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite
-// exists to cover).
+// The Vite plugin's route registration against a real local mock of the Caddy admin API (#28). The mock mirrors Caddy's contract: any request without an Origin header is 403'd — so a refactor that silently loses the pinned header fails every test here, not one assertion. Tests point the plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite exists to cover).
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -35,9 +30,7 @@ type MockOpts = {
   failWrite?: boolean;
 };
 
-// A real HTTP server posing as Caddy's admin API. Caddy 403s admin requests
-// whose Origin it can't verify; the mock enforces the same before anything
-// else, so the pinned header is load-bearing for every test in this file.
+// A real HTTP server posing as Caddy's admin API. Caddy 403s admin requests whose Origin it can't verify; the mock enforces the same before anything else, so the pinned header is load-bearing for every test in this file.
 async function startMockCaddy(opts: MockOpts = {}) {
   const requests: Recorded[] = [];
   const server = createServer((req, res) => {
@@ -109,10 +102,7 @@ function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
   return withEnv("DEVSITE_CADDY_ADMIN", url, fn);
 }
 
-// Drive the plugin end to end: config hook, then configureServer with a fake
-// bound server, then await the plugin's settled signal — route registration
-// and the last-used stamp have both finished (logged, wrote, or warned) when
-// it resolves, so no assertion below needs to poll.
+// Drive the plugin end to end: config hook, then configureServer with a fake bound server, then await the plugin's settled signal — route registration and the last-used stamp have both finished (logged, wrote, or warned) when it resolves, so no assertion below needs to poll.
 async function registerViaPlugin(port: number) {
   const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
   const plugin = devsite();
@@ -126,8 +116,7 @@ async function registerViaPlugin(port: number) {
   return { infos: fake.infos, warns: fake.warns };
 }
 
-// tests/setup.ts defaults DEVSITE_STATE_DIR to a shared scratch dir; suites
-// that assert on the stamp re-point it here per test.
+// tests/setup.ts defaults DEVSITE_STATE_DIR to a shared scratch dir; suites that assert on the stamp re-point it here per test.
 function withStateDir<T>(dir: string, fn: () => Promise<T>) {
   return withEnv("DEVSITE_STATE_DIR", dir, fn);
 }
@@ -281,8 +270,7 @@ test("write rejected: a warning, and the dev server keeps running", async () => 
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50127));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain("could not register");
-    // The 500 from the write, specifically — a 403 (lost Origin) must not
-    // satisfy this test.
+    // The 500 from the write, specifically — a 403 (lost Origin) must not satisfy this test.
     expect(warns.join("\n")).toContain("HTTP 500");
   } finally {
     await mock.close();
@@ -293,8 +281,7 @@ test("the pinned Origin wins over a caller-supplied Origin header, any casing", 
   const mock = await startMockCaddy();
   try {
     await withAdmin(mock.url, async () => {
-      // Capitalized on purpose: a plain object spread is case-sensitive and
-      // would keep both keys, sending "http://evil.example, <admin>".
+      // Capitalized on purpose: a plain object spread is case-sensitive and would keep both keys, sending "http://evil.example, <admin>".
       const res = await caddy("/config/apps/http/servers", {
         headers: { Origin: "http://evil.example", "x-extra": "kept" },
       });
@@ -330,8 +317,7 @@ test("a Headers-instance caller keeps its headers; the pin still wins", async ()
 
 test("without the env override, the admin endpoint is the local default", async () => {
   await withAdmin(undefined, async () => {
-    // The double cast bridges Bun's `typeof fetch` (it carries a `preconnect`
-    // static no plain function can satisfy).
+    // The double cast bridges Bun's `typeof fetch` (it carries a `preconnect` static no plain function can satisfy).
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
       Response.json({})) as unknown as typeof fetch);
     let seen: string[];

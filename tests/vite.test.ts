@@ -1,5 +1,4 @@
-// The plugin's config hook, in-process. Contract: no devSite host at the Vite
-// root — including no package.json at all — means "do nothing".
+// The plugin's config hook, in-process. Contract: no devSite host at the Vite root — including no package.json at all — means "do nothing".
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,9 +36,7 @@ test("devSite.host present: Vite binds an OS-assigned port (port 0) for that hos
   expect(result?.server?.strictPort).toBeUndefined();
 });
 
-// Listen-time registration: the port Caddy is told about must be the one the
-// server actually bound, read from httpServer.address() — never a pre-picked
-// number. fetch is stubbed so no real Caddy admin API is touched.
+// Listen-time registration: the port Caddy is told about must be the one the server actually bound, read from httpServer.address() — never a pre-picked number. fetch is stubbed so no real Caddy admin API is touched.
 afterEach(() => {
   (globalThis.fetch as { mockRestore?: () => void }).mockRestore?.();
 });
@@ -57,8 +54,7 @@ test("on listening, the Caddy route gets the server's bound port", async () => {
         routes: [{ match: [{ host: ["web.test.internal"] }] }],
       },
     });
-    // Bun's `typeof fetch` carries a `preconnect` static no plain function
-    // can satisfy — hence the double cast.
+    // Bun's `typeof fetch` carries a `preconnect` static no plain function can satisfy — hence the double cast.
   }) as unknown as typeof fetch);
 
   const plugin = devsite();
