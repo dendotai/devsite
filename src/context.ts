@@ -1,7 +1,4 @@
-// The CLI's io contact surface with the process, as one injectable value.
-// run() and the command handlers read and write only through this — tests pass
-// buffers and plain objects instead of spying on console or mutating process
-// state. Production uses processContext(), the real thing.
+// The CLI's io contact surface with the process, as one injectable value. run() and the command handlers read and write only through this — tests pass buffers and plain objects instead of spying on console or mutating process state. Production uses processContext(), the real thing.
 
 export type Writer = { write(chunk: string): unknown };
 
@@ -11,7 +8,13 @@ export type CliContext = {
   // confirm() reads the answer here; isTTY decides whether asking is possible.
   stdin: NodeJS.ReadableStream & { isTTY?: boolean };
   cwd: string;
-  env: Record<string, string | undefined>;
+  // The named keys are the full set of env vars the CLI reads; the index signature is what lets process.env (and test env objects) assign.
+  env: {
+    DEVSITE_UID?: string;
+    SUDO_USER?: string;
+    DEVSITE_CADDYFILE?: string;
+    [key: string]: string | undefined;
+  };
 };
 
 export function processContext(): CliContext {

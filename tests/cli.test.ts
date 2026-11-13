@@ -1,8 +1,5 @@
-// Spawn-based end-to-end tests of the bin shim (src/cli.ts): the real process
-// boundary — exit codes, stdout/stderr routing. In-process coverage of
-// parse/dispatch lives in run.test.ts (#9).
-// DEVSITE_CADDYFILE points every run at a scratch file so no test ever reads
-// or races the machine-global Caddyfile.
+// Spawn-based end-to-end tests of the bin shim (src/cli.ts): the real process boundary — exit codes, stdout/stderr routing. In-process coverage of parse/dispatch lives in run.test.ts (#9).
+// DEVSITE_CADDYFILE points every run at a scratch file so no test ever reads or races the machine-global Caddyfile.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -19,8 +16,7 @@ function devsite(
   args: string[],
   opts: { cwd?: string; caddyfile?: string; env?: Record<string, string> } = {},
 ) {
-  // Strip the identity variables from the inherited env so a test controls them
-  // fully via opts.env — an ambient SUDO_USER must never leak into a run.
+  // Strip the identity variables from the inherited env so a test controls them fully via opts.env — an ambient SUDO_USER must never leak into a run.
   const env: Record<string, string | undefined> = {
     ...process.env,
     DEVSITE_CADDYFILE: opts.caddyfile ?? SCRATCH,
@@ -80,19 +76,20 @@ test("init passes the guard: no routes in cwd exits 1 with the discovery error",
   expect(r.stderr).toContain("devsite-empty-");
 });
 
-test("init --dry-run renders the managed region and touches nothing", () => {
+test("init --dry-run renders the devsite.d tree and touches nothing", () => {
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo() });
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain("--dry-run: would write");
+  expect(r.stdout).toContain("--dry-run: would change");
+  expect(r.stdout).toContain("import devsite.d/*.caddy # devsite");
+  expect(r.stdout).toContain("+++ devsite.d/web.test.internal.caddy");
   expect(r.stdout).toContain("web.test.internal {");
-  expect(r.stdout).toContain(">>> devsite v1");
 });
 
 test("a single-package repo: root package.json#devSite is discovered", () => {
   const repo = mkdtempSync(join(tmpdir(), "devsite-single-"));
   writeFileSync(
     join(repo, "package.json"),
-    JSON.stringify({ name: "solo", devSite: { host: "solo.test.internal" } }),
+    JSON.stringify({ name: "solo", devSite: { name: "solo.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(0);
@@ -103,7 +100,7 @@ test("root and workspace devSite hosts are both discovered", () => {
   const repo = makeRepo();
   writeFileSync(
     join(repo, "package.json"),
-    JSON.stringify({ name: "rootproj", devSite: { host: "root.test.internal" } }),
+    JSON.stringify({ name: "rootproj", devSite: { name: "root.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(0);
@@ -118,31 +115,43 @@ test("a host that is not a plain hostname is rejected at discovery", () => {
   expect(r.stderr).toContain("a.internal; touch pwned");
 });
 
-test("two packages declaring the same devSite host are rejected at discovery", () => {
-  const repo = makeRepo(); // apps/web → web.test.internal
+test("two packages declaring the same devSite name are rejected at discovery", () => {
+  const repo = makeRepo(); // apps/web → devSite.name "web.test"
   mkdirSync(join(repo, "apps", "api"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { host: "web.test.internal" } }),
+    JSON.stringify({ name: "api", devSite: { name: "web.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("web.test.internal");
+  expect(r.stderr).toContain('devSite.name "web.test"');
   // The message must name both claimants so the fix is findable.
   expect(r.stderr).toContain("api");
   expect(r.stderr).toContain("web");
 });
 
-test("hosts differing only in case are still duplicates (DNS is case-insensitive)", () => {
+test("names differing only in case are still duplicates (DNS is case-insensitive)", () => {
   const repo = makeRepo();
   mkdirSync(join(repo, "apps", "api"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { host: "WEB.test.internal" } }),
+    JSON.stringify({ name: "api", devSite: { name: "WEB.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("web.test.internal");
+  expect(r.stderr).toContain('devSite.name "web.test"');
+});
+
+test("the old devSite.host field is refused with the field that replaced it", () => {
+  const repo = makeRepo();
+  writeFileSync(
+    join(repo, "apps", "web", "package.json"),
+    JSON.stringify({ name: "web", devSite: { host: "web.test.internal" } }),
+  );
+  const r = devsite(["init", "--dry-run"], { cwd: repo });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("devSite.host");
+  expect(r.stderr).toContain("devSite.name");
 });
 
 // --- running as root: resolve the real user behind sudo, or refuse (#12) ---
@@ -154,9 +163,7 @@ test("root with no SUDO_USER refuses: a true root shell cannot pin a wrong CA pa
   expect(r.stderr).toContain("without sudo");
 });
 
-// darwin-only: the happy path resolves SUDO_USER's home through dscl (macOS
-// Directory Services), which Linux CI runners don't have — there the run
-// correctly refuses, which is the adjacent tests' territory.
+// darwin-only: the happy path resolves SUDO_USER's home through dscl (macOS Directory Services), which Linux CI runners don't have — there the run correctly refuses, which is the adjacent tests' territory.
 test.skipIf(process.platform !== "darwin")(
   "under sudo the pinned storage is the real user's home, not root's",
   () => {
@@ -220,10 +227,10 @@ test("pre-existing non-devsite content is never deleted (Homebrew default shape)
   // A unified diff always shows deletions as `-` lines; their absence proves survival.
   expect(r.stdout).not.toContain("-:80");
   expect(r.stdout).not.toContain('-\trespond "hi"');
-  expect(r.stdout).toContain(">>> devsite v1");
+  expect(r.stdout).toContain("+import devsite.d/*.caddy # devsite");
 });
 
-test("pre-region (v0) devsite files migrate: other repos' blocks are kept", () => {
+test("pre-region (v0) devsite files migrate: other repos' blocks move into devsite.d", () => {
   const caddyfile = makeCaddyfile(
     [
       "# Generated by `devsite init` — do not edit by hand.",
@@ -245,32 +252,25 @@ test("pre-region (v0) devsite files migrate: other repos' blocks are kept", () =
   );
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), caddyfile });
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain("1 block(s) from other repos kept");
-  // The old file's global block is devsite's own — nothing foreign to keep.
-  expect(r.stdout).not.toContain(">>> kept");
+  expect(r.stdout).toContain("migrating 1 host file(s) from other repos into devsite.d/");
+  expect(r.stdout).toContain("+++ devsite.d/other.internal.caddy");
+  // The old file's global block is devsite's own — no user directives, so no warning.
+  expect(r.stderr).not.toContain("global options block");
 });
 
-test("re-running against devsite's own output is a no-op", () => {
-  const repo = makeRepo();
-  const first = devsite(["init", "--dry-run"], { cwd: repo });
-  expect(first.status).toBe(0);
-  // Reconstruct the rendered file from the diff's added lines (fresh file → all `+`).
-  const content = first.stdout
-    .split("\n")
-    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
-    .map((l) => l.slice(1))
-    .join("\n");
-  const caddyfile = makeCaddyfile(`${content}\n`);
-  const again = devsite(["init", "--dry-run"], { cwd: repo, caddyfile });
-  expect(again.status).toBe(0);
-  expect(again.stdout).toContain("already up to date");
-});
+// Idempotence against init's own output is pinned by the round-trip suite
+// (roundtrip.test.ts), which applies the printed diff with patch(1) and
+// asserts a second dry-run reports "already up to date".
 
-test("a foreign global options block is merged into the region with a warning", () => {
+test("a user's global options block gets devsite's directives added, with a warning", () => {
   const caddyfile = makeCaddyfile('{\n\temail den@example.com\n}\n\n:8080 {\n\trespond "ok"\n}\n');
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), caddyfile });
   expect(r.status).toBe(0);
   expect(r.stderr).toContain("global options block");
-  expect(r.stdout).toContain(">>> kept");
+  // The directives land inside the user's block; the block itself survives.
+  expect(r.stdout).toContain("+\tlocal_certs");
+  expect(r.stdout).not.toContain("-\temail den@example.com");
   expect(r.stdout).not.toContain("-:8080");
+  // The user owns the global block — devsite must not also create its own.
+  expect(r.stdout).not.toContain("00-global.caddy");
 });

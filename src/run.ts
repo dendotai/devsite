@@ -1,17 +1,6 @@
-// The whole CLI surface as a plain function: argv in, exit code out — so it is
-// testable in-process (run(["--help"]) === 0) without spawning anything. All
-// io goes through an injectable CliContext.
+// The whole CLI surface as a plain function: argv in, exit code out — so it is testable in-process (run(["--help"]) === 0) without spawning anything. All io goes through an injectable CliContext.
 //
-// run() is three named steps: parse (argv → values/positionals, strict per
-// command), resolve (a COMMANDS table lookup and nothing else), then the
-// command's handler. Commands are data: one COMMANDS row per command carries
-// its help lines, its flags, and its handler, and USAGE is generated from the
-// table — help text and the parser cannot drift apart. Command-like global
-// flags (--help, --version) map to their command through GLOBAL_FLAGS'
-// `command` field — adding one adds a table entry, never a branch. parseArgs
-// is strict, scoped per command: an unknown flag (--dyr-run), or a command
-// flag outside its command (--dry-run with no init), fails with usage instead
-// of silently reaching the privileged bootstrap.
+// run() is three named steps: parse (argv → values/positionals, strict per command), resolve (a COMMANDS table lookup and nothing else), then the command's handler. Commands are data: one COMMANDS row per command carries its help lines, its flags, and its handler, and USAGE is generated from the table — help text and the parser cannot drift apart. Command-like global flags (--help, --version) map to their command through GLOBAL_FLAGS' `command` field — adding one adds a table entry, never a branch. parseArgs is strict, scoped per command: an unknown flag (--dyr-run), or a command flag outside its command (--dry-run with no init), fails with usage instead of silently reaching the privileged bootstrap.
 import { parseArgs } from "node:util";
 import pkg from "../package.json";
 import { init } from "./commands/init";
@@ -22,8 +11,7 @@ type FlagDef = {
   short?: string;
   default?: boolean;
   help: string;
-  // A flag that IS a command: resolve dispatches to this COMMANDS row when the
-  // flag is set. Only meaningful on GLOBAL_FLAGS entries.
+  // A flag that IS a command: resolve dispatches to this COMMANDS row when the flag is set. Only meaningful on GLOBAL_FLAGS entries.
   command?: string;
 };
 
@@ -116,8 +104,7 @@ type Parsed =
   | { ok: false; message: string };
 
 function parse(argv: string[]): Parsed {
-  // First pass only learns which command's flags are in scope; strict: false
-  // tolerates the flags the second, strict pass will judge.
+  // First pass only learns which command's flags are in scope; strict: false tolerates the flags the second, strict pass will judge.
   const loose = parseArgs({
     args: argv,
     options: toParseArgsOptions(GLOBAL_FLAGS),
@@ -144,8 +131,7 @@ function parse(argv: string[]): Parsed {
 type Resolution = { ok: true; name: string; command: Command } | { ok: false; message?: string };
 
 function resolve({ commandName, values, positionals }: Parsed & { ok: true }): Resolution {
-  // The flag form of a command wins over a positional (`devsite init --help`
-  // is a help run) — matching git's behavior.
+  // The flag form of a command wins over a positional (`devsite init --help` is a help run) — matching git's behavior.
   for (const [flag, def] of Object.entries(GLOBAL_FLAGS)) {
     if (def.command === undefined || values[flag] !== true) continue;
     const command = COMMANDS[def.command];
