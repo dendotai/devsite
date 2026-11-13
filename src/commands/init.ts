@@ -27,7 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { type CliContext, processContext } from "../context";
-import { devSiteName, internalHost } from "../names.mjs";
+import { devSiteName, hostsOf } from "../names.mjs";
 
 const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
 
@@ -104,7 +104,7 @@ function discoverRoutes(repoRoot: string): Route[] {
       if (!HOSTNAME_RE.test(name)) {
         throw new Error(`devSite.name ${JSON.stringify(name)} in ${path} is not a plain hostname`);
       }
-      const host = internalHost(name);
+      const host = hostsOf(name).internal;
       const project = pkg.name ?? relative(repoRoot, path);
       const owner = claimed.get(host.toLowerCase());
       if (owner !== undefined) {

@@ -5,7 +5,7 @@
 // Plain .mjs (not .ts): Vite's config loader externalizes bare imports and hands them to the Node runtime, which won't execute TypeScript from node_modules. The published type surface lives in vite.types.d.mts — named so it does NOT shadow this module in the typecheck program (tsc skips a .js root file when an adjacent same-named .d.ts exists, and checkJs would then never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { devSiteName, internalHost, localhostHost } from "./names.mjs";
+import { devSiteName, hostsOf } from "./names.mjs";
 import { stampLastUsed } from "./state.mjs";
 
 // DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the plugin at a local mock; read per call, so the override needs no import-order care.
@@ -111,7 +111,7 @@ export function devsite() {
       }
       name = devSiteName(pkg, join(root, "package.json"));
       if (!name) return;
-      const host = internalHost(name);
+      const host = hostsOf(name).internal;
       return {
         server: {
           // 0 = the OS assigns the port at bind time; there is no pre-picked number to race over. The real port is read in `configureServer`.
@@ -130,8 +130,7 @@ export function devsite() {
         settle();
         return;
       }
-      const h = internalHost(name);
-      const local = localhostHost(name);
+      const { internal: h, localhost: local } = hostsOf(name);
       server.httpServer?.once("listening", () => {
         const addr = server.httpServer?.address();
         const p = typeof addr === "object" && addr ? addr.port : undefined;

@@ -1,10 +1,7 @@
 // The one place a project's devSite.name becomes its host names.
 
 /** @param {string} name */
-export const internalHost = (name) => `${name}.internal`;
-
-/** @param {string} name */
-export const localhostHost = (name) => `${name}.localhost`;
+export const hostsOf = (name) => ({ internal: `${name}.internal`, localhost: `${name}.localhost` });
 
 /**
  * The project's devSite.name, or undefined when the package declares none. The field replaced `devSite.host` in 1.0, so the old field throws instead of being read.
