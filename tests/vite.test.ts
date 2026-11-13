@@ -79,6 +79,45 @@ test("on listening, one route serves both the .internal and the .localhost host"
   expect(String(writes[0]?.[1]?.body)).toContain("localhost:54321");
 });
 
+test("a devSite.name that keeps the old .internal suffix is refused with the bare name", () => {
+  const plugin = devsite();
+  expect(() =>
+    viteConfigHook(plugin)(
+      { root: makeViteRoot({ name: "web", devSite: { name: "web.internal" } }) },
+      ENV,
+    ),
+  ).toThrow('write "web"');
+});
+
+test("a devSite.name that is not a string is refused", () => {
+  const plugin = devsite();
+  expect(() =>
+    viteConfigHook(plugin)({ root: makeViteRoot({ name: "web", devSite: { name: 42 } }) }, ENV),
+  ).toThrow("not a plain hostname");
+});
+
+test("a mixed-case devSite.name matches the lowercase route Caddy holds", async () => {
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+    _url: unknown,
+    init?: RequestInit,
+  ) => {
+    if (init?.method) return new Response("{}", { status: 200 });
+    return Response.json({
+      srv0: { listen: [":443"], routes: [{ match: [{ host: ["web.test.internal"] }] }] },
+    });
+  }) as unknown as typeof fetch);
+  const plugin = devsite();
+  await viteConfigHook(plugin)(
+    { root: makeViteRoot({ name: "web", devSite: { name: "Web.Test" } }) },
+    ENV,
+  );
+  const fake = fakeViteServer(54321);
+  viteConfigureServerHook(plugin)(fake.server as never);
+  fake.httpServer.emit("listening");
+  await plugin.api.settled;
+  expect(fetchSpy.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+});
+
 test("a devSite.name that is not a plain hostname stops the dev server", () => {
   const plugin = devsite();
   expect(() =>

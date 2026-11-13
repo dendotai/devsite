@@ -5,7 +5,11 @@ export const HOSTNAME_RE =
   /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
 /** @param {string} name */
-export const hostsOf = (name) => ({ internal: `${name}.internal`, localhost: `${name}.localhost` });
+// Lowercase: Caddy keeps a route's hosts in lowercase, so a mixed-case name would never match the route `devsite init` wrote.
+export const hostsOf = (name) => {
+  const base = name.toLowerCase();
+  return { internal: `${base}.internal`, localhost: `${base}.localhost` };
+};
 
 /**
  * The project's devSite.name, or undefined when the package declares none. The field replaced `devSite.host` in 1.0, so the old field throws instead of being read.
@@ -23,6 +27,12 @@ export function devSiteName(pkg, where) {
   const name = pkg.devSite?.name;
   if (name !== undefined && (typeof name !== "string" || !HOSTNAME_RE.test(name))) {
     throw new Error(`devSite.name ${JSON.stringify(name)} in ${where} is not a plain hostname`);
+  }
+  // The likeliest upgrade slip: the key renamed, the old value kept.
+  if (typeof name === "string" && /\.(internal|localhost)$/i.test(name)) {
+    throw new Error(
+      `devSite.name ${JSON.stringify(name)} in ${where} carries a suffix devsite adds itself: write ${JSON.stringify(name.replace(/\.(internal|localhost)$/i, ""))}`,
+    );
   }
   return name;
 }

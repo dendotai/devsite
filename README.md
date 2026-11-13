@@ -34,7 +34,7 @@ flowchart LR
     I[devsite init] -. "write Caddyfile (one-time, sudo)" .-> C
 ```
 
-The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, the host reverts to the `503` placeholder until you restart the dev server.
+The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, `<name>.internal` reverts to the `503` placeholder and `<name>.localhost` stops answering until you restart the dev server.
 
 ## Quick start
 

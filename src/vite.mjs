@@ -122,8 +122,8 @@ export function devsite() {
           // (https://<host>) can reach the dev server.
           host: true,
           allowedHosts: [host],
-          // Caddy terminates TLS on :443 and proxies to the dev port, so the HMR client must connect back over wss to the proxy host, not the raw port. Browse via https://<host> everywhere so HMR works.
-          ws: { host, protocol: "wss", clientPort: 443 },
+          // Caddy terminates TLS on :443 and proxies to the dev port, so the HMR client must connect back over wss on 443, not the raw port. No `host`: the client then uses the page's own host, `.internal` or `.localhost`.
+          ws: { protocol: "wss", clientPort: 443 },
         },
       };
     },
