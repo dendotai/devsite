@@ -1,12 +1,10 @@
 # devsite
 
-One project = one stable `https://<name>.internal` URL. No port numbers, no port coordination between projects, HTTPS everywhere — and the same URL works on your phone over Tailscale. Any number of projects run simultaneously.
+One project = one stable `https://<name>.internal` URL, plus `https://<name>.localhost` on the machine itself. No port numbers, no port coordination between projects, HTTPS everywhere — and the same URL works on your phone over Tailscale. Any number of projects run simultaneously.
 
 With a stock dev server, a project's address is a port number. `localhost:3000` is taken, so this project runs on 3001 — on this machine, today; another machine or a restarted server can pick a different number. Testing on a phone requires the machine's LAN IP, and browser APIs that require a secure context (camera, clipboard, service workers) do not work over plain HTTP. devsite gives each project a fixed name instead of a port.
 
 <!-- TODO: demo GIF — ~20 s screen recording: `devsite init` → `bun dev` → https://myapp.internal opens on the desktop → the same URL opens on a phone. -->
-
-> **Status:** pre-1.0, being extracted from two working projects. The API may still move.
 
 ## How it works
 
@@ -27,12 +25,12 @@ devsite has two parts:
   - It only updates a route that `devsite init` wrote. For a name `init` has not seen yet (a new project, a renamed one), `bun dev` warns that Caddy has no route for `<name>.internal`, names `bunx devsite init`, and serves on the raw local URL.
   - It also routes `<name>.localhost` to the same port. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
-```mermaid
-flowchart LR
-    B[Browser] -- "https://myapp.internal" --> C["Caddy :443 (TLS from local CA)"]
-    C -- reverse_proxy --> V["Vite dev server (ephemeral port)"]
-    P[Vite plugin] -. "swap route (admin API, localhost)" .-> C
-    I[devsite init] -. "write Caddyfile (one-time, sudo)" .-> C
+```text
+Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA)
+                                        │  ▲
+                          reverse_proxy │  ├── devsite init: writes the Caddyfile (one-time, sudo)
+                                        ▼  └── Vite plugin: swaps the route (admin API, localhost)
+                                      Vite dev server (ephemeral port)
 ```
 
 The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, `<name>.internal` reverts to the `503` placeholder and `<name>.localhost` stops answering until you restart the dev server.
@@ -77,10 +75,11 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
 
    *What this changed:* macOS now sends `*.internal` DNS queries to your local dnsmasq (via `/etc/resolver/internal`), which answers with `127.0.0.1`.
 
-4. **Run the bootstrap** from the repo root:
+4. **Add devsite to the project and run the bootstrap** from the repo root:
 
    ```sh
-   devsite init            # or: devsite init --dry-run to preview
+   bun add -d @den-ai/devsite
+   bunx devsite init       # or: bunx devsite init --dry-run to preview
    ```
 
    *What this changed:* wrote your host's file into `/opt/homebrew/etc/devsite.d/`, and set up `/opt/homebrew/etc/Caddyfile` once — one `import devsite.d/*.caddy` line, plus a global options block pinning certificate storage and enabling `local_certs` (added into your own block if you had one; an existing Caddyfile is backed up to `Caddyfile.bak` first; the very first run also saves `Caddyfile.pre-devsite`, which is never touched again), restarted Caddy as a `brew services` background service, pinned Caddy's certificate storage to `~/Library/Application Support/Caddy`, and ran `sudo caddy trust` to add Caddy's local CA root to your system trust store — that's the whole certificate-trust step for this machine. It ends with a verification report (TLS answering, cert chain, DNS) so you can see what works before opening a browser. Every write shows a full diff and asks for confirmation first; `--dry-run` prints the same diff and writes nothing.
@@ -104,7 +103,7 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
 
    Open `https://myapp.internal`. The certificate is trusted, and HMR runs over `wss`.
 
-Each additional project needs only steps 2 and 5 plus a re-run of `devsite init`. Because no project declares a port, projects never coordinate with each other and any number can run at once.
+Each additional project needs only steps 2, 4, and 5. Because no project declares a port, projects never coordinate with each other and any number can run at once.
 
 ### Step 2 — your other devices (optional)
 
@@ -188,7 +187,7 @@ One hazard remains, by design: devsite cannot stop an **older installed copy** f
 
 ## Requirements
 
-- **Node.js ≥ 22** — the published CLI runs under plain Node (`npx devsite init` works without bun). Developing the repo itself still uses bun.
+- **Node.js ≥ 22** — the published CLI runs under plain Node (`npx @den-ai/devsite init` works without bun). Developing the repo itself still uses bun.
 - **Caddy ≥ 2**, installed through Homebrew (`devsite init` manages it with `brew services`).
 - **Vite** — the plugin is developed against Vite 8.
 - **macOS on Apple Silicon**, currently. The Homebrew prefix `/opt/homebrew` and macOS paths are hardcoded; supporting Linux or Intel Macs requires making them configurable, which has not been done yet. Windows is out of scope.
