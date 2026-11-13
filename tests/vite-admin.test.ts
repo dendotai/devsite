@@ -244,13 +244,15 @@ test("the admin API does not answer: a warning that asks whether Caddy runs", as
   expect(warns.join("\n")).toContain("is the Caddy service running");
 });
 
-test("config fetch fails: a warning, and the dev server keeps running", async () => {
+test("config read answers an error status: a warning with the status and `devsite init`", async () => {
   const mock = await startMockCaddy({ failConfig: true });
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50125));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain("could not register");
     expect(warns.join("\n")).toContain("HTTP 500");
+    expect(warns.join("\n")).toContain("bunx devsite init");
+    expect(warns.join("\n")).not.toContain("is the Caddy service running");
   } finally {
     await mock.close();
   }
@@ -267,6 +269,7 @@ test("write rejected: a warning, and the dev server keeps running", async () => 
     expect(warns.join("\n")).toContain("could not register");
     // The 500 from the write, specifically — a 403 (lost Origin) must not satisfy this test.
     expect(warns.join("\n")).toContain("HTTP 500");
+    expect(warns.join("\n")).not.toContain("is the Caddy service running");
   } finally {
     await mock.close();
   }

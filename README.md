@@ -178,7 +178,7 @@ Replace `"devSite": { "host": "myapp.internal" }` with `"devSite": { "name": "my
 
 ## Upgrading to 1.0: `bun dev` needs `devsite init` first
 
-A project that never ran `devsite init` gets a warning on `bun dev` and no `https://` URL. Run `bunx devsite init` in the project once.
+A project that never ran `devsite init` gets a warning on `bun dev` and no `https://` URL. Run `bunx devsite init` from the repo root once.
 
 ## Upgrading from an older devsite (pre-`devsite.d`)
 

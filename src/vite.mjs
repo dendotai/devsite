@@ -39,18 +39,23 @@ function devsiteRoute(hosts, port) {
 }
 
 /**
- * One route for all the project's hosts, found by the first: the one `devsite init` gives a placeholder route. Only that route is ever updated, in place: Caddy matches routes top to bottom, and init's Caddyfile sorts an exact host above a wildcard, so its position is the one where the host answers (#15).
+ * One route for all the project's hosts, found by the first: the one `devsite init` gives a placeholder route. Only that route is updated, in place: Caddy matches routes top to bottom, and its Caddyfile adapter sorts an exact host above a wildcard, so its position is the one where the host answers (#15).
  *
  * @param {string[]} hosts
  * @param {number} port
  */
 async function registerRoute(hosts, port) {
-  const res = await caddy("/config/apps/http/servers").catch(() => {
+  const res = await caddy("/config/apps/http/servers").catch((cause) => {
     throw new Error(
       "the Caddy admin API does not answer — is the Caddy service running? `bunx devsite init` from the repo root sets it up",
+      { cause },
     );
   });
-  if (!res.ok) throw new Error(`Caddy admin API: HTTP ${res.status}`);
+  // A Caddy that runs with no HTTP app (init never ran on this machine) answers 400 here.
+  if (!res.ok)
+    throw new Error(
+      `Caddy admin API: HTTP ${res.status} for its HTTP servers — \`bunx devsite init\` from the repo root sets them up`,
+    );
   // The slice of Caddy's config shape this function walks; everything else in the response is passed through untyped.
   const servers = /** @type {Record<string, { routes?: { match?: { host?: string[] }[] }[] }>} */ (
     (await res.json()) ?? {}
