@@ -27,22 +27,24 @@ export function caddy(path, init = {}) {
 }
 
 /**
- * @param {string} host
+ * @param {string[]} hosts
  * @param {number} port
  */
-function devsiteRoute(host, port) {
+function devsiteRoute(hosts, port) {
   return {
-    match: [{ host: [host] }],
+    match: [{ host: hosts }],
     handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `localhost:${port}` }] }],
     terminal: true,
   };
 }
 
 /**
- * @param {string} host
+ * One route for all the project's hosts, found by the first: the one `devsite init` gives a placeholder route.
+ *
+ * @param {string[]} hosts
  * @param {number} port
  */
-async function registerRoute(host, port) {
+async function registerRoute(hosts, port) {
   const res = await caddy("/config/apps/http/servers");
   if (!res.ok) throw new Error(`Caddy admin API: HTTP ${res.status}`);
   // The slice of Caddy's config shape this function walks; everything else in the response is passed through untyped.
@@ -53,13 +55,13 @@ async function registerRoute(host, port) {
 
   for (const [name, srv] of Object.entries(servers)) {
     const i = (srv.routes ?? []).findIndex((r) =>
-      (r.match ?? []).some((m) => (m.host ?? []).includes(host)),
+      (r.match ?? []).some((m) => (m.host ?? []).includes(hosts[0] ?? "")),
     );
     if (i !== -1) {
       const patch = await caddy(`/config/apps/http/servers/${name}/routes/${i}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(devsiteRoute(host, port)),
+        body: JSON.stringify(devsiteRoute(hosts, port)),
       });
       if (!patch.ok) throw new Error(`Caddy route update: HTTP ${patch.status}`);
       return;
@@ -77,7 +79,7 @@ async function registerRoute(host, port) {
   const post = await caddy(`/config/apps/http/servers/${https[0]}/routes`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(devsiteRoute(host, port)),
+    body: JSON.stringify(devsiteRoute(hosts, port)),
   });
   if (!post.ok) throw new Error(`Caddy route append: HTTP ${post.status}`);
 }
@@ -144,24 +146,18 @@ export function devsite() {
             `devsite: could not record last-used date for ${h} (${err instanceof Error ? err.message : err})`,
           ),
         );
-        /**
-         * @param {string} name
-         * @param {string} hint
-         */
-        const register = (name, hint) =>
-          registerRoute(name, p).then(
-            () => server.config.logger.info(`devsite: https://${name} → localhost:${p}`),
-            (err) =>
-              server.config.logger.warn(
-                `devsite: could not register https://${name} with Caddy (${err instanceof Error ? err.message : err}).${hint}`,
-              ),
-          );
-        // The localhost name registers second, so a fresh Caddy config already has the :443 server the host's route brings.
-        const registered = register(
-          h,
-          " Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
-            "Falling back to the raw local URL below — HMR only works via the https host.",
-        ).then(() => register(local, ""));
+        const registered = registerRoute([h, local], p).then(
+          () =>
+            server.config.logger.info(
+              `devsite: https://${h} and https://${local} → localhost:${p}`,
+            ),
+          (err) =>
+            server.config.logger.warn(
+              `devsite: could not register https://${h} with Caddy (${err instanceof Error ? err.message : err}). ` +
+                "Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
+                "Falling back to the raw local URL below — HMR only works via the https host.",
+            ),
+        );
         // Every branch above is handled, so no promise can reject.
         void Promise.all([stamped, registered]).then(settle);
       });

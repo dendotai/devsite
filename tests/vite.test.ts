@@ -51,13 +51,12 @@ afterEach(() => {
   (globalThis.fetch as { mockRestore?: () => void }).mockRestore?.();
 });
 
-test("on listening, the host's .localhost name is routed to the same port", async () => {
+test("on listening, one route serves both the .internal and the .localhost host", async () => {
   const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
     _url: unknown,
     init?: RequestInit,
   ) => {
-    if (init?.method === "PATCH" || init?.method === "POST")
-      return new Response("{}", { status: 200 });
+    if (init?.method === "PATCH") return new Response("{}", { status: 200 });
     return Response.json({
       srv0: { listen: [":443"], routes: [{ match: [{ host: ["web.test.internal"] }] }] },
     });
@@ -73,10 +72,21 @@ test("on listening, the host's .localhost name is routed to the same port", asyn
   fake.httpServer.emit("listening");
   await plugin.api.settled;
 
-  const post = fetchSpy.mock.calls.find(([, init]) => init?.method === "POST");
-  expect(String(post?.[1]?.body)).toContain('"web.test.localhost"');
-  expect(String(post?.[1]?.body)).toContain("localhost:54321");
-  expect(fake.infos.join("\n")).toContain("https://web.test.localhost → localhost:54321");
+  const writes = fetchSpy.mock.calls.filter(([, init]) => init?.method);
+  expect(writes).toHaveLength(1);
+  const route = JSON.parse(String(writes[0]?.[1]?.body));
+  expect(route.match[0].host).toEqual(["web.test.internal", "web.test.localhost"]);
+  expect(String(writes[0]?.[1]?.body)).toContain("localhost:54321");
+});
+
+test("a devSite.name that is not a plain hostname stops the dev server", () => {
+  const plugin = devsite();
+  expect(() =>
+    viteConfigHook(plugin)(
+      { root: makeViteRoot({ name: "web", devSite: { name: "my app" } }) },
+      ENV,
+    ),
+  ).toThrow("not a plain hostname");
 });
 
 test("on listening, the Caddy route gets the server's bound port", async () => {
@@ -111,6 +121,6 @@ test("on listening, the Caddy route gets the server's bound port", async () => {
   expect(patch).toBeDefined();
   expect(String(patch?.[1]?.body)).toContain("localhost:54321");
   expect([...fake.infos, ...fake.warns].join("\n")).toContain(
-    "https://web.test.internal → localhost:54321",
+    "https://web.test.internal and https://web.test.localhost → localhost:54321",
   );
 });

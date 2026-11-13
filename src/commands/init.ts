@@ -27,7 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { type CliContext, processContext } from "../context";
-import { devSiteName, hostsOf } from "../names.mjs";
+import { devSiteName, HOSTNAME_RE, hostsOf } from "../names.mjs";
 
 const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
 
@@ -77,10 +77,6 @@ function realUserHome(ctx: CliContext): string | null {
 
 type Route = { host: string; project: string };
 
-// Hosts are interpolated into `bash -c` command strings (verify) and into devsite.d filenames, so anything but a plain hostname must never get past discovery — a project package.json is not trusted input on a run that holds sudo.
-const HOSTNAME_RE =
-  /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
-
 function discoverRoutes(repoRoot: string): Route[] {
   const candidates = [join(repoRoot, "package.json")];
   for (const dir of ["apps", "packages"]) {
@@ -101,9 +97,6 @@ function discoverRoutes(repoRoot: string): Route[] {
     };
     const name = devSiteName(pkg, path);
     if (name) {
-      if (!HOSTNAME_RE.test(name)) {
-        throw new Error(`devSite.name ${JSON.stringify(name)} in ${path} is not a plain hostname`);
-      }
       const host = hostsOf(name).internal;
       const project = pkg.name ?? relative(repoRoot, path);
       const owner = claimed.get(host.toLowerCase());
