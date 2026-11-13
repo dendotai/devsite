@@ -10,20 +10,21 @@ With a stock dev server, a project's address is a port number. `localhost:3000` 
 
 ## How it works
 
-A `devSite` field in `package.json` declares a host. There is no port field:
+A `devSite` field in `package.json` declares the project's name, and devsite serves it at `https://<name>.internal` (every device on the tailnet) and `https://<name>.localhost` (this Mac). There is no port field:
 
 ```jsonc
 // package.json
 {
   "name": "myapp",
-  "devSite": { "host": "myapp.internal" }
+  "devSite": { "name": "myapp" }
 }
 ```
 
 devsite has two parts:
 
-- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` host in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block answering `503` as a placeholder), and (re)starts Caddy as an always-on service. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo`.
+- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` name in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block answering `503` as a placeholder), and (re)starts Caddy as an always-on service. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo`.
 - **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, and swaps the host's placeholder route for a live `reverse_proxy` through Caddy's admin API on localhost. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
+  - It also routes `<name>.localhost` to the same port. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
 ```mermaid
 flowchart LR
@@ -33,7 +34,7 @@ flowchart LR
     I[devsite init] -. "write Caddyfile (one-time, sudo)" .-> C
 ```
 
-The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, the host reverts to the `503` placeholder until you restart the dev server.
+The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, `<name>.internal` reverts to the `503` placeholder and `<name>.localhost` stops answering until you restart the dev server.
 
 ## Quick start
 
@@ -49,10 +50,10 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
    brew install caddy
    ```
 
-2. **Declare a host** in your project's `package.json`:
+2. **Declare a name** in your project's `package.json`:
 
    ```jsonc
-   "devSite": { "host": "myapp.internal" }
+   "devSite": { "name": "myapp" }
    ```
 
 3. **Make `.internal` names resolve to your machine.** `devsite init` verifies this but does not yet configure it for you. Two options:
@@ -168,7 +169,11 @@ rm -rf ~/Library/Application\ Support/devsite # last-used dates (Vite plugin)
 sudo rm /etc/resolver/internal          # plus the dnsmasq config, if you set them up
 ```
 
-Note: **renaming** a host (changing a project's `devSite.host`) cleans up after itself — the next `devsite init` in that project deletes the old host's file. **Deleting a whole project** does not: its host file lingers in `devsite.d/` (serving a `503`) until you remove it by hand — `devsite init` cannot tell an abandoned project from one that simply is not this repo.
+Note: **renaming** a project (changing its `devSite.name`) cleans up after itself — the next `devsite init` in that project deletes the old host's file. **Deleting a whole project** does not: its host file lingers in `devsite.d/` (serving a `503`) until you remove it by hand — `devsite init` cannot tell an abandoned project from one that simply is not this repo.
+
+## Upgrading to 1.0: `devSite.host` becomes `devSite.name`
+
+Replace `"devSite": { "host": "myapp.internal" }` with `"devSite": { "name": "myapp" }`. devsite 1.0 refuses the old field with an error that names the new one, in `devsite init` and on `bun dev`.
 
 ## Upgrading from an older devsite (pre-`devsite.d`)
 

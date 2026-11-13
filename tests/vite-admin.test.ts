@@ -104,7 +104,7 @@ function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
 
 // Drive the plugin end to end: config hook, then configureServer with a fake bound server, then await the plugin's settled signal — route registration and the last-used stamp have both finished (logged, wrote, or warned) when it resolves, so no assertion below needs to poll.
 async function registerViaPlugin(port: number) {
-  const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
+  const root = makeViteRoot({ name: "web", devSite: { name: HOST.replace(/\.internal$/, "") } });
   const plugin = devsite();
   await viteConfigHook(plugin)({ root }, { command: "serve", mode: "development" });
 
@@ -174,7 +174,9 @@ test("a stamp write failure warns and does not break route registration", async 
       withStateDir(join(blocker, "devsite"), () => registerViaPlugin(50225)),
     );
     // Route registration succeeded regardless.
-    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50225`);
+    expect(infos.join("\n")).toContain(
+      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → localhost:50225`,
+    );
     expect(warns.join("\n")).toContain("could not record");
   } finally {
     await mock.close();
@@ -199,7 +201,9 @@ test("existing route: the plugin PATCHes it to the bound port", async () => {
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50123));
     expect(warns).toEqual([]);
-    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50123`);
+    expect(infos.join("\n")).toContain(
+      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → localhost:50123`,
+    );
 
     const patch = mock.requests.find((r) => r.method === "PATCH");
     if (!patch) throw new Error("no PATCH reached the mock");
@@ -224,7 +228,9 @@ test("unknown host: the plugin POST-appends to the :443 server", async () => {
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50124));
     expect(warns).toEqual([]);
-    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50124`);
+    expect(infos.join("\n")).toContain(
+      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → localhost:50124`,
+    );
 
     const post = mock.requests.find((r) => r.method === "POST");
     if (!post) throw new Error("no POST reached the mock");

@@ -89,7 +89,7 @@ test("a single-package repo: root package.json#devSite is discovered", () => {
   const repo = mkdtempSync(join(tmpdir(), "devsite-single-"));
   writeFileSync(
     join(repo, "package.json"),
-    JSON.stringify({ name: "solo", devSite: { host: "solo.test.internal" } }),
+    JSON.stringify({ name: "solo", devSite: { name: "solo.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(0);
@@ -100,7 +100,7 @@ test("root and workspace devSite hosts are both discovered", () => {
   const repo = makeRepo();
   writeFileSync(
     join(repo, "package.json"),
-    JSON.stringify({ name: "rootproj", devSite: { host: "root.test.internal" } }),
+    JSON.stringify({ name: "rootproj", devSite: { name: "root.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(0);
@@ -115,31 +115,43 @@ test("a host that is not a plain hostname is rejected at discovery", () => {
   expect(r.stderr).toContain("a.internal; touch pwned");
 });
 
-test("two packages declaring the same devSite host are rejected at discovery", () => {
-  const repo = makeRepo(); // apps/web → web.test.internal
+test("two packages declaring the same devSite name are rejected at discovery", () => {
+  const repo = makeRepo(); // apps/web → devSite.name "web.test"
   mkdirSync(join(repo, "apps", "api"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { host: "web.test.internal" } }),
+    JSON.stringify({ name: "api", devSite: { name: "web.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("web.test.internal");
+  expect(r.stderr).toContain('devSite.name "web.test"');
   // The message must name both claimants so the fix is findable.
   expect(r.stderr).toContain("api");
   expect(r.stderr).toContain("web");
 });
 
-test("hosts differing only in case are still duplicates (DNS is case-insensitive)", () => {
+test("names differing only in case are still duplicates (DNS is case-insensitive)", () => {
   const repo = makeRepo();
   mkdirSync(join(repo, "apps", "api"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { host: "WEB.test.internal" } }),
+    JSON.stringify({ name: "api", devSite: { name: "WEB.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("web.test.internal");
+  expect(r.stderr).toContain('devSite.name "web.test"');
+});
+
+test("the old devSite.host field is refused with the field that replaced it", () => {
+  const repo = makeRepo();
+  writeFileSync(
+    join(repo, "apps", "web", "package.json"),
+    JSON.stringify({ name: "web", devSite: { host: "web.test.internal" } }),
+  );
+  const r = devsite(["init", "--dry-run"], { cwd: repo });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("devSite.host");
+  expect(r.stderr).toContain("devSite.name");
 });
 
 // --- running as root: resolve the real user behind sudo, or refuse (#12) ---

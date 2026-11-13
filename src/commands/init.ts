@@ -27,6 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { type CliContext, processContext } from "../context";
+import { devSiteName, HOSTNAME_RE, hostsOf } from "../names.mjs";
 
 const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
 
@@ -76,10 +77,6 @@ function realUserHome(ctx: CliContext): string | null {
 
 type Route = { host: string; project: string };
 
-// Hosts are interpolated into `bash -c` command strings (verify) and into devsite.d filenames, so anything but a plain hostname must never get past discovery — a project package.json is not trusted input on a run that holds sudo.
-const HOSTNAME_RE =
-  /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
-
 function discoverRoutes(repoRoot: string): Route[] {
   const candidates = [join(repoRoot, "package.json")];
   for (const dir of ["apps", "packages"]) {
@@ -96,22 +93,16 @@ function discoverRoutes(repoRoot: string): Route[] {
     if (!existsSync(path)) continue;
     const pkg = JSON.parse(readFileSync(path, "utf8")) as {
       name?: string;
-      devSite?: { host?: string };
+      devSite?: { name?: unknown; host?: unknown };
     };
-    const host = pkg.devSite?.host;
-    if (host) {
-      if (!HOSTNAME_RE.test(host)) {
-        throw new Error(`devSite.host ${JSON.stringify(host)} in ${path} is not a plain hostname`);
-      }
-      // `<host>.caddy` is the host's filename; this one name is reserved.
-      if (host.toLowerCase() === "00-global") {
-        throw new Error(`devSite.host "00-global" in ${path} collides with devsite's global file`);
-      }
+    const name = devSiteName(pkg, path);
+    if (name) {
+      const host = hostsOf(name).internal;
       const project = pkg.name ?? relative(repoRoot, path);
       const owner = claimed.get(host.toLowerCase());
       if (owner !== undefined) {
         throw new Error(
-          `devSite.host ${JSON.stringify(host.toLowerCase())} is declared by both ${owner} and ${project} — every project needs its own host`,
+          `devSite.name ${JSON.stringify(name.toLowerCase())} is declared by both ${owner} and ${project} — every project needs its own name`,
         );
       }
       claimed.set(host.toLowerCase(), project);
