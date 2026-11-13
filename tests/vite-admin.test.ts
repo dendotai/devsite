@@ -25,7 +25,7 @@ type Recorded = {
 type MockOpts = {
   // The JSON served for GET /config/apps/http/servers.
   servers?: unknown;
-  // Simulated failures: the config read, or any route write, answers 500.
+  // Simulated failures: the config read, or the route write, answers 500.
   failConfig?: boolean;
   failWrite?: boolean;
 };
@@ -60,7 +60,7 @@ async function startMockCaddy(opts: MockOpts = {}) {
         res.end(JSON.stringify(opts.servers ?? {}));
         return;
       }
-      if (req.method === "PATCH" || req.method === "POST") {
+      if (req.method === "PATCH") {
         if (opts.failWrite) {
           res.statusCode = 500;
           res.end();
@@ -218,50 +218,41 @@ test("existing route: the plugin PATCHes it to the bound port", async () => {
   }
 });
 
-test("unknown host: the plugin POST-appends to the :443 server", async () => {
+test("a host `devsite init` never registered: a warning naming the host and the command, and no route write", async () => {
   const mock = await startMockCaddy({
     servers: {
-      other: { listen: [":8080"], routes: [] },
-      https: { listen: [":443"], routes: [{ match: [{ host: ["someone.else.internal"] }] }] },
+      srv0: { listen: [":443"], routes: [{ match: [{ host: ["someone.else.internal"] }] }] },
     },
   });
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50124));
-    expect(warns).toEqual([]);
-    expect(infos.join("\n")).toContain(
-      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → localhost:50124`,
-    );
-
-    const post = mock.requests.find((r) => r.method === "POST");
-    if (!post) throw new Error("no POST reached the mock");
-    expect(post.path).toBe("/config/apps/http/servers/https/routes");
-    expect(post.body).toContain(HOST);
-    expect(post.body).toContain("localhost:50124");
-    expect(post.headers.origin).toBe(mock.url);
+    expect(infos).toEqual([]);
+    expect(warns.join("\n")).toContain(`no Caddy route for ${HOST}`);
+    expect(warns.join("\n")).toContain("run `bunx devsite init`");
+    expect(mock.requests.filter((r) => r.method !== "GET")).toEqual([]);
   } finally {
     await mock.close();
   }
 });
 
-test("config fetch fails: a warning, and the dev server keeps running", async () => {
+test("the admin API does not answer: a warning that asks whether Caddy runs", async () => {
+  const mock = await startMockCaddy();
+  await mock.close();
+  const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50128));
+  expect(infos).toEqual([]);
+  expect(warns.join("\n")).toContain("could not register");
+  expect(warns.join("\n")).toContain("is the Caddy service running");
+});
+
+test("config read answers an error status: a warning with the status and `devsite init`", async () => {
   const mock = await startMockCaddy({ failConfig: true });
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50125));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain("could not register");
     expect(warns.join("\n")).toContain("HTTP 500");
-  } finally {
-    await mock.close();
-  }
-});
-
-test("no :443 server in the config: a warning pointing at `devsite init`", async () => {
-  const mock = await startMockCaddy({ servers: { srv0: { listen: [":8080"], routes: [] } } });
-  try {
-    const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50126));
-    expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain("could not register");
-    expect(warns.join("\n")).toContain("devsite init");
+    expect(warns.join("\n")).toContain("bunx devsite init");
+    expect(warns.join("\n")).not.toContain("is the Caddy service running");
   } finally {
     await mock.close();
   }
@@ -278,6 +269,7 @@ test("write rejected: a warning, and the dev server keeps running", async () => 
     expect(warns.join("\n")).toContain("could not register");
     // The 500 from the write, specifically — a 403 (lost Origin) must not satisfy this test.
     expect(warns.join("\n")).toContain("HTTP 500");
+    expect(warns.join("\n")).not.toContain("is the Caddy service running");
   } finally {
     await mock.close();
   }
