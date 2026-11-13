@@ -39,19 +39,22 @@ function devsiteRoute(hosts, port) {
 }
 
 /**
- * One route for all the project's hosts, found by the first: the one `devsite init` gives a placeholder route.
+ * One route for all the project's hosts, found by the first: the one `devsite init` gives a placeholder route. Only that route is ever updated, in place: Caddy matches routes top to bottom, and init's Caddyfile sorts an exact host above a wildcard, so its position is the one where the host answers (#15).
  *
  * @param {string[]} hosts
  * @param {number} port
  */
 async function registerRoute(hosts, port) {
-  const res = await caddy("/config/apps/http/servers");
+  const res = await caddy("/config/apps/http/servers").catch(() => {
+    throw new Error(
+      "the Caddy admin API does not answer — is the Caddy service running? `bunx devsite init` from the repo root sets it up",
+    );
+  });
   if (!res.ok) throw new Error(`Caddy admin API: HTTP ${res.status}`);
   // The slice of Caddy's config shape this function walks; everything else in the response is passed through untyped.
-  const servers =
-    /** @type {Record<string, { listen?: unknown[], routes?: { match?: { host?: string[] }[] }[] }>} */ (
-      (await res.json()) ?? {}
-    );
+  const servers = /** @type {Record<string, { routes?: { match?: { host?: string[] }[] }[] }>} */ (
+    (await res.json()) ?? {}
+  );
 
   for (const [name, srv] of Object.entries(servers)) {
     const i = (srv.routes ?? []).findIndex((r) =>
@@ -68,20 +71,7 @@ async function registerRoute(hosts, port) {
     }
   }
 
-  // Host not in the running config (devsite init not run for it yet) — append to the :443 server so this session still works; init makes it permanent.
-  const https = Object.entries(servers).find(([, s]) =>
-    (s.listen ?? []).some((l) => String(l).endsWith(":443")),
-  );
-  if (!https)
-    throw new Error(
-      "no :443 server in the Caddy config — run `bunx devsite init` from the repo root",
-    );
-  const post = await caddy(`/config/apps/http/servers/${https[0]}/routes`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(devsiteRoute(hosts, port)),
-  });
-  if (!post.ok) throw new Error(`Caddy route append: HTTP ${post.status}`);
+  throw new Error(`no Caddy route for ${hosts[0]} — run \`bunx devsite init\` from the repo root`);
 }
 
 /**
@@ -154,7 +144,6 @@ export function devsite() {
           (err) =>
             server.config.logger.warn(
               `devsite: could not register https://${h} with Caddy (${err instanceof Error ? err.message : err}). ` +
-                "Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
                 "Falling back to the raw local URL below — HMR only works via the https host.",
             ),
         );
