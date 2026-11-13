@@ -61,7 +61,7 @@ export function makeRepo(host = "web.test.internal", project = "web") {
   mkdirSync(join(repo, "apps", "web"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "web", "package.json"),
-    JSON.stringify({ name: project, devSite: { host } }),
+    JSON.stringify({ name: project, devSite: { name: host.replace(/\.internal$/, "") } }),
   );
   return repo;
 }

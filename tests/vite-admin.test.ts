@@ -104,7 +104,7 @@ function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
 
 // Drive the plugin end to end: config hook, then configureServer with a fake bound server, then await the plugin's settled signal — route registration and the last-used stamp have both finished (logged, wrote, or warned) when it resolves, so no assertion below needs to poll.
 async function registerViaPlugin(port: number) {
-  const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
+  const root = makeViteRoot({ name: "web", devSite: { name: HOST.replace(/\.internal$/, "") } });
   const plugin = devsite();
   await viteConfigHook(plugin)({ root }, { command: "serve", mode: "development" });
 

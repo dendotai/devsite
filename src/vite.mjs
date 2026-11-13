@@ -5,6 +5,7 @@
 // Plain .mjs (not .ts): Vite's config loader externalizes bare imports and hands them to the Node runtime, which won't execute TypeScript from node_modules. The published type surface lives in vite.types.d.mts — named so it does NOT shadow this module in the typecheck program (tsc skips a .js root file when an adjacent same-named .d.ts exists, and checkJs would then never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { devSiteName, internalHost, localhostHost } from "./names.mjs";
 import { stampLastUsed } from "./state.mjs";
 
 // DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the plugin at a local mock; read per call, so the override needs no import-order care.
@@ -23,15 +24,6 @@ export function caddy(path, init = {}) {
   const headers = new Headers(init.headers);
   headers.set("origin", admin);
   return fetch(`${admin}${path}`, { ...init, headers });
-}
-
-/**
- * `web.internal` → `web.localhost`: browsers resolve any `*.localhost` to loopback, and Vite allows those hosts without `allowedHosts`.
- *
- * @param {string} host
- */
-function localhostName(host) {
-  return host.replace(/\.[^.]+$/, ".localhost");
 }
 
 /**
@@ -98,7 +90,7 @@ async function registerRoute(host, port) {
 export function devsite() {
   // Assigned in one hook, read in another — the closure split defeats tsc's evolving-any inference, so the type is spelled out.
   /** @type {string | undefined} */
-  let host;
+  let name;
   let settle = () => {};
   /** @type {Promise<void>} */
   const settled = new Promise((r) => {
@@ -110,15 +102,16 @@ export function devsite() {
     api: { settled },
     config(userConfig) {
       const root = userConfig.root ?? process.cwd();
-      // A Vite root without a (readable, parseable) package.json simply has no devSite host — no-op, never crash the dev server over it.
+      // A Vite root without a (readable, parseable) package.json simply has no devSite name — no-op, never crash the dev server over it.
       let pkg;
       try {
         pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
       } catch {
         return;
       }
-      host = pkg.devSite?.host;
-      if (!host) return;
+      name = devSiteName(pkg, join(root, "package.json"));
+      if (!name) return;
+      const host = internalHost(name);
       return {
         server: {
           // 0 = the OS assigns the port at bind time; there is no pre-picked number to race over. The real port is read in `configureServer`.
@@ -133,11 +126,12 @@ export function devsite() {
       };
     },
     configureServer(server) {
-      if (!host) {
+      if (!name) {
         settle();
         return;
       }
-      const h = host;
+      const h = internalHost(name);
+      const local = localhostHost(name);
       server.httpServer?.once("listening", () => {
         const addr = server.httpServer?.address();
         const p = typeof addr === "object" && addr ? addr.port : undefined;
@@ -168,7 +162,7 @@ export function devsite() {
           h,
           " Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
             "Falling back to the raw local URL below — HMR only works via the https host.",
-        ).then(() => register(localhostName(h), ""));
+        ).then(() => register(local, ""));
         // Every branch above is handled, so no promise can reject.
         void Promise.all([stamped, registered]).then(settle);
       });

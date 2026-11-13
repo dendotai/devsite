@@ -19,16 +19,26 @@ test("unparseable package.json: no-op", () => {
   expect(viteConfigHook(plugin)({ root }, ENV)).toBeUndefined();
 });
 
-test("package.json without a devSite host: no-op", () => {
+test("package.json without a devSite name: no-op", () => {
   const plugin = devsite();
   const result = viteConfigHook(plugin)({ root: makeViteRoot({ name: "x" }) }, ENV);
   expect(result).toBeUndefined();
 });
 
-test("devSite.host present: Vite binds an OS-assigned port (port 0) for that host", async () => {
+test("the old devSite.host field stops the dev server with the field that replaced it", () => {
+  const plugin = devsite();
+  expect(() =>
+    viteConfigHook(plugin)(
+      { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
+      ENV,
+    ),
+  ).toThrow("devSite.name");
+});
+
+test("devSite.name present: Vite binds an OS-assigned port (port 0) for that host", async () => {
   const plugin = devsite();
   const result = await viteConfigHook(plugin)(
-    { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
+    { root: makeViteRoot({ name: "web", devSite: { name: "web.test" } }) },
     ENV,
   );
   expect(result?.server?.allowedHosts).toEqual(["web.test.internal"]);
@@ -55,7 +65,7 @@ test("on listening, the host's .localhost name is routed to the same port", asyn
 
   const plugin = devsite();
   await viteConfigHook(plugin)(
-    { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
+    { root: makeViteRoot({ name: "web", devSite: { name: "web.test" } }) },
     ENV,
   );
   const fake = fakeViteServer(54321);
@@ -87,7 +97,7 @@ test("on listening, the Caddy route gets the server's bound port", async () => {
 
   const plugin = devsite();
   await viteConfigHook(plugin)(
-    { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
+    { root: makeViteRoot({ name: "web", devSite: { name: "web.test" } }) },
     ENV,
   );
 

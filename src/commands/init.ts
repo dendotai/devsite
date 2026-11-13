@@ -27,6 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { type CliContext, processContext } from "../context";
+import { devSiteName, internalHost } from "../names.mjs";
 
 const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
 
@@ -96,22 +97,19 @@ function discoverRoutes(repoRoot: string): Route[] {
     if (!existsSync(path)) continue;
     const pkg = JSON.parse(readFileSync(path, "utf8")) as {
       name?: string;
-      devSite?: { host?: string };
+      devSite?: { name?: unknown; host?: unknown };
     };
-    const host = pkg.devSite?.host;
-    if (host) {
-      if (!HOSTNAME_RE.test(host)) {
-        throw new Error(`devSite.host ${JSON.stringify(host)} in ${path} is not a plain hostname`);
+    const name = devSiteName(pkg, path);
+    if (name) {
+      if (!HOSTNAME_RE.test(name)) {
+        throw new Error(`devSite.name ${JSON.stringify(name)} in ${path} is not a plain hostname`);
       }
-      // `<host>.caddy` is the host's filename; this one name is reserved.
-      if (host.toLowerCase() === "00-global") {
-        throw new Error(`devSite.host "00-global" in ${path} collides with devsite's global file`);
-      }
+      const host = internalHost(name);
       const project = pkg.name ?? relative(repoRoot, path);
       const owner = claimed.get(host.toLowerCase());
       if (owner !== undefined) {
         throw new Error(
-          `devSite.host ${JSON.stringify(host.toLowerCase())} is declared by both ${owner} and ${project} — every project needs its own host`,
+          `devSite.name ${JSON.stringify(name.toLowerCase())} is declared by both ${owner} and ${project} — every project needs its own name`,
         );
       }
       claimed.set(host.toLowerCase(), project);
