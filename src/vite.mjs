@@ -26,6 +26,15 @@ export function caddy(path, init = {}) {
 }
 
 /**
+ * `web.internal` → `web.localhost`: browsers resolve any `*.localhost` to loopback, and Vite allows those hosts without `allowedHosts`.
+ *
+ * @param {string} host
+ */
+function localhostName(host) {
+  return host.replace(/\.[^.]+$/, ".localhost");
+}
+
+/**
  * @param {string} host
  * @param {number} port
  */
@@ -142,16 +151,25 @@ export function devsite() {
             `devsite: could not record last-used date for ${h} (${err instanceof Error ? err.message : err})`,
           ),
         );
-        const registered = registerRoute(h, p).then(
-          () => server.config.logger.info(`devsite: https://${h} → localhost:${p}`),
-          (err) =>
-            server.config.logger.warn(
-              `devsite: could not register https://${h} with Caddy (${err instanceof Error ? err.message : err}). ` +
-                "Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
-                "Falling back to the raw local URL below — HMR only works via the https host.",
-            ),
-        );
-        // Both branches above are handled, so neither promise can reject.
+        /**
+         * @param {string} name
+         * @param {string} hint
+         */
+        const register = (name, hint) =>
+          registerRoute(name, p).then(
+            () => server.config.logger.info(`devsite: https://${name} → localhost:${p}`),
+            (err) =>
+              server.config.logger.warn(
+                `devsite: could not register https://${name} with Caddy (${err instanceof Error ? err.message : err}).${hint}`,
+              ),
+          );
+        // The localhost name registers second, so a fresh Caddy config already has the :443 server the host's route brings.
+        const registered = register(
+          h,
+          " Is the Caddy service running (`bunx devsite init` from the repo root sets it up)? " +
+            "Falling back to the raw local URL below — HMR only works via the https host.",
+        ).then(() => register(localhostName(h), ""));
+        // Every branch above is handled, so no promise can reject.
         void Promise.all([stamped, registered]).then(settle);
       });
     },

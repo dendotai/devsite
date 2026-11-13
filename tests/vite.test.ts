@@ -41,6 +41,34 @@ afterEach(() => {
   (globalThis.fetch as { mockRestore?: () => void }).mockRestore?.();
 });
 
+test("on listening, the host's .localhost name is routed to the same port", async () => {
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+    _url: unknown,
+    init?: RequestInit,
+  ) => {
+    if (init?.method === "PATCH" || init?.method === "POST")
+      return new Response("{}", { status: 200 });
+    return Response.json({
+      srv0: { listen: [":443"], routes: [{ match: [{ host: ["web.test.internal"] }] }] },
+    });
+  }) as unknown as typeof fetch);
+
+  const plugin = devsite();
+  await viteConfigHook(plugin)(
+    { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
+    ENV,
+  );
+  const fake = fakeViteServer(54321);
+  viteConfigureServerHook(plugin)(fake.server as never);
+  fake.httpServer.emit("listening");
+  await plugin.api.settled;
+
+  const post = fetchSpy.mock.calls.find(([, init]) => init?.method === "POST");
+  expect(String(post?.[1]?.body)).toContain('"web.test.localhost"');
+  expect(String(post?.[1]?.body)).toContain("localhost:54321");
+  expect(fake.infos.join("\n")).toContain("https://web.test.localhost → localhost:54321");
+});
+
 test("on listening, the Caddy route gets the server's bound port", async () => {
   const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
     _url: unknown,

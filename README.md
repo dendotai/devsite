@@ -24,6 +24,7 @@ devsite has two parts:
 
 - **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` host in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block answering `503` as a placeholder), and (re)starts Caddy as an always-on service. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo`.
 - **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, and swaps the host's placeholder route for a live `reverse_proxy` through Caddy's admin API on localhost. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
+  - It also routes the same site under a `localhost` name (`web.internal` → `https://web.localhost`), on this Mac only. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
 ```mermaid
 flowchart LR
