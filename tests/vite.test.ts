@@ -44,6 +44,8 @@ test("devSite.name present: Vite binds an OS-assigned port (port 0) for that hos
   expect(result?.server?.allowedHosts).toEqual(["web.test.internal"]);
   expect(result?.server?.port).toBe(0);
   expect(result?.server?.strictPort).toBeUndefined();
+  // Only Caddy, on this Mac, connects to Vite; any other address puts the dev server on the local network.
+  expect(result?.server?.host).toBe("127.0.0.1");
 });
 
 // Listen-time registration: the port Caddy is told about must be the one the server actually bound, read from httpServer.address() — never a pre-picked number. fetch is stubbed so no real Caddy admin API is touched.
@@ -76,7 +78,7 @@ test("on listening, one route serves both the .internal and the .localhost host"
   expect(writes).toHaveLength(1);
   const route = JSON.parse(String(writes[0]?.[1]?.body));
   expect(route.match[0].host).toEqual(["web.test.internal", "web.test.localhost"]);
-  expect(String(writes[0]?.[1]?.body)).toContain("localhost:54321");
+  expect(String(writes[0]?.[1]?.body)).toContain("127.0.0.1:54321");
 });
 
 test("a devSite.name that keeps the old .internal suffix is refused with the bare name", () => {
@@ -158,8 +160,8 @@ test("on listening, the Caddy route gets the server's bound port", async () => {
 
   const patch = fetchSpy.mock.calls.find(([, init]) => init?.method === "PATCH");
   expect(patch).toBeDefined();
-  expect(String(patch?.[1]?.body)).toContain("localhost:54321");
+  expect(String(patch?.[1]?.body)).toContain("127.0.0.1:54321");
   expect([...fake.infos, ...fake.warns].join("\n")).toContain(
-    "https://web.test.internal and https://web.test.localhost → localhost:54321",
+    "https://web.test.internal and https://web.test.localhost → 127.0.0.1:54321",
   );
 });
