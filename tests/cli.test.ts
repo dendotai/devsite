@@ -3,7 +3,7 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeEmptyRepo, makeRepo, scratchCaddyfile } from "./helpers";
 
@@ -16,13 +16,12 @@ function devsite(
   args: string[],
   opts: { cwd?: string; caddyfile?: string; env?: Record<string, string> } = {},
 ) {
-  // Strip the identity variables from the inherited env so a test controls them fully via opts.env — an ambient SUDO_USER must never leak into a run.
+  // An ambient DEVSITE_UID must never leak into a run; a test sets it via opts.env.
   const env: Record<string, string | undefined> = {
     ...process.env,
     DEVSITE_CADDYFILE: opts.caddyfile ?? SCRATCH,
   };
   delete env.DEVSITE_UID;
-  delete env.SUDO_USER;
   Object.assign(env, opts.env);
   const r = spawnSync("bun", [CLI, ...args], { cwd: opts.cwd, encoding: "utf8", env });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
@@ -34,7 +33,7 @@ function makeCaddyfile(content: string) {
   return p;
 }
 
-// --- dispatch: nothing but `init` may reach the privileged bootstrap ---
+// --- dispatch: nothing but `init` may reach the bootstrap ---
 
 test("bare run prints usage and exits 1", () => {
   const r = devsite([]);
@@ -154,14 +153,11 @@ test("the old devSite.host field is refused with the field that replaced it", ()
   expect(r.stderr).toContain("devSite.name");
 });
 
-// --- running as root: resolve the real user behind sudo, or refuse (#12) ---
+// --- running as root: refuse, because Caddy runs as the user (ADR 0002) ---
 // DEVSITE_UID pretends the uid so these run without actually being root.
 
-test("init under sudo refuses: Caddy must run as the user", () => {
-  const r = devsite(["init", "--dry-run"], {
-    cwd: makeRepo(),
-    env: { DEVSITE_UID: "0", SUDO_USER: userInfo().username },
-  });
+test("init as root refuses: Caddy must run as the user", () => {
+  const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), env: { DEVSITE_UID: "0" } });
   expect(r.status).toBe(1);
   expect(r.stderr).toContain("Caddy must run as you");
   expect(r.stderr).toContain("without sudo");
@@ -170,17 +166,6 @@ test("init under sudo refuses: Caddy must run as the user", () => {
 test("an empty DEVSITE_UID export is not uid 0: the run stays a normal-user run", () => {
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), env: { DEVSITE_UID: "" } });
   expect(r.status).toBe(0);
-});
-
-test("a non-root run ignores a stray SUDO_USER (nested shells keep it exported)", () => {
-  const r = devsite(["init", "--dry-run"], {
-    cwd: makeRepo(),
-    env: { SUDO_USER: "devsite-no-such-user" },
-  });
-  expect(r.status).toBe(0);
-  expect(r.stdout).toContain(
-    `root "${join(homedir(), "Library", "Application Support", "Caddy")}"`,
-  );
 });
 
 // --- Caddyfile ownership: content outside the managed region is sacred ---

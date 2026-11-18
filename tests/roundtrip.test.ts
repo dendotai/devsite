@@ -81,7 +81,7 @@ function devsiteGlobalBlock() {
   const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
   return [
     "{",
-    "\t# Pin PKI storage so Caddy's local CA is the SAME no matter which user runs",
+    "\t# Pin PKI storage so Caddy's local CA is the SAME no matter how Caddy runs",
     "\t# it (the always-on service vs a foreground process). Every device trusts",
     `\t# this one CA root: ${join(storageRoot, "pki", "authorities", "local", "root.crt")}`,
     "\tstorage file_system {",
