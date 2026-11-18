@@ -28,6 +28,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { type CliContext, processContext } from "../context";
 import { devSiteName, HOSTNAME_RE, hostsOf } from "../names.mjs";
+import { caddy } from "../vite.mjs";
 
 const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
 
@@ -276,9 +277,23 @@ function applyPrivileged(
   }
   exec("sudo", ["pkill", "-x", "caddy"]); // kill any non-service foreground Caddy; ok if none
   sudo(["brew", "services", "restart", "caddy"], ctx);
-  // Trust the pinned CA in the Mac keychain. Caddy's own auto-trust needs an interactive prompt it can't get as a background service, so do it explicitly.
-  ctx.stdout.write("  sudo caddy trust\n");
-  exec("sudo", ["caddy", "trust"]); // best-effort; ok if already trusted
+}
+
+const ADMIN_WAIT_MS = 5000;
+const CADDY_LOG = "/opt/homebrew/var/log/caddy.log";
+
+// `brew services restart` returns before the new Caddy listens; `caddy trust` and verify both need its admin API. Any HTTP answer means the listener is up.
+export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await caddy("/config/", { signal: AbortSignal.timeout(500) });
+      return true;
+    } catch {
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 }
 
 function tailscale(args: string[]): string | null {
@@ -609,6 +624,14 @@ export async function init(
     );
   }
   applyPrivileged(changes, caddyfilePath, devsiteDir, ctx);
+  if (!(await waitForCaddyAdmin())) {
+    ctx.stderr.write(
+      `\nThe Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s — see ${CADDY_LOG}\n`,
+    );
+    return 1;
+  }
+  // Trust the pinned CA in the Mac keychain. Caddy's own auto-trust needs an interactive prompt it can't get as a background service, so do it explicitly. An already-trusted CA exits 0.
+  sudo(["caddy", "trust"], ctx);
   ctx.stdout.write("\nVerifying:\n");
   verify(routes, pki, ctx);
   printChecklist(routes, pki, ctx);
