@@ -33,7 +33,7 @@ export function caddy(path, init = {}) {
 function devsiteRoute(hosts, port) {
   return {
     match: [{ host: hosts }],
-    handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `localhost:${port}` }] }],
+    handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${port}` }] }],
     terminal: true,
   };
 }
@@ -113,9 +113,8 @@ export function devsite() {
         server: {
           // 0 = the OS assigns the port at bind time; there is no pre-picked number to race over. The real port is read in `configureServer`.
           port: 0,
-          // Listen beyond loopback so the Tailscale-reachable Caddy proxy
-          // (https://<host>) can reach the dev server.
-          host: true,
+          // Caddy, on this Mac, is the only client: other devices reach the dev server through it, never on this port.
+          host: "127.0.0.1",
           allowedHosts: [host],
           // Caddy terminates TLS on :443 and proxies to the dev port, so the HMR client must connect back over wss on 443, not the raw port. No `host`: the client then uses the page's own host, `.internal` or `.localhost`.
           ws: { protocol: "wss", clientPort: 443 },
@@ -144,7 +143,7 @@ export function devsite() {
         const registered = registerRoute([h, local], p).then(
           () =>
             server.config.logger.info(
-              `devsite: https://${h} and https://${local} → localhost:${p}`,
+              `devsite: https://${h} and https://${local} → 127.0.0.1:${p}`,
             ),
           (err) =>
             server.config.logger.warn(

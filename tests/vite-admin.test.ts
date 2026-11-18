@@ -175,7 +175,7 @@ test("a stamp write failure warns and does not break route registration", async 
     );
     // Route registration succeeded regardless.
     expect(infos.join("\n")).toContain(
-      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → localhost:50225`,
+      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → 127.0.0.1:50225`,
     );
     expect(warns.join("\n")).toContain("could not record");
   } finally {
@@ -202,13 +202,13 @@ test("existing route: the plugin PATCHes it to the bound port", async () => {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50123));
     expect(warns).toEqual([]);
     expect(infos.join("\n")).toContain(
-      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → localhost:50123`,
+      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → 127.0.0.1:50123`,
     );
 
     const patch = mock.requests.find((r) => r.method === "PATCH");
     if (!patch) throw new Error("no PATCH reached the mock");
     expect(patch.path).toBe("/config/apps/http/servers/srv0/routes/0");
-    expect(patch.body).toContain("localhost:50123");
+    expect(patch.body).toContain("127.0.0.1:50123");
     // The pin rode along even though the caller supplied its own headers
     // (content-type is set by the PATCH call itself).
     expect(patch.headers.origin).toBe(mock.url);
