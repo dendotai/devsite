@@ -11,7 +11,6 @@ export type CliContext = {
   // The named keys are the full set of env vars the CLI reads; the index signature is what lets process.env (and test env objects) assign.
   env: {
     DEVSITE_UID?: string;
-    SUDO_USER?: string;
     DEVSITE_CADDYFILE?: string;
     [key: string]: string | undefined;
   };

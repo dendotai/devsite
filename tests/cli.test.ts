@@ -157,53 +157,19 @@ test("the old devSite.host field is refused with the field that replaced it", ()
 // --- running as root: resolve the real user behind sudo, or refuse (#12) ---
 // DEVSITE_UID pretends the uid so these run without actually being root.
 
-test("root with no SUDO_USER refuses: a true root shell cannot pin a wrong CA path", () => {
-  const r = devsite(["init"], { cwd: makeRepo(), env: { DEVSITE_UID: "0" } });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("without sudo");
-});
-
-// darwin-only: the happy path resolves SUDO_USER's home through dscl (macOS Directory Services), which Linux CI runners don't have — there the run correctly refuses, which is the adjacent tests' territory.
-test.skipIf(process.platform !== "darwin")(
-  "under sudo the pinned storage is the real user's home, not root's",
-  () => {
-    const r = devsite(["init", "--dry-run"], {
-      cwd: makeRepo(),
-      env: { DEVSITE_UID: "0", SUDO_USER: userInfo().username },
-    });
-    expect(r.status).toBe(0);
-    // The rendered region pins the storage; it must show the human's home.
-    expect(r.stdout).toContain(
-      `root "${join(homedir(), "Library", "Application Support", "Caddy")}"`,
-    );
-    // The substitution announces itself.
-    expect(r.stdout).toContain(userInfo().username);
-    expect(r.stdout.toLowerCase()).toContain("sudo");
-  },
-);
-
-test("root with an unresolvable SUDO_USER refuses instead of guessing", () => {
-  const r = devsite(["init"], {
+test("init under sudo refuses: Caddy must run as the user", () => {
+  const r = devsite(["init", "--dry-run"], {
     cwd: makeRepo(),
-    env: { DEVSITE_UID: "0", SUDO_USER: "devsite-no-such-user" },
+    env: { DEVSITE_UID: "0", SUDO_USER: userInfo().username },
   });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("without sudo");
-});
-
-test("root sudo'ing (SUDO_USER=root) is still a root shell: refuse", () => {
-  const r = devsite(["init"], {
-    cwd: makeRepo(),
-    env: { DEVSITE_UID: "0", SUDO_USER: "root" },
-  });
-  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("Caddy must run as you");
   expect(r.stderr).toContain("without sudo");
 });
 
 test("an empty DEVSITE_UID export is not uid 0: the run stays a normal-user run", () => {
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), env: { DEVSITE_UID: "" } });
   expect(r.status).toBe(0);
-  expect(r.stdout).not.toContain("Running under sudo");
 });
 
 test("a non-root run ignores a stray SUDO_USER (nested shells keep it exported)", () => {
@@ -215,7 +181,6 @@ test("a non-root run ignores a stray SUDO_USER (nested shells keep it exported)"
   expect(r.stdout).toContain(
     `root "${join(homedir(), "Library", "Application Support", "Caddy")}"`,
   );
-  expect(r.stdout).not.toContain("Running under sudo");
 });
 
 // --- Caddyfile ownership: content outside the managed region is sacred ---
@@ -228,6 +193,16 @@ test("pre-existing non-devsite content is never deleted (Homebrew default shape)
   expect(r.stdout).not.toContain("-:80");
   expect(r.stdout).not.toContain('-\trespond "hi"');
   expect(r.stdout).toContain("+import devsite.d/*.caddy # devsite");
+});
+
+test("init names the default_bind line it deletes", () => {
+  const caddyfile = makeCaddyfile("{\n\tdefault_bind 127.0.0.1 100.64.0.9\n}\n");
+  const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), caddyfile });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(
+    'deletes "default_bind 127.0.0.1 100.64.0.9" from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out',
+  );
+  expect(r.stdout).toContain("-\tdefault_bind 127.0.0.1 100.64.0.9");
 });
 
 test("pre-region (v0) devsite files migrate: other repos' blocks move into devsite.d", () => {

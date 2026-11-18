@@ -69,6 +69,8 @@ function devsiteBlock(host: string, project: string) {
     "\t\t\tlifetime 168h",
     "\t\t}",
     "\t}",
+    "\t@outside not remote_ip 127.0.0.1 ::1 100.64.0.0/10",
+    "\tabort @outside",
     `\trespond "devsite: dev server for ${host} is not running (start it with bun dev)" 503`,
     "}",
   ].join("\n");
@@ -80,7 +82,7 @@ function devsiteGlobalBlock() {
   return [
     "{",
     "\t# Pin PKI storage so Caddy's local CA is the SAME no matter which user runs",
-    "\t# it (always-on root service vs a foreground process). Every device trusts",
+    "\t# it (the always-on service vs a foreground process). Every device trusts",
     `\t# this one CA root: ${join(storageRoot, "pki", "authorities", "local", "root.crt")}`,
     "\tstorage file_system {",
     `\t\troot "${storageRoot}"`,
@@ -210,6 +212,37 @@ test("a user-owned global options block is kept in place and gets devsite's dire
   const second = await reInit(repo, caddyfile);
   expect(second.changed).toBe(false);
   expect(readTree(caddyfile)).toEqual(tree);
+});
+
+// Caddy as the user can listen below 1024 only on all addresses, so a default_bind stops it from starting (ADR 0002).
+test("a default_bind line leaves the user's global block; the rest of the block stays", async () => {
+  const caddyfile = makeCaddyfile(
+    ["{", "\temail den@example.com", "\tdefault_bind 127.0.0.1 100.64.0.9", "}", ""].join("\n"),
+  );
+  const repo = makeRepo();
+  expect((await reInit(repo, caddyfile)).changed).toBe(true);
+  const tree = readTree(caddyfile);
+  expect(tree.Caddyfile).not.toContain("default_bind");
+  expect(tree.Caddyfile).toContain("\temail den@example.com");
+  expect((await reInit(repo, caddyfile)).changed).toBe(false);
+});
+
+test("a global block left with only devsite's directives once default_bind goes re-renders fresh", async () => {
+  const caddyfile = makeCaddyfile(
+    [
+      "{",
+      "\tstorage file_system {",
+      '\t\troot "/somewhere"',
+      "\t}",
+      "\tlocal_certs",
+      "\t# keep off the Wi-Fi",
+      "\tdefault_bind 127.0.0.1",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  expect((await reInit(makeRepo(), caddyfile)).changed).toBe(true);
+  expect(readTree(caddyfile).Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
 });
 
 test("v0-format migration: one run, foreign blocks move byte-for-byte, own host re-renders", async () => {

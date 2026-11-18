@@ -116,6 +116,21 @@ test("a non-TTY run with a pending diff refuses and writes nothing", async () =>
   expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });
 
+test("one key answers the prompt, with no Enter: the terminal is in raw mode while it waits", async () => {
+  const caddyfile = scratchCaddyfile();
+  const raw: boolean[] = [];
+  const stdin = Object.assign(fakeStdin("x", true), {
+    setRawMode(on: boolean) {
+      raw.push(on);
+    },
+  });
+  const r = await cli(["init"], { cwd: makeRepo(), caddyfile, stdin });
+  expect(r.status).toBe(1);
+  expect(raw).toEqual([true, false]);
+  expect(r.stderr).toContain("Stopped — nothing changed");
+  expect(existsSync(caddyfile)).toBe(false);
+});
+
 test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () => {
   const caddyfile = scratchCaddyfile();
   const r = await cli(["init"], {
@@ -124,8 +139,8 @@ test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () 
     stdin: fakeStdin("n\n", true),
   });
   expect(r.status).toBe(1);
-  expect(r.stdout).toContain("Apply this change?");
-  expect(r.stderr).toContain("Aborted — nothing written");
+  expect(r.stdout).toContain("Press y to apply");
+  expect(r.stderr).toContain("Stopped — nothing changed");
   expect(existsSync(caddyfile)).toBe(false);
   expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });

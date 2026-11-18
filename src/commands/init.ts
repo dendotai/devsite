@@ -7,26 +7,36 @@
  *   - Older formats (v0 plain blocks, the v1 marker region) migrate in the same confirmed run: devsite-rendered blocks (recognized by their `respond "devsite: …" 503` placeholder) move into `devsite.d/` files — other projects' blocks byte-for-byte — and the old markers disappear.
  *   - Every write shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
  *
- * Owns the privileged Caddy setup so nobody has to assemble it by hand. It:
+ * Owns the Caddy setup so nobody has to assemble it by hand. It:
  *   - renders `devsite.d/` from every package.json#devSite (repo root, apps/*, packages/*) and imports it from /opt/homebrew/etc/Caddyfile,
- *   - pins Caddy's PKI storage to a fixed path so the local CA is identical no matter which user runs Caddy (a root service vs a foreground process) — the drift that silently broke phone cert-trust after a restart,
+ *   - pins Caddy's PKI storage to a fixed path so the local CA is identical no matter how Caddy runs (the service vs a foreground process) — the drift that silently broke phone cert-trust after a restart,
  *   - widens the internal leaf lifetime so certs don't lapse overnight,
- *   - runs Caddy as the always-on brew service.
+ *   - runs Caddy as the user's always-on brew service, started at login, every route behind the LAN guard (ADR 0002),
+ *   - moves a root service from an earlier devsite to the user service.
  *
- * Run it as yourself — it shells out to sudo only for the privileged steps, so the password prompt lands in your terminal:
- *   bunx devsite init            # apply (prompts for sudo once)
+ * Run it as yourself; a run as root is refused. It calls sudo only for `caddy trust` and the move off a root service, so the password prompt lands in your terminal:
+ *   bunx devsite init            # apply
  *   bunx devsite init --dry-run  # print the diff it would apply; touch nothing
- * A habitual `sudo bunx devsite init` still works: the run resolves the real user behind sudo (SUDO_USER) and pins storage to *their* home. Only a true root shell (no SUDO_USER) is refused.
  *
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
 // Adding a version-sensitive node API here (fs.glob is the only one so far, Node 22+)? Check engines.node in package.json, and consider a node-version matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
 import { spawnSync } from "node:child_process";
-import { existsSync, globSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import {
+  copyFileSync,
+  existsSync,
+  globSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { type CliContext, processContext } from "../context";
+import { guardCaddyfileLines } from "../guard.mjs";
 import { devSiteName, HOSTNAME_RE, hostsOf } from "../names.mjs";
 import { caddy } from "../vite.mjs";
 
@@ -49,31 +59,18 @@ const KEPT_END = "\t# <<< kept <<<";
 // Where the pinned PKI storage lives; derived from the *human's* home once per run.
 type Pki = { storageRoot: string; caRootCert: string };
 
-// The storage pin must always point at the *human's* home — under `sudo bunx devsite init` the process home is /var/root, and pinning that mints a fresh CA no device trusts. Resolve the real user behind sudo, or refuse (null) when there is no way back to one (a true root shell).
-function realUserHome(ctx: CliContext): string | null {
-  // Overridable so tests can exercise the root paths without actually being root.
+// Caddy runs as the user who runs init (ADR 0002): as root, `brew services` would install a root service and every write would be root-owned.
+function isRoot(ctx: CliContext): boolean {
+  // Overridable so tests can exercise the root path without actually being root.
   // An empty export must not count: Number("") is 0, which would read as root.
   const uid = ctx.env.DEVSITE_UID ? Number(ctx.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
-  if (uid !== 0) return homedir();
-  const user = ctx.env.SUDO_USER;
-  // `sudo` records the invoking user; a root shell (`su`, root login) records nothing — and "root behind the sudo" is just a root shell with extra steps.
-  if (user && user !== "root") {
-    // The authoritative home, from Directory Services — not a guessed /Users/<name>.
-    const r = exec("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], true);
-    const home = r.out.match(/^NFSHomeDirectory:\s*(.+)$/m)?.[1];
-    if (r.status === 0 && home) {
-      ctx.stdout.write(
-        `Running under sudo — pinning certificate storage to ${user}'s home: ${home}\n`,
-      );
-      return home;
-    }
-  }
+  if (uid !== 0) return false;
   ctx.stderr.write(
-    "devsite init is running as root and cannot find your real user account.\n" +
-      "Run it as yourself, without sudo — it calls sudo itself for the privileged steps:\n" +
+    "devsite init is running as root, but Caddy must run as you.\n" +
+      "Run it as yourself, without sudo — it calls sudo itself for the steps that need it:\n" +
       "  bunx devsite init\n",
   );
-  return null;
+  return true;
 }
 
 type Route = { host: string; project: string };
@@ -88,7 +85,7 @@ function discoverRoutes(repoRoot: string): Route[] {
     }
   }
   const routes: Route[] = [];
-  // Keyed lowercase: DNS is case-insensitive, and Caddy refuses a config with two site blocks for one address — that refusal would land only after the privileged write, as a dead always-on service.
+  // Keyed lowercase: DNS is case-insensitive, and Caddy refuses a config with two site blocks for one address — that refusal would land only after the write, as a dead always-on service.
   const claimed = new Map<string, string>();
   for (const path of candidates) {
     if (!existsSync(path)) continue;
@@ -170,7 +167,7 @@ function keptDirectivesIn(region: string | null): string[] {
 function storagePinLines(pki: Pki): string[] {
   return [
     "\t# Pin PKI storage so Caddy's local CA is the SAME no matter which user runs",
-    "\t# it (always-on root service vs a foreground process). Every device trusts",
+    "\t# it (the always-on service vs a foreground process). Every device trusts",
     `\t# this one CA root: ${pki.caRootCert}`,
     "\tstorage file_system {",
     `\t\troot "${pki.storageRoot}"`,
@@ -188,6 +185,7 @@ function renderHostFile(r: Route): string {
     `\t\t\tlifetime ${LEAF_LIFETIME}`,
     "\t\t}",
     "\t}",
+    ...guardCaddyfileLines(),
     `\trespond "devsite: dev server for ${r.host} is not running (start it with bun dev)" 503`,
     "}",
     "",
@@ -231,52 +229,190 @@ function unifiedDiff(c: Change): string {
   return r.outRaw;
 }
 
+// One key answers, with no Enter: raw mode hands over each key press as it comes. Ctrl-C arrives as a plain byte in raw mode, and reads as "stop".
 async function confirm(question: string, ctx: CliContext): Promise<boolean> {
-  // readline only ever calls output.write here (non-terminal prompts); the cast bridges Writer to the nominal stream type it asks for.
-  const rl = createInterface({
-    input: ctx.stdin,
-    output: ctx.stdout as unknown as NodeJS.WritableStream,
+  ctx.stdout.write(question);
+  const stdin = ctx.stdin as CliContext["stdin"] & { setRawMode?: (on: boolean) => unknown };
+  stdin.setRawMode?.(true);
+  stdin.resume();
+  const key = await new Promise<string>((resolve) => {
+    stdin.once("data", (d) => resolve(String(d)));
   });
-  try {
-    return /^y(es)?$/i.test((await rl.question(question)).trim());
-  } finally {
-    rl.close();
-  }
+  stdin.setRawMode?.(false);
+  stdin.pause();
+  const yes = /^y/i.test(key);
+  ctx.stdout.write(`${yes ? "y" : "n"}\n`);
+  return yes;
 }
 
 function sudo(args: string[], ctx: CliContext) {
   ctx.stdout.write(`  sudo ${args.join(" ")}\n`);
-  if (exec("sudo", args).status !== 0) {
+  // sudo prints its prompt only when it asks; the blank line sets it apart from the command above.
+  if (exec("sudo", ["-p", "\n  Password for sudo (%u): ", ...args]).status !== 0) {
     throw new Error(`\`sudo ${args.join(" ")}\` failed`);
   }
 }
 
-function applyPrivileged(
+function asUser(args: string[], ctx: CliContext) {
+  ctx.stdout.write(`  ${args.join(" ")}\n`);
+  const [cmd = "", ...rest] = args;
+  if (exec(cmd, rest).status !== 0) {
+    throw new Error(`\`${args.join(" ")}\` failed`);
+  }
+}
+
+// What a root Caddy service from an earlier devsite leaves owned by root: its storage, devsite's files, and Homebrew's Caddy paths. `brew upgrade` and the user service both fail on them.
+function caddyPaths(caddyfilePath: string, devsiteDir: string, storageRoot: string): string[] {
+  const prefix = exec("brew", ["--prefix"], true).out || "/opt/homebrew";
+  return [
+    storageRoot,
+    devsiteDir,
+    caddyfilePath,
+    `${caddyfilePath}.bak`,
+    `${caddyfilePath}.pre-devsite`,
+    join(prefix, "Cellar", "caddy"),
+    join(prefix, "opt", "caddy"),
+    join(prefix, "var", "log", "caddy.log"),
+    join(prefix, "var", "lib", "caddy"),
+  ];
+}
+
+// A directory the user cannot read is root's (Caddy's storage is mode 700).
+function hasRootOwned(path: string): boolean {
+  const st = lstatSync(path, { throwIfNoEntry: false });
+  if (st === undefined) return false;
+  if (st.uid === 0) return true;
+  if (!st.isDirectory()) return false;
+  let names: string[];
+  try {
+    names = readdirSync(path);
+  } catch {
+    return true;
+  }
+  return names.some((n) => hasRootOwned(join(path, n)));
+}
+
+// What a root setup from an earlier devsite left behind (ADR 0002). Read-only, so the plan can show it before the user answers.
+type RootLeftovers = { service: boolean; process: boolean; owned: string[] };
+
+function findRootLeftovers(paths: string[]): RootLeftovers {
+  const info = exec("brew", ["services", "info", "caddy", "--json"], true);
+  let serviceUser: unknown;
+  try {
+    serviceUser = (JSON.parse(info.out) as { user?: unknown }[])[0]?.user;
+  } catch {
+    serviceUser = undefined;
+  }
+  const service = serviceUser === "root";
+  return {
+    service,
+    // A root Caddy outside the service (`sudo caddy run`) would hold :443 and the admin port. A root service's own process stops with the service, and a pkill that then matches nothing exits 1.
+    process: !service && exec("pgrep", ["-u", "0", "-x", "caddy"], true).status === 0,
+    owned: paths.filter(hasRootOwned),
+  };
+}
+
+// The move from a root service: stop it, and give its root-owned files back to the user, so the user service can start and init writes without sudo.
+function leaveRootService(l: RootLeftovers, ctx: CliContext) {
+  if (l.service) sudo(["brew", "services", "stop", "caddy"], ctx);
+  if (l.process) sudo(["pkill", "-u", "0", "-x", "caddy"], ctx);
+  if (l.owned.length > 0) {
+    sudo(["/usr/sbin/chown", "-R", "-h", userInfo().username, ...l.owned], ctx);
+  }
+}
+
+// ANSI colours only on a terminal, and never under NO_COLOR (no-color.org).
+type Paint = (code: number, text: string) => string;
+function painter(ctx: CliContext): Paint {
+  const on = (ctx.stdout as { isTTY?: boolean }).isTTY === true && !ctx.env.NO_COLOR;
+  return (code, text) => (on ? `\x1b[${code}m${text}\x1b[0m` : text);
+}
+const BOLD = 1;
+const DIM = 2;
+const RED = 31;
+const GREEN = 32;
+const YELLOW = 33;
+const CYAN = 36;
+
+function paintDiff(diff: string, paint: Paint): string {
+  return diff
+    .split("\n")
+    .map((l) => {
+      if (l.startsWith("+++ ") || l.startsWith("--- ")) return paint(BOLD, l);
+      if (l.startsWith("@@")) return paint(CYAN, l);
+      if (l.startsWith("+")) return paint(GREEN, l);
+      if (l.startsWith("-")) return paint(RED, l);
+      return l;
+    })
+    .join("\n");
+}
+
+type Step = { text: string; sudo?: boolean; details?: string[] };
+
+function tildePath(p: string): string {
+  const home = homedir();
+  return p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p;
+}
+
+function planSteps(
+  l: RootLeftovers,
   changes: Change[],
-  caddyfilePath: string,
-  devsiteDir: string,
-  ctx: CliContext,
-) {
+  caddyDir: string,
+  removedBinds: string[],
+): Step[] {
+  const steps: Step[] = [];
+  if (l.service) steps.push({ text: "stop the root Caddy service", sudo: true });
+  if (l.process) steps.push({ text: "stop the Caddy that runs as root", sudo: true });
+  if (l.owned.length > 0) {
+    steps.push({
+      text: "give root-owned Caddy files back to you",
+      sudo: true,
+      details: l.owned.map(tildePath),
+    });
+  }
+  if (changes.length > 0) {
+    steps.push({
+      text: `write ${changes.length} file(s) in ${caddyDir}, as the diff below shows`,
+      details: removedBinds.map(
+        (b) =>
+          `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out`,
+      ),
+    });
+  }
+  steps.push({ text: "restart Caddy as you" });
+  steps.push({ text: "trust Caddy's local CA", sudo: true });
+  return steps;
+}
+
+function printSteps(heading: string, steps: Step[], paint: Paint, ctx: CliContext) {
+  ctx.stdout.write(`\n${paint(BOLD, heading)}\n`);
+  steps.forEach((s, i) => {
+    const tag = s.sudo ? `  ${paint(YELLOW, "[sudo]")}` : "";
+    ctx.stdout.write(`  ${i + 1}. ${s.text}${tag}\n`);
+    for (const d of s.details ?? []) ctx.stdout.write(`     ${paint(DIM, d)}\n`);
+  });
+}
+
+function applyChanges(changes: Change[], caddyfilePath: string, devsiteDir: string) {
   if (changes.some((c) => c.abs === caddyfilePath) && existsSync(caddyfilePath)) {
     // The world before devsite ever touched it — created once, never written again.
     if (!existsSync(`${caddyfilePath}.pre-devsite`)) {
-      sudo(["cp", caddyfilePath, `${caddyfilePath}.pre-devsite`], ctx);
+      copyFileSync(caddyfilePath, `${caddyfilePath}.pre-devsite`);
     }
-    sudo(["cp", caddyfilePath, `${caddyfilePath}.bak`], ctx);
+    copyFileSync(caddyfilePath, `${caddyfilePath}.bak`);
   }
-  if (!existsSync(devsiteDir) && changes.some((c) => c.next !== null && c.abs !== caddyfilePath)) {
-    sudo(["mkdir", "-p", devsiteDir], ctx);
+  if (changes.some((c) => c.next !== null && c.abs !== caddyfilePath)) {
+    mkdirSync(devsiteDir, { recursive: true });
   }
   for (const c of changes) {
-    if (c.next === null) {
-      sudo(["rm", c.abs], ctx);
-    } else {
-      sudo(["cp", writeTmp(c.next), c.abs], ctx);
-      sudo(["chmod", "644", c.abs], ctx);
-    }
+    if (c.next === null) rmSync(c.abs);
+    else writeFileSync(c.abs, c.next);
   }
-  exec("sudo", ["pkill", "-x", "caddy"]); // kill any non-service foreground Caddy; ok if none
-  sudo(["brew", "services", "restart", "caddy"], ctx);
+}
+
+function restartService(ctx: CliContext) {
+  exec("pkill", ["-x", "caddy"]); // the user's own foreground Caddy, if any
+  asUser(["brew", "services", "restart", "caddy"], ctx);
 }
 
 const ADMIN_WAIT_MS = 5000;
@@ -407,7 +543,10 @@ type CaddyfilePlan = {
   migrated: { host: string; block: string }[];
   // Non-null when the plan puts local_certs into a block the user owns — the path-specific first half of the warning; init appends the blast radius.
   globalWarning: string | null;
+  removedBinds: string[];
 };
+
+const DEFAULT_BIND_RE = /^\s*default_bind\b/;
 
 // devsite's two global directives, as presence checks on a block's inner text.
 function hasLocalCerts(inner: string): boolean {
@@ -438,7 +577,19 @@ function planCaddyfile(existing: string, ownHosts: Set<string>, pki: Pki): Caddy
       .join("\n");
     migrated = blocks.filter((b) => !ownHosts.has(b.host));
   }
-  const kept = keptDirectivesIn(region);
+  const removedBinds: string[] = [];
+  const isBind = (l: string) => {
+    if (!DEFAULT_BIND_RE.test(l)) return false;
+    removedBinds.push(l.trim());
+    return true;
+  };
+  const kept = keptDirectivesIn(region).filter((l) => !isBind(l));
+  // The one exception to never rewriting the user's global block: Caddy as the user cannot start with a default_bind (ADR 0002), and the guard does its job.
+  const withBind = findGlobalBlock(outside);
+  if (withBind !== null) {
+    const lines = withBind.full.split("\n").filter((l) => !isBind(l));
+    outside = outside.slice(0, withBind.start) + lines.join("\n") + outside.slice(withBind.end);
+  }
 
   // The global options block lives in the Caddyfile — Caddy allows exactly one, first in the file. Three cases:
   //   - none: devsite creates one with its two directives (plus any v1 "kept" user directives returning home).
@@ -493,7 +644,7 @@ function planCaddyfile(existing: string, ownHosts: Set<string>, pki: Pki): Caddy
   }
 
   const trimmed = outside.replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "");
-  return { next: `${trimmed}\n`, migrated, globalWarning };
+  return { next: `${trimmed}\n`, migrated, globalWarning, removedBinds };
 }
 
 // No argv knowledge here — run.ts parses flags and passes options plus the io context. Fatal conditions return 1 (after explaining themselves); unexpected errors throw and run.ts turns them into an exit code.
@@ -506,9 +657,8 @@ export async function init(
   const caddyfilePath = ctx.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile";
   const caddyDir = dirname(caddyfilePath);
   const devsiteDir = join(caddyDir, "devsite.d");
-  const home = realUserHome(ctx);
-  if (home === null) return 1;
-  const storageRoot = join(home, "Library", "Application Support", "Caddy");
+  if (isRoot(ctx)) return 1;
+  const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
   const pki: Pki = {
     storageRoot,
     caRootCert: join(storageRoot, "pki", "authorities", "local", "root.crt"),
@@ -569,9 +719,10 @@ export async function init(
   }
   changes.sort((a, b) => a.rel.localeCompare(b.rel));
 
-  ctx.stdout.write(`devsite init — ${routes.length} route(s):\n`);
+  const paint = painter(ctx);
+  ctx.stdout.write(`${paint(BOLD, "devsite init")}\n`);
   for (const r of routes) {
-    ctx.stdout.write(`  ${r.host} → dev server's port at runtime  (${r.project})\n`);
+    ctx.stdout.write(`  https://${r.host}  ${paint(DIM, `(${r.project})`)}\n`);
   }
   if (plan.migrated.length > 0) {
     ctx.stdout.write(
@@ -580,34 +731,47 @@ export async function init(
   }
   if (plan.globalWarning !== null) {
     ctx.stderr.write(
-      `\n⚠ ${plan.globalWarning} ` +
-        "Note: `local_certs` gives EVERY site on this Caddy an internal-CA cert; " +
-        "a public site in this file will lose its real certificate.\n",
+      paint(
+        YELLOW,
+        `\n⚠ ${plan.globalWarning} ` +
+          "Note: `local_certs` gives EVERY site on this Caddy an internal-CA cert; " +
+          "a public site in this file will lose its real certificate.\n",
+      ),
     );
   }
+
+  // A scratch Caddyfile (DEVSITE_CADDYFILE, the tests) belongs to no Homebrew service, so there is nothing of a root setup to find.
+  const leftovers = ctx.env.DEVSITE_CADDYFILE
+    ? { service: false, process: false, owned: [] }
+    : findRootLeftovers(caddyPaths(caddyfilePath, devsiteDir, storageRoot));
+  const steps = planSteps(leftovers, changes, caddyDir, plan.removedBinds);
 
   // Each piece ends with its own newline; concatenation is one multi-file unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
   const diff = changes.map(unifiedDiff).join("");
 
   if (dryRun) {
+    printSteps("Without --dry-run, this run would:", steps, paint, ctx);
     if (changes.length === 0) {
       ctx.stdout.write(
         `\n--dry-run: ${caddyfilePath} and devsite.d are already up to date; nothing to write.\n`,
       );
     } else {
       ctx.stdout.write(
-        `\n--dry-run: would change ${changes.length} file(s) in ${caddyDir}; the diff:\n\n${diff}\n`,
+        `\n--dry-run: would change ${changes.length} file(s) in ${caddyDir}; the diff:\n\n${paintDiff(diff, paint)}\n`,
       );
     }
     return 0;
   }
 
-  if (changes.length === 0) {
-    ctx.stdout.write(
-      `\n${caddyfilePath} and devsite.d are already up to date — (re)starting the Caddy service (needs sudo)…\n`,
-    );
-  } else {
-    ctx.stdout.write(`\nThe change (paths relative to ${caddyDir}):\n\n${diff}\n\n`);
+  printSteps("On y, this run will:", steps, paint, ctx);
+  if (changes.length > 0) {
+    ctx.stdout.write(`\n${paint(BOLD, `The diff (paths relative to ${caddyDir}):`)}\n\n`);
+    ctx.stdout.write(`${paintDiff(diff, paint)}\n`);
+  }
+  // A run with nothing to write and no root setup to move only restarts Caddy and re-trusts the CA, so it asks nothing.
+  const asks =
+    changes.length > 0 || leftovers.service || leftovers.process || leftovers.owned.length > 0;
+  if (asks) {
     if (!ctx.stdin.isTTY) {
       ctx.stderr.write(
         "stdin is not a TTY — cannot ask for confirmation; nothing written. " +
@@ -615,15 +779,15 @@ export async function init(
       );
       return 1;
     }
-    if (!(await confirm("Apply this change? [y/N] ", ctx))) {
-      ctx.stderr.write("Aborted — nothing written.\n");
+    if (!(await confirm(`\n${paint(BOLD, "Press y to apply, any other key to stop:")} `, ctx))) {
+      ctx.stderr.write("Stopped — nothing changed.\n");
       return 1;
     }
-    ctx.stdout.write(
-      `\nWriting ${changes.length} file(s) + (re)starting the always-on Caddy service (needs sudo)…\n`,
-    );
   }
-  applyPrivileged(changes, caddyfilePath, devsiteDir, ctx);
+  ctx.stdout.write("\n");
+  leaveRootService(leftovers, ctx);
+  applyChanges(changes, caddyfilePath, devsiteDir);
+  restartService(ctx);
   if (!(await waitForCaddyAdmin())) {
     ctx.stderr.write(
       `\nThe Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s — see ${CADDY_LOG}\n`,

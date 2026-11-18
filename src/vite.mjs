@@ -5,6 +5,7 @@
 // Plain .mjs (not .ts): Vite's config loader externalizes bare imports and hands them to the Node runtime, which won't execute TypeScript from node_modules. The published type surface lives in vite.types.d.mts — named so it does NOT shadow this module in the typecheck program (tsc skips a .js root file when an adjacent same-named .d.ts exists, and checkJs would then never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { guardedRoute } from "./guard.mjs";
 import { devSiteName, hostsOf } from "./names.mjs";
 import { stampLastUsed } from "./state.mjs";
 
@@ -31,11 +32,9 @@ export function caddy(path, init = {}) {
  * @param {number} port
  */
 function devsiteRoute(hosts, port) {
-  return {
-    match: [{ host: hosts }],
-    handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${port}` }] }],
-    terminal: true,
-  };
+  return guardedRoute(hosts, [
+    { handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${port}` }] },
+  ]);
 }
 
 /**
