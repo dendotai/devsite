@@ -39,6 +39,7 @@
   body {
     margin: 0;
     min-height: 100vh;
+    /* biome-ignore lint/suspicious/noDuplicateProperties: 100vh is the fallback for browsers without svh units */
     min-height: 100svh;
     padding: 2.5rem 1.5rem;
     font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
@@ -241,11 +242,11 @@
 </main>
 
 <script>
-  (function () {
+  (() => {
     var tries = 0;
     var label = document.getElementById("tries");
     function check() {
-      fetch("/", { cache: "no-store" }).then(function (res) {
+      fetch("/", { cache: "no-store" }).then((res) => {
         if (res.ok) {
           location.reload();
           return;
@@ -255,6 +256,7 @@
     }
     function bump() {
       tries += 1;
+      // biome-ignore lint/style/useTemplate: Caddy serves this page through its placeholder replacer, which reads {name} as a placeholder
       label.textContent = " · attempt " + tries;
     }
     setInterval(check, 2000);
