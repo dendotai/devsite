@@ -63,7 +63,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "test": "bun test"
+    "test": "bun test",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "peerDependencies": {
     "vite": "^8.0.0"
