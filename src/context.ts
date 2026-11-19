@@ -1,6 +1,13 @@
 // The CLI's io contact surface with the process, as one injectable value. run() and the command handlers read and write only through this — tests pass buffers and plain objects instead of spying on console or mutating process state. Production uses processContext(), the real thing.
+import { spawnSync } from "node:child_process";
 
 export type Writer = { write(chunk: string): unknown };
+
+// capture: the child's stdout comes back in `stdout` and its stderr is dropped; otherwise the child shares the terminal (a sudo password prompt needs it) and `stdout` is "".
+export type CommandOptions = { capture: boolean };
+// error is set when the command could not start at all (not on PATH); status is then 1.
+export type CommandResult = { status: number; stdout: string; error?: Error };
+export type CommandRunner = (cmd: string, args: string[], opts: CommandOptions) => CommandResult;
 
 export type CliContext = {
   stdout: Writer;
@@ -14,6 +21,16 @@ export type CliContext = {
     DEVSITE_CADDYFILE?: string;
     [key: string]: string | undefined;
   };
+  // Every external command the CLI runs goes through here, so a test scripts each answer and reads which commands ran.
+  runCommand: CommandRunner;
+};
+
+export const spawnCommand: CommandRunner = (cmd, args, { capture }) => {
+  const r = spawnSync(cmd, args, {
+    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    encoding: "utf8",
+  });
+  return { status: r.status ?? 1, stdout: r.stdout ?? "", error: r.error };
 };
 
 export function processContext(): CliContext {
@@ -23,5 +40,6 @@ export function processContext(): CliContext {
     stdin: process.stdin,
     cwd: process.cwd(),
     env: process.env,
+    runCommand: spawnCommand,
   };
 }
