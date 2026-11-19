@@ -3,6 +3,7 @@
 // run() is three named steps: parse (argv → values/positionals, strict per command), resolve (a COMMANDS table lookup and nothing else), then the command's handler. Commands are data: one COMMANDS row per command carries its help lines, its flags, and its handler, and USAGE is generated from the table — help text and the parser cannot drift apart. Command-like global flags (--help, --version) map to their command through GLOBAL_FLAGS' `command` field — adding one adds a table entry, never a branch. parseArgs is strict, scoped per command: an unknown flag (--dyr-run), or a command flag outside its command (--dry-run with no init), fails with usage instead of silently reaching the privileged bootstrap.
 import { parseArgs } from "node:util";
 import pkg from "../package.json";
+import { doctor } from "./commands/doctor";
 import { init } from "./commands/init";
 import { type CliContext, processContext } from "./context";
 
@@ -54,6 +55,14 @@ const COMMANDS: Record<string, Command> = {
       },
     },
     run: (values, ctx) => init({ dryRun: values["dry-run"] === true }, ctx),
+  },
+  doctor: {
+    summary: [
+      "Print how this Mac is set up, then check what devsite needs.",
+      "Writes nothing and runs no sudo; exits 1 on any red check.",
+    ],
+    flags: {},
+    run: (_values, ctx) => doctor(ctx),
   },
   help: {
     summary: ["Print this help."],

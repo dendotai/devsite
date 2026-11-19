@@ -44,23 +44,34 @@ const IMPORT_RE = /^import devsite\.d\/\*\.caddy(?:[ \t]+#.*)?$/m;
 // Where the pinned PKI storage lives; derived from the *human's* home once per run.
 type Pki = { storageRoot: string; caRootCert: string };
 
-// Caddy runs as the user who runs init (ADR 0002): as root, `brew services` would install a root service and every write would be root-owned.
-function refuseRoot(ctx: CliContext): boolean {
+// DEVSITE_CADDYFILE points tests at a scratch file.
+export function caddyfileOf(ctx: CliContext): string {
+  return ctx.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile";
+}
+
+const SUDO_NOTE = {
+  init: "it calls sudo itself for the steps that need it",
+  doctor: "it never needs sudo",
+};
+
+// init: Caddy runs as the user who runs init (ADR 0002): as root, `brew services` would install a root service and every write would be root-owned.
+// doctor writes nothing, but as root it checks the wrong user: `security verify-cert` reads the trust settings of the user who runs it, and with no `storage` line the storage path comes from root's home. A script that runs doctor under sudo gets exit 1, not a gate on the wrong keychain.
+export function refuseRoot(command: keyof typeof SUDO_NOTE, ctx: CliContext): boolean {
   // Overridable so tests can exercise the root path without actually being root.
   // An empty export must not count: Number("") is 0, which would read as root.
   const uid = ctx.env.DEVSITE_UID ? Number(ctx.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
   if (uid !== 0) return false;
   ctx.stderr.write(
-    "devsite init is running as root, but Caddy must run as you.\n" +
-      "Run it as yourself, without sudo — it calls sudo itself for the steps that need it:\n" +
-      "  bunx devsite init\n",
+    `devsite ${command} is running as root, but Caddy must run as you.\n` +
+      `Run it as yourself, without sudo — ${SUDO_NOTE[command]}:\n` +
+      `  bunx devsite ${command}\n`,
   );
   return true;
 }
 
-type Route = { host: string; project: string };
+export type Route = { host: string; project: string };
 
-function discoverRoutes(repoRoot: string): Route[] {
+export function discoverRoutes(repoRoot: string): Route[] {
   const candidates = [join(repoRoot, "package.json")];
   for (const dir of ["apps", "packages"]) {
     const base = join(repoRoot, dir);
@@ -125,7 +136,7 @@ function storagePinLines(pki: Pki): string[] {
 }
 
 // Placeholder only — the devsite Vite plugin swaps in a reverse_proxy to the dev server's ephemeral port at runtime via the admin API. The first line (`# <project>`) is the file's ownership record, read by rename cleanup.
-function renderHostFile(r: Route): string {
+export function renderHostFile(r: Route): string {
   return [
     `# ${r.project}`,
     `${r.host} {`,
@@ -141,7 +152,7 @@ function renderHostFile(r: Route): string {
   ].join("\n");
 }
 
-function exec(cmd: string, args: string[], ctx: CliContext, capture = false) {
+export function exec(cmd: string, args: string[], ctx: CliContext, capture = false) {
   const r = ctx.runCommand(cmd, args, { capture });
   // outRaw exists for diff output, where trimming could eat a meaningful trailing context line (a lone space) and corrupt the patch.
   return { status: r.status, out: r.stdout.trim(), outRaw: r.stdout, error: r.error };
@@ -203,15 +214,15 @@ function asUser(args: string[], ctx: CliContext) {
 }
 
 // NO_COLOR: https://no-color.org. The basic 8 colours take the terminal theme's palette.
-type Paint = (code: number, text: string) => string;
-function painter(stream: CliContext["stdout"], ctx: CliContext): Paint {
+export type Paint = (code: number, text: string) => string;
+export function painter(stream: CliContext["stdout"], ctx: CliContext): Paint {
   const on = (stream as { isTTY?: boolean }).isTTY === true && !ctx.env.NO_COLOR;
   return (code, text) => (on ? `\x1b[${code}m${text}\x1b[0m` : text);
 }
-const BOLD = 1;
-const DIM = 2;
-const RED = 31;
-const GREEN = 32;
+export const BOLD = 1;
+export const DIM = 2;
+export const RED = 31;
+export const GREEN = 32;
 const YELLOW = 33;
 const CYAN = 36;
 
@@ -489,12 +500,12 @@ export async function init(
   { dryRun }: { dryRun: boolean },
   ctx: CliContext = processContext(),
 ): Promise<number> {
-  // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the repo root. DEVSITE_CADDYFILE points tests at a scratch file.
+  // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the repo root.
   const cwd = ctx.cwd;
-  const caddyfilePath = ctx.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile";
+  const caddyfilePath = caddyfileOf(ctx);
   const caddyDir = dirname(caddyfilePath);
   const devsiteDir = join(caddyDir, "devsite.d");
-  if (refuseRoot(ctx)) return 1;
+  if (refuseRoot("init", ctx)) return 1;
   const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
   const pki: Pki = {
     storageRoot,
