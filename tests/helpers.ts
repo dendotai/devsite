@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { Plugin } from "vite";
-import { type CliContext, type CommandResult, spawnCommand } from "../src/context";
+import { type CliContext, type CommandResult, processRunner } from "../src/context";
 import { run } from "../src/run";
 
 export function sink() {
@@ -35,7 +35,7 @@ export type IoOpts = {
   runCommand?: CliContext["runCommand"];
 };
 
-// A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so an ambient DEVSITE_UID can never leak in. Commands run for real unless the test passes a scripted runner.
+// A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so an ambient DEVSITE_UID can never leak in.
 export function makeIo(opts: IoOpts = {}) {
   const stdout = sink();
   const stderr = sink();
@@ -45,15 +45,15 @@ export function makeIo(opts: IoOpts = {}) {
     stdin: opts.stdin ?? fakeStdin("", false),
     cwd: opts.cwd ?? makeEmptyRepo(),
     env: { DEVSITE_CADDYFILE: opts.caddyfile ?? scratchCaddyfile() },
-    runCommand: opts.runCommand ?? spawnCommand,
+    runCommand: opts.runCommand ?? processRunner,
   };
   return { ctx, stdout, stderr };
 }
 
 export type CommandCall = { cmd: string; args: string[]; capture: boolean };
 
-// A runner that runs nothing: it records each call and returns the test's scripted answer for it.
-export function scriptedRunner(answer: (call: CommandCall) => Partial<CommandResult> = () => ({})) {
+// Runs nothing and records each call; a field the answer leaves out reads as exit 0 with empty stdout.
+export function scriptedRunner(answer: (call: CommandCall) => Partial<CommandResult>) {
   const calls: CommandCall[] = [];
   const runCommand: CliContext["runCommand"] = (cmd, args, { capture }) => {
     const call = { cmd, args, capture };

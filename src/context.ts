@@ -1,4 +1,4 @@
-// The CLI's io contact surface with the process, as one injectable value. run() and the command handlers read and write only through this — tests pass buffers and plain objects instead of spying on console or mutating process state. Production uses processContext(), the real thing.
+// The CLI's contact surface with the process (io, and every external command it runs), as one injectable value. run() and the command handlers read and write only through this — tests pass buffers and plain objects instead of spying on console or mutating process state. Production uses processContext(), the real thing.
 import { spawnSync } from "node:child_process";
 
 export type Writer = { write(chunk: string): unknown };
@@ -25,7 +25,7 @@ export type CliContext = {
   runCommand: CommandRunner;
 };
 
-export const spawnCommand: CommandRunner = (cmd, args, { capture }) => {
+export const processRunner: CommandRunner = (cmd, args, { capture }) => {
   const r = spawnSync(cmd, args, {
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: "utf8",
@@ -40,6 +40,6 @@ export function processContext(): CliContext {
     stdin: process.stdin,
     cwd: process.cwd(),
     env: process.env,
-    runCommand: spawnCommand,
+    runCommand: processRunner,
   };
 }

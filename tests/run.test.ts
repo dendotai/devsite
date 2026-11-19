@@ -106,16 +106,16 @@ test("init --dry-run through the io context: renders the tree diff, returns 0", 
 test("init --dry-run runs only diff, one call per planned file, and prints its answers", async () => {
   const { runCommand, calls } = scriptedRunner(({ args }) => ({
     status: 1,
-    stdout: `scripted diff of ${args[2]}\n`,
+    stdout: `scripted diff of ${args.at(-3)}\n`,
   }));
   const r = await cli(["init", "--dry-run"], { cwd: makeRepo(), runCommand });
   expect(r.status).toBe(0);
-  expect(calls.map((c) => [c.cmd, c.args[2], c.capture])).toEqual([
-    ["diff", "/dev/null", true],
-    ["diff", "/dev/null", true],
+  // The last argument, the planned content, is a temp file with a per-run name.
+  expect(calls.map((c) => [c.cmd, ...c.args.slice(0, -1), c.capture])).toEqual([
+    ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/web.test.internal.caddy", "/dev/null", true],
   ]);
-  expect(calls.map((c) => c.args[4])).toEqual(["Caddyfile", "devsite.d/web.test.internal.caddy"]);
-  expect(r.stdout).toContain("scripted diff of /dev/null");
+  expect(r.stdout).toContain("scripted diff of devsite.d/web.test.internal.caddy");
 });
 
 test("init --dry-run stops when diff cannot start, and writes no diff", async () => {
