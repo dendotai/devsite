@@ -1,0 +1,481 @@
+// `devsite doctor` scenarios, one per check, green and red: run(["doctor"]) over a scratch Caddy dir, a scripted runner (openssl s_client, security), and a local mock of Caddy's admin API.
+import { afterEach, beforeAll, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { renderHostFile } from "../src/commands/init";
+import { guardedRoute } from "../src/guard.mjs";
+import { run } from "../src/run";
+import {
+  type CommandCall,
+  cli,
+  makeEmptyRepo,
+  makeIo,
+  makeRepo,
+  scratchCaddyfile,
+  scriptedRunner,
+} from "./helpers";
+
+const HOST = "web.test.internal";
+
+type Pki = { root: string; served: string; otherRoot: string };
+let pki: Pki;
+
+function openssl(args: string[], cwd: string) {
+  const r = spawnSync("openssl", args, { cwd, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`openssl ${args.join(" ")}: ${r.stderr}`);
+}
+
+// Two CAs: the one in Caddy's storage (root → intermediate → leaf, the chain Caddy serves) and an unrelated one.
+beforeAll(() => {
+  const dir = mkdtempSync(join(tmpdir(), "devsite-pki-"));
+  const req = (name: string, cn: string) =>
+    openssl(
+      ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2"].concat([
+        "-keyout",
+        `${name}.key`,
+        "-out",
+        `${name}.crt`,
+        "-subj",
+        `/CN=${cn}`,
+      ]),
+      dir,
+    );
+  const signed = (name: string, cn: string, ca: string) => {
+    openssl(
+      ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", `${name}.key`].concat([
+        "-out",
+        `${name}.csr`,
+        "-subj",
+        `/CN=${cn}`,
+      ]),
+      dir,
+    );
+    openssl(
+      ["x509", "-req", "-in", `${name}.csr`, "-CA", `${ca}.crt`, "-CAkey", `${ca}.key`].concat([
+        "-CAcreateserial",
+        "-days",
+        "2",
+        "-out",
+        `${name}.crt`,
+      ]),
+      dir,
+    );
+  };
+  req("root", "Test Root");
+  req("other", "Other Root");
+  signed("inter", "Test Intermediate", "root");
+  signed("leaf", HOST, "inter");
+  const read = (n: string) => readFileSync(join(dir, `${n}.crt`), "utf8");
+  pki = { root: read("root"), served: read("leaf") + read("inter"), otherRoot: read("other") };
+});
+
+// --- the admin API mock ---
+
+const servers: Server[] = [];
+const savedAdmin = process.env.DEVSITE_CADDY_ADMIN;
+
+afterEach(async () => {
+  if (savedAdmin === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
+  else process.env.DEVSITE_CADDY_ADMIN = savedAdmin;
+  await Promise.all(
+    servers.splice(0).map((s) => {
+      s.closeAllConnections();
+      return new Promise((r) => s.close(r));
+    }),
+  );
+});
+
+// Serves `routes` as server srv0's route list, as Caddy's GET /config/apps/http/servers does.
+async function mockAdmin(routes: unknown[]) {
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/config/apps/http/servers") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ srv0: { listen: [":443"], routes } }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  servers.push(server);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  process.env.DEVSITE_CADDY_ADMIN = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+async function noAdmin() {
+  const server = createServer();
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise((r) => server.close(r));
+  process.env.DEVSITE_CADDY_ADMIN = `http://127.0.0.1:${port}`;
+}
+
+const placeholder = () => guardedRoute([HOST], [{ handler: "static_response", status_code: 503 }]);
+
+// --- the scratch Caddy dir ---
+
+type Machine = { caddyfile: string; dir: string };
+
+// A Caddy dir as init leaves it: a Caddyfile that pins storage, the CA root in that storage, and one host file of project "web".
+function setUpMachine(opts: { root?: string | null; hostFile?: string | null } = {}): Machine {
+  const caddyfile = scratchCaddyfile();
+  const dir = dirname(caddyfile);
+  const storage = join(dir, "storage");
+  writeFileSync(
+    caddyfile,
+    `{\n\tstorage file_system {\n\t\troot "${storage}"\n\t}\n}\n\nimport devsite.d/*.caddy # devsite\n`,
+  );
+  const root = opts.root === undefined ? pki.root : opts.root;
+  if (root !== null) {
+    const local = join(storage, "pki", "authorities", "local");
+    mkdirSync(local, { recursive: true });
+    writeFileSync(join(local, "root.crt"), root);
+  }
+  const hostFile =
+    opts.hostFile === undefined ? renderHostFile({ host: HOST, project: "web" }) : opts.hostFile;
+  if (hostFile !== null) {
+    mkdirSync(join(dir, "devsite.d"));
+    writeFileSync(join(dir, "devsite.d", `${HOST}.caddy`), hostFile);
+  }
+  return { caddyfile, dir };
+}
+
+// Every file under dir with its content: a run that wrote nothing leaves it equal.
+function snapshot(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+    if (f.isFile()) {
+      const p = join(f.parentPath, f.name);
+      out[p] = readFileSync(p, "utf8");
+    }
+  }
+  return out;
+}
+
+type Answers = { served?: string; trusted?: boolean };
+
+function runner(a: Answers = {}) {
+  return scriptedRunner((c: CommandCall) => {
+    if (c.cmd === "openssl" && c.args[0] === "s_client") return { stdout: a.served ?? pki.served };
+    if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
+    return { status: 1 };
+  });
+}
+
+async function doctor(
+  m: Machine,
+  opts: { cwd?: string; answers?: Answers } = {},
+): Promise<{ status: number; stdout: string; stderr: string; calls: CommandCall[] }> {
+  const { runCommand, calls } = runner(opts.answers);
+  const r = await cli(["doctor"], {
+    cwd: opts.cwd ?? makeRepo(),
+    caddyfile: m.caddyfile,
+    runCommand,
+  });
+  return { ...r, calls };
+}
+
+// --- every check green ---
+
+test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine();
+  const before = snapshot(m.dir);
+  const r = await doctor(m);
+  expect(r.stdout).toContain(`Caddy: config ${m.caddyfile}`);
+  expect(r.stdout).toContain(
+    `Caddy storage: ${join(m.dir, "storage")} (the Caddyfile's storage line)`,
+  );
+  expect(r.stdout).toContain("✓ Caddy's admin API answers");
+  expect(r.stdout).toContain(`✓ ${HOST}'s route starts with the LAN guard`);
+  expect(r.stdout).toContain(`✓ no route before ${HOST}'s also matches it`);
+  expect(r.stdout).toContain("✓ the served certificate chains to the CA in Caddy's storage");
+  expect(r.stdout).toContain("✓ that CA is trusted in the keychain");
+  expect(r.stdout).toContain(
+    "✓ every devSite name of this repo is valid and used by one project only",
+  );
+  expect(r.stdout).toContain(`✓ ${HOST} is used by web only`);
+  expect(r.stdout).toContain(`✓ ${HOST}'s host file matches what init writes`);
+  expect(r.stdout).toContain("Every check is green.");
+  expect(r.stdout).not.toContain("✗");
+  expect(r.status).toBe(0);
+  expect(snapshot(m.dir)).toEqual(before);
+  expect(r.calls.map((c) => c.cmd)).toEqual(["openssl", "security"]);
+  // The certificate check connects to this Mac with the host as SNI, so it needs no DNS.
+  expect(r.calls[0]?.args).toEqual([
+    "s_client",
+    "-connect",
+    "127.0.0.1:443",
+    "-servername",
+    HOST,
+    "-showcerts",
+  ]);
+  expect(r.calls[1]?.args).toEqual([
+    "verify-cert",
+    "-c",
+    join(m.dir, "storage", "pki", "authorities", "local", "root.crt"),
+    "-p",
+    "ssl",
+  ]);
+});
+
+test("a Caddyfile with no storage line: the Setup section names Caddy's default storage", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine();
+  writeFileSync(m.caddyfile, "import devsite.d/*.caddy # devsite\n");
+  const r = await doctor(m);
+  expect(r.stdout).toContain("Library/Application Support/Caddy (Caddy's default)");
+});
+
+// --- the Caddy checks, red ---
+
+test("the admin API does not answer: red with its fix, and the route checks are skipped", async () => {
+  await noAdmin();
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain("✗ Caddy's admin API answers — no answer");
+  expect(r.stdout).toContain("fix: bunx devsite init");
+  expect(r.stdout).toContain("– the routes of devsite's hosts — they need the admin API");
+  expect(r.stdout).toContain("1 check(s) red.");
+  expect(r.status).toBe(1);
+});
+
+test("no route names a devsite host: red", async () => {
+  await mockAdmin([]);
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain(`✗ ${HOST} has a route in Caddy — no route names it`);
+  expect(r.status).toBe(1);
+});
+
+test("a route without the LAN guard: red", async () => {
+  await mockAdmin([
+    {
+      match: [{ host: [HOST] }],
+      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:5173" }] }],
+      terminal: true,
+    },
+  ]);
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain(
+    `✗ ${HOST}'s route starts with the LAN guard — the guard is missing, so the LAN reaches this host`,
+  );
+  expect(r.status).toBe(1);
+});
+
+test("a route before the devsite host that also matches it: red, naming that route", async () => {
+  await mockAdmin([
+    { match: [{ host: ["*.test.internal"] }], handle: [], terminal: true },
+    placeholder(),
+  ]);
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain(
+    `✗ no route before ${HOST}'s also matches it — route 0 of server srv0 (*.test.internal) comes first`,
+  );
+  expect(r.stdout).toContain("fix: delete that route from Caddy's config");
+  expect(r.status).toBe(1);
+});
+
+test("routes before the devsite host that match other hosts only: green", async () => {
+  await mockAdmin([
+    { match: [{ host: ["api.test.internal", "*.internal"] }], handle: [], terminal: true },
+    placeholder(),
+  ]);
+  const r = await doctor(setUpMachine());
+  // `*.internal` stands for one label, so it does not match web.test.internal.
+  expect(r.stdout).toContain(`✓ no route before ${HOST}'s also matches it`);
+  expect(r.status).toBe(0);
+});
+
+test("a route with no host matcher before the devsite host matches every host: red", async () => {
+  await mockAdmin([{ handle: [], terminal: true }, placeholder()]);
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain("route 0 of server srv0 (every host) comes first");
+  expect(r.status).toBe(1);
+});
+
+test("the served certificate comes from another CA: red", async () => {
+  await mockAdmin([placeholder()]);
+  const r = await doctor(setUpMachine({ root: pki.otherRoot }));
+  expect(r.stdout).toContain(
+    `✗ the served certificate chains to the CA in Caddy's storage — ${HOST} is served a certificate from another CA`,
+  );
+  expect(r.status).toBe(1);
+});
+
+test("no certificate is served: red", async () => {
+  await mockAdmin([placeholder()]);
+  const r = await doctor(setUpMachine(), { answers: { served: "" } });
+  expect(r.stdout).toContain(`no certificate served for ${HOST} on 127.0.0.1:443`);
+  expect(r.status).toBe(1);
+});
+
+test("no CA in Caddy's storage: red, and the trust check is skipped", async () => {
+  await mockAdmin([placeholder()]);
+  const r = await doctor(setUpMachine({ root: null }));
+  expect(r.stdout).toContain(
+    "✗ the served certificate chains to the CA in Caddy's storage — no CA at",
+  );
+  expect(r.stdout).toContain("– that CA is trusted in the keychain — no CA to check");
+  expect(r.calls).toEqual([]);
+  expect(r.status).toBe(1);
+});
+
+test("the CA is not trusted in the keychain: red", async () => {
+  await mockAdmin([placeholder()]);
+  const r = await doctor(setUpMachine(), { answers: { trusted: false } });
+  expect(r.stdout).toContain("✗ that CA is trusted in the keychain");
+  expect(r.status).toBe(1);
+});
+
+// --- the checks of this repo ---
+
+test("the repo's host file differs from what init writes: red", async () => {
+  await mockAdmin([placeholder()]);
+  const r = await doctor(setUpMachine({ hostFile: "# web\nweb.test.internal {\n}\n" }));
+  expect(r.stdout).toContain(`✗ ${HOST}'s host file matches what init writes — it differs`);
+  expect(r.status).toBe(1);
+});
+
+test("the repo's host has no host file: red", async () => {
+  await mockAdmin([]);
+  const r = await doctor(setUpMachine({ hostFile: null }));
+  expect(r.stdout).toContain(`✗ ${HOST}'s host file matches what init writes — no `);
+  expect(r.status).toBe(1);
+});
+
+test("a project in another repo uses the same name: red, naming it", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ hostFile: renderHostFile({ host: HOST, project: "shop" }) });
+  const r = await doctor(m);
+  expect(r.stdout).toContain(
+    `✗ ${HOST} is used by web only — project shop in another repo uses it too`,
+  );
+  expect(r.stdout).toContain("fix: pick another devSite.name for web");
+  expect(r.status).toBe(1);
+});
+
+test("a devSite name that is not a plain hostname: red", async () => {
+  await mockAdmin([placeholder()]);
+  const r = await doctor(setUpMachine(), { cwd: makeRepo("bad_name") });
+  expect(r.stdout).toContain(
+    "✗ every devSite name of this repo is valid and used by one project only",
+  );
+  expect(r.stdout).toContain("is not a plain hostname");
+  expect(r.status).toBe(1);
+});
+
+test("two projects of this repo declare one name: red", async () => {
+  await mockAdmin([placeholder()]);
+  const repo = makeRepo();
+  mkdirSync(join(repo, "apps", "api"), { recursive: true });
+  writeFileSync(
+    join(repo, "apps", "api", "package.json"),
+    JSON.stringify({ name: "api", devSite: { name: "web.test" } }),
+  );
+  const r = await doctor(setUpMachine(), { cwd: repo });
+  expect(r.stdout).toContain('devSite.name "web.test" is declared by both web and api');
+  expect(r.status).toBe(1);
+});
+
+test("outside a repo: the machine checks run and the repo checks are skipped", async () => {
+  await mockAdmin([placeholder()]);
+  const cwd = makeEmptyRepo();
+  const r = await doctor(setUpMachine(), { cwd });
+  expect(r.stdout).toContain("✓ Caddy's admin API answers");
+  expect(r.stdout).toContain(`Skipped the checks of this repo: no package.json#devSite in ${cwd}.`);
+  expect(r.status).toBe(0);
+});
+
+test("doctor as root refuses, with init's reason", async () => {
+  const { runCommand, calls } = runner();
+  const io = makeIo({ runCommand });
+  io.ctx.env.DEVSITE_UID = "0";
+  expect(await run(["doctor"], io.ctx)).toBe(1);
+  expect(io.stderr.text()).toContain(
+    "devsite doctor is running as root, but Caddy must run as you.",
+  );
+  expect(io.stderr.text()).toContain("bunx devsite doctor");
+  expect(calls).toEqual([]);
+});
+
+// --- review follow-ups: Caddy's own matching rules, guards built another way, storage forms ---
+
+test("a wildcard in a middle label matches, as Caddy's host matcher does: red", async () => {
+  await mockAdmin([
+    { match: [{ host: ["web.*.internal"] }], handle: [], terminal: true },
+    placeholder(),
+  ]);
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain("route 0 of server srv0 (web.*.internal) comes first");
+  expect(r.status).toBe(1);
+});
+
+// The placeholder route with its guard letting in only `ranges`.
+function placeholderAllowing(ranges: string[]) {
+  return {
+    match: [{ host: [HOST] }],
+    handle: [
+      {
+        handler: "subroute",
+        routes: [
+          {
+            match: [{ not: [{ remote_ip: { ranges } }] }],
+            handle: [{ handler: "static_response", abort: true }],
+          },
+          { handle: [{ handler: "static_response", status_code: 503 }] },
+        ],
+      },
+    ],
+    terminal: true,
+  };
+}
+
+test("a guard that allows fewer sources still keeps the LAN out: green", async () => {
+  await mockAdmin([placeholderAllowing(["127.0.0.1"])]);
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain(`✓ ${HOST}'s route starts with the LAN guard`);
+});
+
+test("a guard that lets the LAN in: red", async () => {
+  await mockAdmin([placeholderAllowing(["127.0.0.1", "192.168.0.0/16"])]);
+  const r = await doctor(setUpMachine());
+  expect(r.stdout).toContain(`✗ ${HOST}'s route starts with the LAN guard`);
+  expect(r.status).toBe(1);
+});
+
+test("a snippet file in devsite.d is not read as a host", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine();
+  writeFileSync(join(m.dir, "devsite.d", "guard.caddy"), "(devsite-guard) {\n}\n");
+  const r = await doctor(m);
+  expect(r.stdout).not.toContain("guard has a route");
+  expect(r.status).toBe(0);
+});
+
+test("a one-line `storage file_system <path>`: the CA checks read that storage", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine();
+  const storage = join(m.dir, "storage");
+  writeFileSync(m.caddyfile, `{\n\tstorage file_system ${storage}\n}\n`);
+  const r = await doctor(m);
+  expect(r.stdout).toContain(`Caddy storage: ${storage} (the Caddyfile's storage line)`);
+  expect(r.stdout).toContain("✓ the served certificate chains to the CA in Caddy's storage");
+  expect(r.status).toBe(0);
+});
+
+test("a storage kind other than file_system: the CA checks are skipped, not red", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine();
+  writeFileSync(m.caddyfile, "{\n\tstorage redis {\n\t\thost 127.0.0.1\n\t}\n}\n");
+  const r = await doctor(m);
+  expect(r.stdout).toContain(
+    "Caddy storage: not read by devsite yet (the Caddyfile's storage line, storage redis)",
+  );
+  expect(r.stdout).toContain(
+    "– the served certificate chains to the CA in Caddy's storage — devsite reads only file_system storage yet",
+  );
+  expect(r.calls).toEqual([]);
+  expect(r.status).toBe(0);
+});

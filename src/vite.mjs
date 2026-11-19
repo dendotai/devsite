@@ -60,22 +60,35 @@ async function registerRoute(hosts, port) {
     (await res.json()) ?? {}
   );
 
-  for (const [name, srv] of Object.entries(servers)) {
-    const i = (srv.routes ?? []).findIndex((r) =>
-      (r.match ?? []).some((m) => (m.host ?? []).includes(hosts[0] ?? "")),
+  const found = findHostRoute(servers, hosts[0] ?? "");
+  if (found === null) {
+    throw new Error(
+      `no Caddy route for ${hosts[0]} — run \`bunx devsite init\` from the repo root`,
     );
-    if (i !== -1) {
-      const patch = await caddy(`/config/apps/http/servers/${name}/routes/${i}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(devsiteRoute(hosts, port)),
-      });
-      if (!patch.ok) throw new Error(`Caddy route update: HTTP ${patch.status}`);
-      return;
-    }
   }
+  const patch = await caddy(`/config/apps/http/servers/${found.server}/routes/${found.index}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(devsiteRoute(hosts, port)),
+  });
+  if (!patch.ok) throw new Error(`Caddy route update: HTTP ${patch.status}`);
+}
 
-  throw new Error(`no Caddy route for ${hosts[0]} — run \`bunx devsite init\` from the repo root`);
+/**
+ * The first route whose match names the host itself — the one `devsite init` gives the host. `devsite doctor` checks the same route.
+ *
+ * @param {Record<string, { routes?: { match?: { host?: string[] }[] }[] }>} servers
+ * @param {string} host
+ * @returns {{ server: string; index: number } | null}
+ */
+export function findHostRoute(servers, host) {
+  for (const [server, srv] of Object.entries(servers)) {
+    const index = (srv.routes ?? []).findIndex((r) =>
+      (r.match ?? []).some((m) => (m.host ?? []).includes(host)),
+    );
+    if (index !== -1) return { server, index };
+  }
+  return null;
 }
 
 /**
