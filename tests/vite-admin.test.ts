@@ -218,6 +218,29 @@ test("existing route: the plugin PATCHes it to the bound port", async () => {
   }
 });
 
+test("the swapped-in route aborts a request from outside this Mac and the tailnet before it proxies", async () => {
+  const mock = await startMockCaddy({
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
+  });
+  try {
+    await withAdmin(mock.url, () => registerViaPlugin(50123));
+    const patch = mock.requests.find((r) => r.method === "PATCH");
+    if (!patch) throw new Error("no PATCH reached the mock");
+    const [sub] = JSON.parse(patch.body).handle;
+    expect(sub.handler).toBe("subroute");
+    const [guard, proxy] = sub.routes;
+    expect(guard).toEqual({
+      match: [{ not: [{ remote_ip: { ranges: ["127.0.0.1", "::1", "100.64.0.0/10"] } }] }],
+      handle: [{ handler: "static_response", abort: true }],
+    });
+    expect(proxy.handle).toEqual([
+      { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:50123" }] },
+    ]);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a host `devsite init` never registered: a warning naming the host and the command, and no route write", async () => {
   const mock = await startMockCaddy({
     servers: {

@@ -44,7 +44,7 @@ const COMMANDS: Record<string, Command> = {
   init: {
     summary: [
       "One-time machine bootstrap for *.internal dev URLs over Tailscale.",
-      "Run from the repo root; sudo is called only for the privileged steps.",
+      "Run from the repo root, as yourself; sudo runs only for caddy trust and the move off a root service.",
     ],
     flags: {
       "dry-run": {

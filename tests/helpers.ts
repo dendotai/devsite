@@ -34,7 +34,7 @@ export type IoOpts = {
   stdin?: CliContext["stdin"];
 };
 
-// A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so the ambient identity variables (DEVSITE_UID, SUDO_USER) can never leak in.
+// A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so an ambient DEVSITE_UID can never leak in.
 export function makeIo(opts: IoOpts = {}) {
   const stdout = sink();
   const stderr = sink();
