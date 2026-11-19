@@ -19,7 +19,6 @@
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
 // Adding a version-sensitive node API here (fs.glob is the only one so far, Node 22+)? Check engines.node in package.json, and consider a node-version matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
-import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -142,18 +141,10 @@ function renderHostFile(r: Route): string {
   ].join("\n");
 }
 
-function exec(cmd: string, args: string[], capture = false) {
-  const r = spawnSync(cmd, args, {
-    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
-    encoding: "utf8",
-  });
+function exec(cmd: string, args: string[], ctx: CliContext, capture = false) {
+  const r = ctx.runCommand(cmd, args, { capture });
   // outRaw exists for diff output, where trimming could eat a meaningful trailing context line (a lone space) and corrupt the patch.
-  return {
-    status: r.status ?? 1,
-    out: (r.stdout ?? "").trim(),
-    outRaw: r.stdout ?? "",
-    error: r.error,
-  };
+  return { status: r.status, out: r.stdout.trim(), outRaw: r.stdout, error: r.error };
 }
 
 // One planned file operation; next === null deletes the file. rel is the path relative to the Caddyfile's directory — the label patch(1) applies against.
@@ -167,12 +158,12 @@ function writeTmp(content: string): string {
 }
 
 // diff's contract: exit 0 identical, exit 1 different — a failed spawn or any other exit is trouble, and must never read as "there is a change" and walk toward a write over a diff nobody saw.
-function unifiedDiff(c: Change): string {
+function unifiedDiff(c: Change, ctx: CliContext): string {
   const current = existsSync(c.abs) ? c.abs : "/dev/null";
   const currentLabel = current === "/dev/null" ? "/dev/null" : c.rel;
   const next = c.next === null ? "/dev/null" : writeTmp(c.next);
   const nextLabel = c.next === null ? "/dev/null" : c.rel;
-  const r = exec("diff", ["-u", "-L", currentLabel, "-L", nextLabel, current, next], true);
+  const r = exec("diff", ["-u", "-L", currentLabel, "-L", nextLabel, current, next], ctx, true);
   if (r.error || r.status > 1) {
     throw new Error(`could not diff ${c.rel}: ${r.error?.message ?? `diff exited ${r.status}`}`);
   }
@@ -198,7 +189,7 @@ async function confirm(question: string, ctx: CliContext): Promise<boolean> {
 // Prints the command, then runs it; a failure stops init.
 function runShown(shown: string[], cmd: string, args: string[], ctx: CliContext) {
   ctx.stdout.write(`  ${shown.join(" ")}\n`);
-  if (exec(cmd, args).status !== 0) throw new Error(`\`${shown.join(" ")}\` failed`);
+  if (exec(cmd, args, ctx).status !== 0) throw new Error(`\`${shown.join(" ")}\` failed`);
 }
 
 function sudo(args: string[], ctx: CliContext) {
@@ -282,7 +273,7 @@ function applyChanges(changes: Change[], caddyfilePath: string, devsiteDir: stri
 }
 
 function restartService(ctx: CliContext) {
-  exec("pkill", ["-x", "caddy"]); // the user's own foreground Caddy, if any
+  exec("pkill", ["-x", "caddy"], ctx); // the user's own foreground Caddy, if any
   asUser(["brew", "services", "restart", "caddy"], ctx);
 }
 
@@ -303,9 +294,9 @@ export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<bool
   }
 }
 
-function tailscale(args: string[]): string | null {
+function tailscale(args: string[], ctx: CliContext): string | null {
   for (const bin of ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"]) {
-    const r = exec(bin, args, true);
+    const r = exec(bin, args, ctx, true);
     if (r.status === 0) return r.out;
   }
   return null;
@@ -319,7 +310,7 @@ function sha256Fp(opensslOut: string): string | null {
   return opensslOut.split("=")[1]?.trim() ?? null;
 }
 
-function servedIntermediateFp(host: string): string | null {
+function servedIntermediateFp(host: string, ctx: CliContext): string | null {
   const r = exec(
     "bash",
     [
@@ -327,15 +318,16 @@ function servedIntermediateFp(host: string): string | null {
       `echo | openssl s_client -connect ${host}:443 -servername ${host} -showcerts 2>/dev/null ` +
         `| awk '/BEGIN CERT/{n++} n==2{print}' | openssl x509 -noout -fingerprint -sha256 2>/dev/null`,
     ],
+    ctx,
     true,
   );
   return r.status === 0 ? sha256Fp(r.out) : null;
 }
 
-function pinnedIntermediateFp(storageRoot: string): string | null {
+function pinnedIntermediateFp(storageRoot: string, ctx: CliContext): string | null {
   const p = join(storageRoot, "pki", "authorities", "local", "intermediate.crt");
   if (!existsSync(p)) return null;
-  const r = exec("openssl", ["x509", "-in", p, "-noout", "-fingerprint", "-sha256"], true);
+  const r = exec("openssl", ["x509", "-in", p, "-noout", "-fingerprint", "-sha256"], ctx, true);
   return r.status === 0 ? sha256Fp(r.out) : null;
 }
 
@@ -348,6 +340,7 @@ function verify(routes: Route[], pki: Pki, ctx: CliContext) {
   const r = exec(
     "bash",
     ["-c", `curl -k -sS -o /dev/null -w '%{http_code}' --max-time 8 https://${host}/`],
+    ctx,
     true,
   );
   check(
@@ -357,8 +350,8 @@ function verify(routes: Route[], pki: Pki, ctx: CliContext) {
     ctx,
   );
 
-  const served = servedIntermediateFp(host);
-  const pinned = pinnedIntermediateFp(pki.storageRoot);
+  const served = servedIntermediateFp(host, ctx);
+  const pinned = pinnedIntermediateFp(pki.storageRoot, ctx);
   check(
     Boolean(served && pinned && served === pinned),
     "served cert chains to the pinned CA (what every trusting device sees)",
@@ -366,10 +359,15 @@ function verify(routes: Route[], pki: Pki, ctx: CliContext) {
     ctx,
   );
 
-  const tsIp = tailscale(["ip", "-4"])?.split("\n")[0]?.trim();
+  const tsIp = tailscale(["ip", "-4"], ctx)?.split("\n")[0]?.trim();
   check(Boolean(tsIp), "Tailscale up on this Mac", tsIp ?? "tailscale not reachable", ctx);
   if (tsIp) {
-    const answered = exec("dig", ["+short", "+time=3", "+tries=1", `@${tsIp}`, host], true).out;
+    const answered = exec(
+      "dig",
+      ["+short", "+time=3", "+tries=1", `@${tsIp}`, host],
+      ctx,
+      true,
+    ).out;
     check(
       answered === tsIp,
       "dnsmasq answers on the Tailscale IP (the phone's DNS path)",
@@ -565,7 +563,7 @@ export async function init(
   const steps = planSteps(changes, caddyDir, plan.removedBinds);
 
   // Each piece ends with its own newline; concatenation is one multi-file unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
-  const diff = changes.map(unifiedDiff).join("");
+  const diff = changes.map((c) => unifiedDiff(c, ctx)).join("");
 
   if (dryRun) {
     printSteps("Without --dry-run, this run would:", steps, paint, ctx);

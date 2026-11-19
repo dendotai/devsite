@@ -4,7 +4,15 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { init } from "../src/commands/init";
-import { cli, fakeStdin, makeEmptyRepo, makeIo, makeRepo, scratchCaddyfile } from "./helpers";
+import {
+  cli,
+  fakeStdin,
+  makeEmptyRepo,
+  makeIo,
+  makeRepo,
+  scratchCaddyfile,
+  scriptedRunner,
+} from "./helpers";
 
 test("--help prints help to stdout and exits 0", async () => {
   const r = await cli(["--help"]);
@@ -93,6 +101,32 @@ test("init --dry-run through the io context: renders the tree diff, returns 0", 
   expect(status).toBe(0);
   expect(stdout.text()).toContain("--dry-run: would change");
   expect(stdout.text()).toContain("web.test.internal {");
+});
+
+test("init --dry-run runs only diff, one call per planned file, and prints its answers", async () => {
+  const { runCommand, calls } = scriptedRunner(({ args }) => ({
+    status: 1,
+    stdout: `scripted diff of ${args.at(-3)}\n`,
+  }));
+  const r = await cli(["init", "--dry-run"], { cwd: makeRepo(), runCommand });
+  expect(r.status).toBe(0);
+  // The last argument, the planned content, is a temp file with a per-run name.
+  expect(calls.map((c) => [c.cmd, ...c.args.slice(0, -1), c.capture])).toEqual([
+    ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/web.test.internal.caddy", "/dev/null", true],
+  ]);
+  expect(r.stdout).toContain("scripted diff of devsite.d/web.test.internal.caddy");
+});
+
+test("init --dry-run stops when diff cannot start, and writes no diff", async () => {
+  const { runCommand } = scriptedRunner(() => ({
+    status: 1,
+    error: new Error("spawn diff ENOENT"),
+  }));
+  const r = await cli(["init", "--dry-run"], { cwd: makeRepo(), runCommand });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("could not diff Caddyfile: spawn diff ENOENT");
+  expect(r.stdout).not.toContain("--dry-run: would change");
 });
 
 test("--dry-run without a command is not an init: usage, exit 1", async () => {

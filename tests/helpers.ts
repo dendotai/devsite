@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { Plugin } from "vite";
-import type { CliContext } from "../src/context";
+import { type CliContext, type CommandResult, processRunner } from "../src/context";
 import { run } from "../src/run";
 
 export function sink() {
@@ -32,6 +32,7 @@ export type IoOpts = {
   cwd?: string;
   caddyfile?: string;
   stdin?: CliContext["stdin"];
+  runCommand?: CliContext["runCommand"];
 };
 
 // A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so an ambient DEVSITE_UID can never leak in.
@@ -44,8 +45,22 @@ export function makeIo(opts: IoOpts = {}) {
     stdin: opts.stdin ?? fakeStdin("", false),
     cwd: opts.cwd ?? makeEmptyRepo(),
     env: { DEVSITE_CADDYFILE: opts.caddyfile ?? scratchCaddyfile() },
+    runCommand: opts.runCommand ?? processRunner,
   };
   return { ctx, stdout, stderr };
+}
+
+export type CommandCall = { cmd: string; args: string[]; capture: boolean };
+
+// Runs nothing and records each call; a field the answer leaves out reads as exit 0 with empty stdout.
+export function scriptedRunner(answer: (call: CommandCall) => Partial<CommandResult>) {
+  const calls: CommandCall[] = [];
+  const runCommand: CliContext["runCommand"] = (cmd, args, { capture }) => {
+    const call = { cmd, args, capture };
+    calls.push(call);
+    return { status: 0, stdout: "", ...answer(call) };
+  };
+  return { runCommand, calls };
 }
 
 // One in-process CLI invocation: argv in, exit code + captured output out.
