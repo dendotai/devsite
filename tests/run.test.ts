@@ -1,13 +1,18 @@
 // In-process tests of the CLI surface: run(argv, ctx) → exit code (#9).
-// The io context (#26) makes these pure: output lands in in-memory sinks, cwd
-// and env are plain values, stdin is a pre-loaded stream — no console spies,
-// no chdir, no env mutation. Spawn-based end-to-end coverage of the bin shim
-// stays in cli.test.ts.
+// The io context (#26) makes these pure: output lands in in-memory sinks, cwd and env are plain values, stdin is a pre-loaded stream — no console spies, no chdir, no env mutation. Spawn-based end-to-end coverage of the bin shim stays in cli.test.ts.
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { init } from "../src/commands/init";
-import { cli, fakeStdin, makeEmptyRepo, makeIo, makeRepo, scratchCaddyfile } from "./helpers";
+import {
+  cli,
+  fakeStdin,
+  makeEmptyRepo,
+  makeIo,
+  makeRepo,
+  scratchCaddyfile,
+  scriptedRunner,
+} from "./helpers";
 
 test("--help prints help to stdout and exits 0", async () => {
   const r = await cli(["--help"]);
@@ -98,6 +103,32 @@ test("init --dry-run through the io context: renders the tree diff, returns 0", 
   expect(stdout.text()).toContain("web.test.internal {");
 });
 
+test("init --dry-run runs only diff, one call per planned file, and prints its answers", async () => {
+  const { runCommand, calls } = scriptedRunner(({ args }) => ({
+    status: 1,
+    stdout: `scripted diff of ${args.at(-3)}\n`,
+  }));
+  const r = await cli(["init", "--dry-run"], { cwd: makeRepo(), runCommand });
+  expect(r.status).toBe(0);
+  // The last argument, the planned content, is a temp file with a per-run name.
+  expect(calls.map((c) => [c.cmd, ...c.args.slice(0, -1), c.capture])).toEqual([
+    ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/web.test.internal.caddy", "/dev/null", true],
+  ]);
+  expect(r.stdout).toContain("scripted diff of devsite.d/web.test.internal.caddy");
+});
+
+test("init --dry-run stops when diff cannot start, and writes no diff", async () => {
+  const { runCommand } = scriptedRunner(() => ({
+    status: 1,
+    error: new Error("spawn diff ENOENT"),
+  }));
+  const r = await cli(["init", "--dry-run"], { cwd: makeRepo(), runCommand });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("could not diff Caddyfile: spawn diff ENOENT");
+  expect(r.stdout).not.toContain("--dry-run: would change");
+});
+
 test("--dry-run without a command is not an init: usage, exit 1", async () => {
   const r = await cli(["--dry-run"], { cwd: makeRepo() });
   expect(r.status).toBe(1);
@@ -119,6 +150,21 @@ test("a non-TTY run with a pending diff refuses and writes nothing", async () =>
   expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });
 
+test("one key answers the prompt, with no Enter: the terminal is in raw mode while it waits", async () => {
+  const caddyfile = scratchCaddyfile();
+  const raw: boolean[] = [];
+  const stdin = Object.assign(fakeStdin("x", true), {
+    setRawMode(on: boolean) {
+      raw.push(on);
+    },
+  });
+  const r = await cli(["init"], { cwd: makeRepo(), caddyfile, stdin });
+  expect(r.status).toBe(1);
+  expect(raw).toEqual([true, false]);
+  expect(r.stderr).toContain("Stopped — nothing changed");
+  expect(existsSync(caddyfile)).toBe(false);
+});
+
 test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () => {
   const caddyfile = scratchCaddyfile();
   const r = await cli(["init"], {
@@ -127,8 +173,8 @@ test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () 
     stdin: fakeStdin("n\n", true),
   });
   expect(r.status).toBe(1);
-  expect(r.stdout).toContain("Apply this change?");
-  expect(r.stderr).toContain("Aborted — nothing written");
+  expect(r.stdout).toContain("Press y to apply");
+  expect(r.stderr).toContain("Stopped — nothing changed");
   expect(existsSync(caddyfile)).toBe(false);
   expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });

@@ -1,14 +1,6 @@
-// Round-trip tests pinning `devsite init`'s ownership contract (#27, #47):
-// everything devsite does not own survives a re-init byte-for-byte, and
-// devsite's own state lives in devsite.d/ — the user's Caddyfile carries one
-// import line and nothing else of devsite's.
+// Round-trip tests pinning `devsite init`'s ownership contract (#27, #47): everything devsite does not own survives a re-init byte-for-byte, and devsite's own state lives in devsite.d/ — the user's Caddyfile carries one import line and nothing else of devsite's.
 //
-// The suite observes init only through its public surface — an in-process
-// run(["init", "--dry-run"]) and the multi-file unified diff it prints —
-// applies that diff to a scratch tree with patch(1), and asserts the
-// resulting tree's bytes. No init internals are imported, so the suite
-// survives (and guards) an ownership rewrite. patch(1) is exact: the patched
-// tree holds the same bytes a confirmed real run would write.
+// The suite observes init only through its public surface — an in-process run(["init", "--dry-run"]) and the multi-file unified diff it prints — applies that diff to a scratch tree with patch(1), and asserts the resulting tree's bytes. No init internals are imported, so the suite survives (and guards) an ownership rewrite. patch(1) is exact: the patched tree holds the same bytes a confirmed real run would write.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -26,24 +18,20 @@ async function dryRunDiff(cwd: string, caddyfile: string): Promise<string | null
   return m[1];
 }
 
-// One round trip: dry-run, apply the diff to the tree, report whether
-// anything was pending — callers that spliced state assert `changed` so a
-// false "already up to date" can never pass vacuously.
+// One round trip: dry-run, apply the diff to the tree, report whether anything was pending — callers that spliced state assert `changed` so a false "already up to date" can never pass vacuously.
 async function reInit(cwd: string, caddyfile: string) {
   const diff = await dryRunDiff(cwd, caddyfile);
   if (diff !== null) {
     const dir = dirname(caddyfile);
-    // patch(1) applies bytes; creating devsite.d/ itself is the CLI's own
-    // (sudo mkdir) job at apply time, so the harness pre-creates it.
+    // patch(1) applies bytes; creating devsite.d/ itself is the CLI's job at apply time,
+    // so the harness pre-creates it.
     mkdirSync(join(dir, "devsite.d"), { recursive: true });
     const r = spawnSync("patch", ["-p0", "-s", "-E", "-d", dir], {
       input: diff,
       encoding: "utf8",
     });
     if (r.status !== 0) throw new Error(`patch failed: ${r.stderr}`);
-    // Fidelity anchor: after applying, init must report nothing left to
-    // write — proving the patched tree is exactly what a confirmed real run
-    // would render, not merely what the printed diff said.
+    // Fidelity anchor: after applying, init must report nothing left to write — proving the patched tree is exactly what a confirmed real run would render, not merely what the printed diff said.
     if ((await dryRunDiff(cwd, caddyfile)) !== null) {
       throw new Error("patched tree does not converge to init's own rendering");
     }
@@ -62,8 +50,7 @@ function readTree(caddyfile: string): Record<string, string> {
   return tree;
 }
 
-// A Caddyfile whose target exists from the start — patch needs a file to
-// patch, and an empty file renders identically to a missing one.
+// A Caddyfile whose target exists from the start — patch needs a file to patch, and an empty file renders identically to a missing one.
 function makeCaddyfile(content = "") {
   const p = join(mkdtempSync(join(tmpdir(), "devsite-tree-")), "Caddyfile");
   writeFileSync(p, content);
@@ -72,10 +59,7 @@ function makeCaddyfile(content = "") {
 
 const IMPORT_LINE = "import devsite.d/*.caddy # devsite";
 
-// A site block in devsite's own rendered shape — what `devsite init` writes
-// for a host, and what older formats held inline. Deliberately hand-written,
-// not imported: the black-box claim above forbids reaching into the renderer,
-// so this shape must track renderHostFile in src/commands/init.ts by hand.
+// A site block in devsite's own rendered shape — what `devsite init` writes for a host. Deliberately hand-written, not imported: the black-box claim above forbids reaching into the renderer, so this shape must track renderHostFile in src/commands/init.ts by hand.
 function devsiteBlock(host: string, project: string) {
   return [
     `# ${project}`,
@@ -85,51 +69,26 @@ function devsiteBlock(host: string, project: string) {
     "\t\t\tlifetime 168h",
     "\t\t}",
     "\t}",
+    "\t@outside not remote_ip 127.0.0.1 ::1 100.64.0.0/10",
+    "\tabort @outside",
     `\trespond "devsite: dev server for ${host} is not running (start it with bun dev)" 503`,
     "}",
   ].join("\n");
 }
 
-// The global options block devsite creates in the Caddyfile when the user has
-// none — hand-written to track planCaddyfile in src/commands/init.ts, for the
-// same black-box reason.
+// The global options block devsite creates in the Caddyfile when the user has none — hand-written to track planCaddyfile in src/commands/init.ts, for the same black-box reason.
 function devsiteGlobalBlock() {
   const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
   return [
     "{",
-    "\t# Pin PKI storage so Caddy's local CA is the SAME no matter which user runs",
-    "\t# it (always-on root service vs a foreground process). Every device trusts",
+    "\t# Pin PKI storage so Caddy's local CA is the SAME no matter how Caddy runs",
+    "\t# it (the always-on service vs a foreground process). Every device trusts",
     `\t# this one CA root: ${join(storageRoot, "pki", "authorities", "local", "root.crt")}`,
     "\tstorage file_system {",
     `\t\troot "${storageRoot}"`,
     "\t}",
     "\tlocal_certs",
     "}",
-  ].join("\n");
-}
-
-// devsite's v1 format: the marker-delimited managed region, as the previous
-// devsite version rendered it (hand-written for the same black-box reason).
-function v1Region(opts: { kept?: string[]; blocks?: string[] } = {}) {
-  return [
-    "# >>> devsite v1 — managed region; `devsite init` regenerates it, edits here are lost >>>",
-    "# Change a project's package.json#devSite and re-run `devsite init`.",
-    "",
-    "{",
-    "\tstorage file_system {",
-    '\t\troot "/somewhere"',
-    "\t}",
-    "\tlocal_certs",
-    ...(opts.kept?.length
-      ? [
-          "\t# >>> kept from the pre-devsite global options — devsite preserves these >>>",
-          ...opts.kept,
-          "\t# <<< kept <<<",
-        ]
-      : []),
-    "}",
-    ...(opts.blocks ?? []).flatMap((b) => ["", b]),
-    "# <<< devsite <<<",
   ].join("\n");
 }
 
@@ -140,13 +99,11 @@ test("fresh init: the Caddyfile gets the global block and the import line; hosts
   const first = await reInit(repo, caddyfile);
   expect(first.changed).toBe(true);
   const tree = readTree(caddyfile);
-  // No user global block, so devsite creates one — in the Caddyfile, where
-  // global options normally live; the import line follows it.
+  // No user global block, so devsite creates one — in the Caddyfile, where global options normally live; the import line follows it.
   expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
   expect(tree["devsite.d/web.test.internal.caddy"]).toBe(
     `${devsiteBlock("web.test.internal", "web")}\n`,
   );
-  expect(tree["devsite.d/00-global.caddy"]).toBeUndefined();
 
   const second = await reInit(repo, caddyfile);
   expect(second.changed).toBe(false);
@@ -224,107 +181,41 @@ test("a user-owned global options block is kept in place and gets devsite's dire
   expect(tree.Caddyfile?.indexOf(IMPORT_LINE)).toBeGreaterThan(
     tree.Caddyfile?.indexOf("}") ?? Number.NaN,
   );
-  // The user owns the global block, so devsite supplies none.
-  expect(tree["devsite.d/00-global.caddy"]).toBeUndefined();
 
   const second = await reInit(repo, caddyfile);
   expect(second.changed).toBe(false);
   expect(readTree(caddyfile)).toEqual(tree);
 });
 
-test("v0-format migration: one run, foreign blocks move byte-for-byte, own host re-renders", async () => {
-  const foreign1 = devsiteBlock("other1.internal", "otherproj1");
-  const foreign2 = devsiteBlock("other2.internal", "otherproj2");
-  const v0 = [
-    "# Generated by `devsite init` — do not edit by hand.",
-    "# Change a project's package.json#devSite and re-run `devsite init`.",
-    "",
-    "{",
-    "\tstorage file_system {",
-    '\t\troot "/somewhere"',
-    "\t}",
-    "\tlocal_certs",
-    "}",
-    "",
-    devsiteBlock("web.test.internal", "web"),
-    "",
-    foreign1,
-    "",
-    foreign2,
-    "",
-  ].join("\n");
-  const repo = makeRepo();
-  const caddyfile = makeCaddyfile(v0);
-
-  const { changed } = await reInit(repo, caddyfile);
-  expect(changed).toBe(true);
-  const tree = readTree(caddyfile);
-  // The old devsite global block (nothing of the user's inside) re-renders
-  // fresh — its stale storage root must not survive the migration.
-  expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
-  expect(tree["devsite.d/other1.internal.caddy"]).toBe(`${foreign1}\n`);
-  expect(tree["devsite.d/other2.internal.caddy"]).toBe(`${foreign2}\n`);
-  expect(tree["devsite.d/web.test.internal.caddy"]).toBe(
-    `${devsiteBlock("web.test.internal", "web")}\n`,
-  );
-});
-
-test("v1-region migration: foreign blocks move byte-for-byte, kept directives return to a user global block", async () => {
-  const foreign = devsiteBlock("other.internal", "otherproj");
-  const userSite = [":8080 {", '\trespond "user site"', "}"].join("\n");
-  const v1 = [
-    v1Region({
-      kept: ["\temail den@example.com"],
-      blocks: [devsiteBlock("web.test.internal", "web"), foreign],
-    }),
-    "",
-    userSite,
-    "",
-  ].join("\n");
-  const repo = makeRepo();
-  const caddyfile = makeCaddyfile(v1);
-
-  const { changed } = await reInit(repo, caddyfile);
-  expect(changed).toBe(true);
-  const tree = readTree(caddyfile);
-
-  // The region and its markers are gone; the user's site block survives.
-  expect(tree.Caddyfile).not.toContain(">>> devsite");
-  expect(tree.Caddyfile).not.toContain("<<< devsite");
-  expect(tree.Caddyfile).toContain(userSite);
-  // The kept directive lives in a user-owned global block, with devsite's two
-  // directives beside it — so 00-global.caddy must not exist.
-  expect(tree.Caddyfile).toContain("\temail den@example.com");
-  expect(tree.Caddyfile).toContain("\tlocal_certs");
-  expect(tree["devsite.d/00-global.caddy"]).toBeUndefined();
-  // Foreign block: byte-for-byte in its own file.
-  expect(tree["devsite.d/other.internal.caddy"]).toBe(`${foreign}\n`);
-  expect(tree["devsite.d/web.test.internal.caddy"]).toBe(
-    `${devsiteBlock("web.test.internal", "web")}\n`,
-  );
-});
-
-test("v1 migration without kept directives re-renders the global block fresh", async () => {
+// Caddy as the user can listen below 1024 only on all addresses, so a default_bind stops it from starting (ADR 0002).
+test("a default_bind line leaves the user's global block; the rest of the block stays", async () => {
   const caddyfile = makeCaddyfile(
-    `${v1Region({ blocks: [devsiteBlock("web.test.internal", "web")] })}\n`,
+    ["{", "\temail den@example.com", "\tdefault_bind 127.0.0.1 100.64.0.9", "}", ""].join("\n"),
   );
-  const { changed } = await reInit(makeRepo(), caddyfile);
-  expect(changed).toBe(true);
+  const repo = makeRepo();
+  expect((await reInit(repo, caddyfile)).changed).toBe(true);
   const tree = readTree(caddyfile);
-  expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
-  expect(tree["devsite.d/00-global.caddy"]).toBeUndefined();
+  expect(tree.Caddyfile).not.toContain("default_bind");
+  expect(tree.Caddyfile).toContain("\temail den@example.com");
+  expect((await reInit(repo, caddyfile)).changed).toBe(false);
 });
 
-test("a stray 00-global.caddy from the pre-release layout is deleted", async () => {
-  const caddyfile = makeCaddyfile();
-  mkdirSync(join(dirname(caddyfile), "devsite.d"), { recursive: true });
-  writeFileSync(
-    join(dirname(caddyfile), "devsite.d", "00-global.caddy"),
-    "# devsite — global options\n{\n\tlocal_certs\n}\n",
+test("a global block left with only devsite's directives once default_bind goes re-renders fresh", async () => {
+  const caddyfile = makeCaddyfile(
+    [
+      "{",
+      "\tstorage file_system {",
+      '\t\troot "/somewhere"',
+      "\t}",
+      "\tlocal_certs",
+      "\t# keep off the Wi-Fi",
+      "\tdefault_bind 127.0.0.1",
+      "}",
+      "",
+    ].join("\n"),
   );
-  const { changed } = await reInit(makeRepo(), caddyfile);
-  expect(changed).toBe(true);
-  expect(readTree(caddyfile)["devsite.d/00-global.caddy"]).toBeUndefined();
+  expect((await reInit(makeRepo(), caddyfile)).changed).toBe(true);
+  expect(readTree(caddyfile).Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
 });
 
 test("rename cleanup: the stale host file of a still-present project is deleted, others are not", async () => {
@@ -346,18 +237,4 @@ test("rename cleanup: the stale host file of a still-present project is deleted,
     `${devsiteBlock("new.test.internal", "web")}\n`,
   );
   expect(tree["devsite.d/foreign.internal.caddy"]).toBe(foreignFile);
-});
-
-test("a migrated foreign block never overwrites that host's existing devsite.d file", async () => {
-  // An upgraded sibling already wrote its own file; the old region still
-  // holds a stale copy of the same host. The file wins.
-  const fileContent = `${devsiteBlock("other.internal", "otherproj")}\n`;
-  const staleBlock = devsiteBlock("other.internal", "otherproj-renamed-since");
-  const caddyfile = makeCaddyfile(`${v1Region({ blocks: [staleBlock] })}\n`);
-  mkdirSync(join(dirname(caddyfile), "devsite.d"), { recursive: true });
-  writeFileSync(join(dirname(caddyfile), "devsite.d", "other.internal.caddy"), fileContent);
-
-  const { changed } = await reInit(makeRepo(), caddyfile);
-  expect(changed).toBe(true);
-  expect(readTree(caddyfile)["devsite.d/other.internal.caddy"]).toBe(fileContent);
 });

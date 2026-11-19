@@ -1,0 +1,3 @@
+#!/bin/sh
+# CI runs the same check (the commitlint job); here it rejects the message before the commit exists.
+exec bunx commitlint --edit "$1"

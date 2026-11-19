@@ -1,9 +1,4 @@
-// The Vite plugin's route registration against a real local mock of the
-// Caddy admin API (#28). The mock mirrors Caddy's contract: any request
-// without an Origin header is 403'd — so a refactor that silently loses the
-// pinned header fails every test here, not one assertion. Tests point the
-// plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite
-// exists to cover).
+// The Vite plugin's route registration against a real local mock of the Caddy admin API (#28). The mock mirrors Caddy's contract: any request without an Origin header is 403'd — so a refactor that silently loses the pinned header fails every test here, not one assertion. Tests point the plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite exists to cover).
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -30,14 +25,12 @@ type Recorded = {
 type MockOpts = {
   // The JSON served for GET /config/apps/http/servers.
   servers?: unknown;
-  // Simulated failures: the config read, or any route write, answers 500.
+  // Simulated failures: the config read, or the route write, answers 500.
   failConfig?: boolean;
   failWrite?: boolean;
 };
 
-// A real HTTP server posing as Caddy's admin API. Caddy 403s admin requests
-// whose Origin it can't verify; the mock enforces the same before anything
-// else, so the pinned header is load-bearing for every test in this file.
+// A real HTTP server posing as Caddy's admin API. Caddy 403s admin requests whose Origin it can't verify; the mock enforces the same before anything else, so the pinned header is load-bearing for every test in this file.
 async function startMockCaddy(opts: MockOpts = {}) {
   const requests: Recorded[] = [];
   const server = createServer((req, res) => {
@@ -67,7 +60,7 @@ async function startMockCaddy(opts: MockOpts = {}) {
         res.end(JSON.stringify(opts.servers ?? {}));
         return;
       }
-      if (req.method === "PATCH" || req.method === "POST") {
+      if (req.method === "PATCH") {
         if (opts.failWrite) {
           res.statusCode = 500;
           res.end();
@@ -109,12 +102,9 @@ function withAdmin<T>(url: string | undefined, fn: () => Promise<T>) {
   return withEnv("DEVSITE_CADDY_ADMIN", url, fn);
 }
 
-// Drive the plugin end to end: config hook, then configureServer with a fake
-// bound server, then await the plugin's settled signal — route registration
-// and the last-used stamp have both finished (logged, wrote, or warned) when
-// it resolves, so no assertion below needs to poll.
+// Drive the plugin end to end: config hook, then configureServer with a fake bound server, then await the plugin's settled signal — route registration and the last-used stamp have both finished (logged, wrote, or warned) when it resolves, so no assertion below needs to poll.
 async function registerViaPlugin(port: number) {
-  const root = makeViteRoot({ name: "web", devSite: { host: HOST } });
+  const root = makeViteRoot({ name: "web", devSite: { name: HOST.replace(/\.internal$/, "") } });
   const plugin = devsite();
   await viteConfigHook(plugin)({ root }, { command: "serve", mode: "development" });
 
@@ -126,8 +116,7 @@ async function registerViaPlugin(port: number) {
   return { infos: fake.infos, warns: fake.warns };
 }
 
-// tests/setup.ts defaults DEVSITE_STATE_DIR to a shared scratch dir; suites
-// that assert on the stamp re-point it here per test.
+// tests/setup.ts defaults DEVSITE_STATE_DIR to a shared scratch dir; suites that assert on the stamp re-point it here per test.
 function withStateDir<T>(dir: string, fn: () => Promise<T>) {
   return withEnv("DEVSITE_STATE_DIR", dir, fn);
 }
@@ -185,7 +174,9 @@ test("a stamp write failure warns and does not break route registration", async 
       withStateDir(join(blocker, "devsite"), () => registerViaPlugin(50225)),
     );
     // Route registration succeeded regardless.
-    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50225`);
+    expect(infos.join("\n")).toContain(
+      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → 127.0.0.1:50225`,
+    );
     expect(warns.join("\n")).toContain("could not record");
   } finally {
     await mock.close();
@@ -210,12 +201,14 @@ test("existing route: the plugin PATCHes it to the bound port", async () => {
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50123));
     expect(warns).toEqual([]);
-    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50123`);
+    expect(infos.join("\n")).toContain(
+      `https://${HOST} and https://${HOST.replace(/\.internal$/, ".localhost")} → 127.0.0.1:50123`,
+    );
 
     const patch = mock.requests.find((r) => r.method === "PATCH");
     if (!patch) throw new Error("no PATCH reached the mock");
     expect(patch.path).toBe("/config/apps/http/servers/srv0/routes/0");
-    expect(patch.body).toContain("localhost:50123");
+    expect(patch.body).toContain("127.0.0.1:50123");
     // The pin rode along even though the caller supplied its own headers
     // (content-type is set by the PATCH call itself).
     expect(patch.headers.origin).toBe(mock.url);
@@ -225,48 +218,64 @@ test("existing route: the plugin PATCHes it to the bound port", async () => {
   }
 });
 
-test("unknown host: the plugin POST-appends to the :443 server", async () => {
+test("the swapped-in route aborts a request from outside this Mac and the tailnet before it proxies", async () => {
   const mock = await startMockCaddy({
-    servers: {
-      other: { listen: [":8080"], routes: [] },
-      https: { listen: [":443"], routes: [{ match: [{ host: ["someone.else.internal"] }] }] },
-    },
+    servers: { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } },
   });
   try {
-    const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50124));
-    expect(warns).toEqual([]);
-    expect(infos.join("\n")).toContain(`https://${HOST} → localhost:50124`);
-
-    const post = mock.requests.find((r) => r.method === "POST");
-    if (!post) throw new Error("no POST reached the mock");
-    expect(post.path).toBe("/config/apps/http/servers/https/routes");
-    expect(post.body).toContain(HOST);
-    expect(post.body).toContain("localhost:50124");
-    expect(post.headers.origin).toBe(mock.url);
+    await withAdmin(mock.url, () => registerViaPlugin(50123));
+    const patch = mock.requests.find((r) => r.method === "PATCH");
+    if (!patch) throw new Error("no PATCH reached the mock");
+    const [sub] = JSON.parse(patch.body).handle;
+    expect(sub.handler).toBe("subroute");
+    const [guard, proxy] = sub.routes;
+    expect(guard).toEqual({
+      match: [{ not: [{ remote_ip: { ranges: ["127.0.0.1", "::1", "100.64.0.0/10"] } }] }],
+      handle: [{ handler: "static_response", abort: true }],
+    });
+    expect(proxy.handle).toEqual([
+      { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:50123" }] },
+    ]);
   } finally {
     await mock.close();
   }
 });
 
-test("config fetch fails: a warning, and the dev server keeps running", async () => {
+test("a host `devsite init` never registered: a warning naming the host and the command, and no route write", async () => {
+  const mock = await startMockCaddy({
+    servers: {
+      srv0: { listen: [":443"], routes: [{ match: [{ host: ["someone.else.internal"] }] }] },
+    },
+  });
+  try {
+    const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50124));
+    expect(infos).toEqual([]);
+    expect(warns.join("\n")).toContain(`no Caddy route for ${HOST}`);
+    expect(warns.join("\n")).toContain("run `bunx devsite init`");
+    expect(mock.requests.filter((r) => r.method !== "GET")).toEqual([]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the admin API does not answer: a warning that asks whether Caddy runs", async () => {
+  const mock = await startMockCaddy();
+  await mock.close();
+  const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50128));
+  expect(infos).toEqual([]);
+  expect(warns.join("\n")).toContain("could not register");
+  expect(warns.join("\n")).toContain("is the Caddy service running");
+});
+
+test("config read answers an error status: a warning with the status and `devsite init`", async () => {
   const mock = await startMockCaddy({ failConfig: true });
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50125));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain("could not register");
     expect(warns.join("\n")).toContain("HTTP 500");
-  } finally {
-    await mock.close();
-  }
-});
-
-test("no :443 server in the config: a warning pointing at `devsite init`", async () => {
-  const mock = await startMockCaddy({ servers: { srv0: { listen: [":8080"], routes: [] } } });
-  try {
-    const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50126));
-    expect(infos).toEqual([]);
-    expect(warns.join("\n")).toContain("could not register");
-    expect(warns.join("\n")).toContain("devsite init");
+    expect(warns.join("\n")).toContain("bunx devsite init");
+    expect(warns.join("\n")).not.toContain("is the Caddy service running");
   } finally {
     await mock.close();
   }
@@ -281,9 +290,9 @@ test("write rejected: a warning, and the dev server keeps running", async () => 
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50127));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain("could not register");
-    // The 500 from the write, specifically — a 403 (lost Origin) must not
-    // satisfy this test.
+    // The 500 from the write, specifically — a 403 (lost Origin) must not satisfy this test.
     expect(warns.join("\n")).toContain("HTTP 500");
+    expect(warns.join("\n")).not.toContain("is the Caddy service running");
   } finally {
     await mock.close();
   }
@@ -293,8 +302,7 @@ test("the pinned Origin wins over a caller-supplied Origin header, any casing", 
   const mock = await startMockCaddy();
   try {
     await withAdmin(mock.url, async () => {
-      // Capitalized on purpose: a plain object spread is case-sensitive and
-      // would keep both keys, sending "http://evil.example, <admin>".
+      // Capitalized on purpose: a plain object spread is case-sensitive and would keep both keys, sending "http://evil.example, <admin>".
       const res = await caddy("/config/apps/http/servers", {
         headers: { Origin: "http://evil.example", "x-extra": "kept" },
       });
@@ -330,8 +338,7 @@ test("a Headers-instance caller keeps its headers; the pin still wins", async ()
 
 test("without the env override, the admin endpoint is the local default", async () => {
   await withAdmin(undefined, async () => {
-    // The double cast bridges Bun's `typeof fetch` (it carries a `preconnect`
-    // static no plain function can satisfy).
+    // The double cast bridges Bun's `typeof fetch` (it carries a `preconnect` static no plain function can satisfy).
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
       Response.json({})) as unknown as typeof fetch);
     let seen: string[];

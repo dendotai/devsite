@@ -1,39 +1,39 @@
 # devsite
 
-One project = one stable `https://<name>.internal` URL. No port numbers, no port coordination between projects, HTTPS everywhere — and the same URL works on your phone over Tailscale. Any number of projects run simultaneously.
+One project = one stable `https://<name>.internal` URL, plus `https://<name>.localhost` on the machine itself. No port numbers, no port coordination between projects, HTTPS everywhere — and the same URL works on your phone over Tailscale. Any number of projects run simultaneously.
 
 With a stock dev server, a project's address is a port number. `localhost:3000` is taken, so this project runs on 3001 — on this machine, today; another machine or a restarted server can pick a different number. Testing on a phone requires the machine's LAN IP, and browser APIs that require a secure context (camera, clipboard, service workers) do not work over plain HTTP. devsite gives each project a fixed name instead of a port.
 
 <!-- TODO: demo GIF — ~20 s screen recording: `devsite init` → `bun dev` → https://myapp.internal opens on the desktop → the same URL opens on a phone. -->
 
-> **Status:** pre-1.0, being extracted from two working projects. The API may still move.
-
 ## How it works
 
-A `devSite` field in `package.json` declares a host. There is no port field:
+A `devSite` field in `package.json` declares the project's name, and devsite serves it at `https://<name>.internal` (every device on the tailnet) and `https://<name>.localhost` (this Mac). There is no port field:
 
 ```jsonc
 // package.json
 {
   "name": "myapp",
-  "devSite": { "host": "myapp.internal" }
+  "devSite": { "name": "myapp" }
 }
 ```
 
 devsite has two parts:
 
-- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` host in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block answering `503` as a placeholder), and (re)starts Caddy as an always-on service. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo`.
+- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` name in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block answering `503` as a placeholder), and (re)starts Caddy as an always-on service that runs as you. Every devsite route answers only this machine and your tailnet: a request from the LAN gets no response. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo` (for `caddy trust`).
 - **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, and swaps the host's placeholder route for a live `reverse_proxy` through Caddy's admin API on localhost. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
+  - It only updates a route that `devsite init` wrote. For a name `init` has not seen yet (a new project, a renamed one), `bun dev` warns that Caddy has no route for `<name>.internal`, names `bunx devsite init`, and serves on the raw local URL.
+  - It also routes `<name>.localhost` to the same port. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
-```mermaid
-flowchart LR
-    B[Browser] -- "https://myapp.internal" --> C["Caddy :443 (TLS from local CA)"]
-    C -- reverse_proxy --> V["Vite dev server (ephemeral port)"]
-    P[Vite plugin] -. "swap route (admin API, localhost)" .-> C
-    I[devsite init] -. "write Caddyfile (one-time, sudo)" .-> C
+```text
+Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA)
+                                        │  ▲
+                          reverse_proxy │  ├── devsite init: writes the Caddyfile (one-time)
+                                        ▼  └── Vite plugin: swaps the route (admin API, localhost)
+                                      Vite dev server (ephemeral port)
 ```
 
-The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, the host reverts to the `503` placeholder until you restart the dev server.
+The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, `<name>.internal` reverts to the `503` placeholder and `<name>.localhost` stops answering until you restart the dev server.
 
 ## Quick start
 
@@ -49,10 +49,10 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
    brew install caddy
    ```
 
-2. **Declare a host** in your project's `package.json`:
+2. **Declare a name** in your project's `package.json`:
 
    ```jsonc
-   "devSite": { "host": "myapp.internal" }
+   "devSite": { "name": "myapp" }
    ```
 
 3. **Make `.internal` names resolve to your machine.** `devsite init` verifies this but does not yet configure it for you. Two options:
@@ -75,13 +75,14 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
 
    *What this changed:* macOS now sends `*.internal` DNS queries to your local dnsmasq (via `/etc/resolver/internal`), which answers with `127.0.0.1`.
 
-4. **Run the bootstrap** from the repo root:
+4. **Add devsite to the project and run the bootstrap** from the repo root:
 
    ```sh
-   devsite init            # or: devsite init --dry-run to preview
+   bun add -d @den-ai/devsite
+   bunx devsite init       # or: bunx devsite init --dry-run to preview
    ```
 
-   *What this changed:* wrote your host's file into `/opt/homebrew/etc/devsite.d/`, and set up `/opt/homebrew/etc/Caddyfile` once — one `import devsite.d/*.caddy` line, plus a global options block pinning certificate storage and enabling `local_certs` (added into your own block if you had one; an existing Caddyfile is backed up to `Caddyfile.bak` first; the very first run also saves `Caddyfile.pre-devsite`, which is never touched again), restarted Caddy as a `brew services` background service, pinned Caddy's certificate storage to `~/Library/Application Support/Caddy`, and ran `sudo caddy trust` to add Caddy's local CA root to your system trust store — that's the whole certificate-trust step for this machine. It ends with a verification report (TLS answering, cert chain, DNS) so you can see what works before opening a browser. Every write shows a full diff and asks for confirmation first; `--dry-run` prints the same diff and writes nothing.
+   *What this changed:* wrote your host's file into `/opt/homebrew/etc/devsite.d/`, and set up `/opt/homebrew/etc/Caddyfile` once — one `import devsite.d/*.caddy` line, plus a global options block pinning certificate storage and enabling `local_certs` (added into your own block if you had one; an existing Caddyfile is backed up to `Caddyfile.bak` first; the very first run also saves `Caddyfile.pre-devsite`, which is never touched again), restarted Caddy as a `brew services` background service that runs as you and starts at login, pinned Caddy's certificate storage to `~/Library/Application Support/Caddy`, and ran `sudo caddy trust` to add Caddy's local CA root to your system trust store — that's the whole certificate-trust step for this machine. It ends with a verification report (TLS answering, cert chain, DNS) so you can see what works before opening a browser. Every write shows a full diff and asks for confirmation first; `--dry-run` prints the same diff and writes nothing.
 
 5. **Add the plugin** to your Vite config:
 
@@ -102,7 +103,7 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
 
    Open `https://myapp.internal`. The certificate is trusted, and HMR runs over `wss`.
 
-Each additional project needs only steps 2 and 5 plus a re-run of `devsite init`. Because no project declares a port, projects never coordinate with each other and any number can run at once.
+Each additional project needs only steps 2, 4, and 5. Because no project declares a port, projects never coordinate with each other and any number can run at once.
 
 ### Step 2 — your other devices (optional)
 
@@ -146,11 +147,11 @@ The same URL now works on the phone, including HMR. `devsite init` re-checks thi
 
 devsite modifies machine-global state. This section lists every change and how to remove it.
 
-What `devsite init` changes (it prints every privileged command as it runs it):
+What `devsite init` changes (it prints every service and `sudo` command as it runs it):
 
 - `/opt/homebrew/etc/Caddyfile` — set up once, then never rewritten: one `import devsite.d/*.caddy # devsite` line, and Caddy's global options block gets devsite's two directives (`storage` pin, `local_certs`) — added into your block if you have one, or as a new block if you don't. Later runs only check the directives are present; a block you own is never rewritten. Before any Caddyfile write, the previous file is copied to `Caddyfile.bak`; the very first write also saves `Caddyfile.pre-devsite`, which no later run touches.
 - `/opt/homebrew/etc/devsite.d/` — devsite's own directory: one `<host>.caddy` file per host (first line `# <project>`, recording which project owns it). Registering, changing, or renaming hosts only writes files here.
-- The Caddy Homebrew service — restarted, and left running in the background.
+- The Caddy Homebrew service — restarted as you, and left running in the background. A `default_bind` line in the global options block is deleted: Caddy as you cannot start with one, and the guard in every devsite route keeps the LAN out (see `docs/adr/0002-caddy-runs-as-the-user-behind-a-lan-guard.md`).
 - `~/Library/Application Support/Caddy` — Caddy's certificate storage, pinned here.
 - Your system trust store — Caddy's local CA root is added via `sudo caddy trust`.
 
@@ -160,25 +161,19 @@ What the Vite plugin changes: it edits Caddy's in-memory running config over the
 
 ```sh
 sudo caddy untrust                      # remove the CA root from the trust store
-sudo brew services stop caddy           # stop the background service
-sudo rm -rf /opt/homebrew/etc/devsite.d # devsite's own directory
-sudo rm /opt/homebrew/etc/Caddyfile     # or remove the import line + devsite's global directives / restore Caddyfile.pre-devsite
+brew services stop caddy                # stop the background service
+rm -rf /opt/homebrew/etc/devsite.d      # devsite's own directory
+rm /opt/homebrew/etc/Caddyfile          # or remove the import line + devsite's global directives / restore Caddyfile.pre-devsite
 rm -rf ~/Library/Application\ Support/Caddy
 rm -rf ~/Library/Application\ Support/devsite # last-used dates (Vite plugin)
 sudo rm /etc/resolver/internal          # plus the dnsmasq config, if you set them up
 ```
 
-Note: **renaming** a host (changing a project's `devSite.host`) cleans up after itself — the next `devsite init` in that project deletes the old host's file. **Deleting a whole project** does not: its host file lingers in `devsite.d/` (serving a `503`) until you remove it by hand — `devsite init` cannot tell an abandoned project from one that simply is not this repo.
-
-## Upgrading from an older devsite (pre-`devsite.d`)
-
-Older devsite versions kept their rendered config inside the Caddyfile itself — first as plain blocks, then as a marker-delimited region. The first `devsite init` from the current version migrates the whole file in one confirmed run: your own content stays in the Caddyfile, devsite's blocks (other repos' included, byte-for-byte) move into `devsite.d/`, and the old markers disappear.
-
-One hazard remains, by design: devsite cannot stop an **older installed copy** from writing the old format again. If a not-yet-upgraded project runs its old `devsite init` after the migration, it re-adds a managed region — whose global options block duplicates the one already in your Caddyfile — and Caddy's restart fails. Recovery is one command: re-run the **new** `devsite init` (the migration self-heals), or restore `Caddyfile.bak`. The rule: after the first post-upgrade `init` on a machine, upgrade devsite in a project before running `init` there. (An old project's `bun dev` is unaffected — it only talks to Caddy's admin API.)
+Note: **renaming** a project (changing its `devSite.name`) cleans up after itself — the next `devsite init` in that project deletes the old host's file. **Deleting a whole project** does not: its host file lingers in `devsite.d/` (serving a `503`) until you remove it by hand — `devsite init` cannot tell an abandoned project from one that simply is not this repo.
 
 ## Requirements
 
-- **Node.js ≥ 22** — the published CLI runs under plain Node (`npx devsite init` works without bun). Developing the repo itself still uses bun.
+- **Node.js ≥ 22** — the published CLI runs under plain Node (`npx @den-ai/devsite init` works without bun). Developing the repo itself still uses bun.
 - **Caddy ≥ 2**, installed through Homebrew (`devsite init` manages it with `brew services`).
 - **Vite** — the plugin is developed against Vite 8.
 - **macOS on Apple Silicon**, currently. The Homebrew prefix `/opt/homebrew` and macOS paths are hardcoded; supporting Linux or Intel Macs requires making them configurable, which has not been done yet. Windows is out of scope.

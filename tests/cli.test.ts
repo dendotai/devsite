@@ -1,12 +1,9 @@
-// Spawn-based end-to-end tests of the bin shim (src/cli.ts): the real process
-// boundary — exit codes, stdout/stderr routing. In-process coverage of
-// parse/dispatch lives in run.test.ts (#9).
-// DEVSITE_CADDYFILE points every run at a scratch file so no test ever reads
-// or races the machine-global Caddyfile.
+// Spawn-based end-to-end tests of the bin shim (src/cli.ts): the real process boundary — exit codes, stdout/stderr routing. In-process coverage of parse/dispatch lives in run.test.ts (#9).
+// DEVSITE_CADDYFILE points every run at a scratch file so no test ever reads or races the machine-global Caddyfile.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeEmptyRepo, makeRepo, scratchCaddyfile } from "./helpers";
 
@@ -19,14 +16,12 @@ function devsite(
   args: string[],
   opts: { cwd?: string; caddyfile?: string; env?: Record<string, string> } = {},
 ) {
-  // Strip the identity variables from the inherited env so a test controls them
-  // fully via opts.env — an ambient SUDO_USER must never leak into a run.
+  // An ambient DEVSITE_UID must never leak into a run; a test sets it via opts.env.
   const env: Record<string, string | undefined> = {
     ...process.env,
     DEVSITE_CADDYFILE: opts.caddyfile ?? SCRATCH,
   };
   delete env.DEVSITE_UID;
-  delete env.SUDO_USER;
   Object.assign(env, opts.env);
   const r = spawnSync("bun", [CLI, ...args], { cwd: opts.cwd, encoding: "utf8", env });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
@@ -38,7 +33,7 @@ function makeCaddyfile(content: string) {
   return p;
 }
 
-// --- dispatch: nothing but `init` may reach the privileged bootstrap ---
+// --- dispatch: nothing but `init` may reach the bootstrap ---
 
 test("bare run prints usage and exits 1", () => {
   const r = devsite([]);
@@ -93,7 +88,7 @@ test("a single-package repo: root package.json#devSite is discovered", () => {
   const repo = mkdtempSync(join(tmpdir(), "devsite-single-"));
   writeFileSync(
     join(repo, "package.json"),
-    JSON.stringify({ name: "solo", devSite: { host: "solo.test.internal" } }),
+    JSON.stringify({ name: "solo", devSite: { name: "solo.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(0);
@@ -104,7 +99,7 @@ test("root and workspace devSite hosts are both discovered", () => {
   const repo = makeRepo();
   writeFileSync(
     join(repo, "package.json"),
-    JSON.stringify({ name: "rootproj", devSite: { host: "root.test.internal" } }),
+    JSON.stringify({ name: "rootproj", devSite: { name: "root.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(0);
@@ -119,100 +114,49 @@ test("a host that is not a plain hostname is rejected at discovery", () => {
   expect(r.stderr).toContain("a.internal; touch pwned");
 });
 
-test("two packages declaring the same devSite host are rejected at discovery", () => {
-  const repo = makeRepo(); // apps/web → web.test.internal
+test("two packages declaring the same devSite name are rejected at discovery", () => {
+  const repo = makeRepo(); // apps/web → devSite.name "web.test"
   mkdirSync(join(repo, "apps", "api"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { host: "web.test.internal" } }),
+    JSON.stringify({ name: "api", devSite: { name: "web.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("web.test.internal");
+  expect(r.stderr).toContain('devSite.name "web.test"');
   // The message must name both claimants so the fix is findable.
   expect(r.stderr).toContain("api");
   expect(r.stderr).toContain("web");
 });
 
-test("hosts differing only in case are still duplicates (DNS is case-insensitive)", () => {
+test("names differing only in case are still duplicates (DNS is case-insensitive)", () => {
   const repo = makeRepo();
   mkdirSync(join(repo, "apps", "api"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { host: "WEB.test.internal" } }),
+    JSON.stringify({ name: "api", devSite: { name: "WEB.test" } }),
   );
   const r = devsite(["init", "--dry-run"], { cwd: repo });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("web.test.internal");
+  expect(r.stderr).toContain('devSite.name "web.test"');
 });
 
-// --- running as root: resolve the real user behind sudo, or refuse (#12) ---
+// --- running as root: refuse, because Caddy runs as the user (ADR 0002) ---
 // DEVSITE_UID pretends the uid so these run without actually being root.
 
-test("root with no SUDO_USER refuses: a true root shell cannot pin a wrong CA path", () => {
-  const r = devsite(["init"], { cwd: makeRepo(), env: { DEVSITE_UID: "0" } });
+test("init as root refuses: Caddy must run as the user", () => {
+  const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), env: { DEVSITE_UID: "0" } });
   expect(r.status).toBe(1);
-  expect(r.stderr).toContain("without sudo");
-});
-
-// darwin-only: the happy path resolves SUDO_USER's home through dscl (macOS
-// Directory Services), which Linux CI runners don't have — there the run
-// correctly refuses, which is the adjacent tests' territory.
-test.skipIf(process.platform !== "darwin")(
-  "under sudo the pinned storage is the real user's home, not root's",
-  () => {
-    const r = devsite(["init", "--dry-run"], {
-      cwd: makeRepo(),
-      env: { DEVSITE_UID: "0", SUDO_USER: userInfo().username },
-    });
-    expect(r.status).toBe(0);
-    // The rendered region pins the storage; it must show the human's home.
-    expect(r.stdout).toContain(
-      `root "${join(homedir(), "Library", "Application Support", "Caddy")}"`,
-    );
-    // The substitution announces itself.
-    expect(r.stdout).toContain(userInfo().username);
-    expect(r.stdout.toLowerCase()).toContain("sudo");
-  },
-);
-
-test("root with an unresolvable SUDO_USER refuses instead of guessing", () => {
-  const r = devsite(["init"], {
-    cwd: makeRepo(),
-    env: { DEVSITE_UID: "0", SUDO_USER: "devsite-no-such-user" },
-  });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("without sudo");
-});
-
-test("root sudo'ing (SUDO_USER=root) is still a root shell: refuse", () => {
-  const r = devsite(["init"], {
-    cwd: makeRepo(),
-    env: { DEVSITE_UID: "0", SUDO_USER: "root" },
-  });
-  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("Caddy must run as you");
   expect(r.stderr).toContain("without sudo");
 });
 
 test("an empty DEVSITE_UID export is not uid 0: the run stays a normal-user run", () => {
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), env: { DEVSITE_UID: "" } });
   expect(r.status).toBe(0);
-  expect(r.stdout).not.toContain("Running under sudo");
 });
 
-test("a non-root run ignores a stray SUDO_USER (nested shells keep it exported)", () => {
-  const r = devsite(["init", "--dry-run"], {
-    cwd: makeRepo(),
-    env: { SUDO_USER: "devsite-no-such-user" },
-  });
-  expect(r.status).toBe(0);
-  expect(r.stdout).toContain(
-    `root "${join(homedir(), "Library", "Application Support", "Caddy")}"`,
-  );
-  expect(r.stdout).not.toContain("Running under sudo");
-});
-
-// --- Caddyfile ownership: content outside the managed region is sacred ---
+// --- Caddyfile ownership: content devsite does not own is sacred ---
 
 test("pre-existing non-devsite content is never deleted (Homebrew default shape)", () => {
   const caddyfile = makeCaddyfile('# Welcome to Caddy!\n\n:80 {\n\trespond "hi"\n}\n');
@@ -224,32 +168,14 @@ test("pre-existing non-devsite content is never deleted (Homebrew default shape)
   expect(r.stdout).toContain("+import devsite.d/*.caddy # devsite");
 });
 
-test("pre-region (v0) devsite files migrate: other repos' blocks move into devsite.d", () => {
-  const caddyfile = makeCaddyfile(
-    [
-      "# Generated by `devsite init` — do not edit by hand.",
-      "# Change a project's package.json#devSite and re-run `devsite init`.",
-      "",
-      "{",
-      "\tstorage file_system {",
-      '\t\troot "/somewhere"',
-      "\t}",
-      "\tlocal_certs",
-      "}",
-      "",
-      "# otherproj",
-      "other.internal {",
-      '\trespond "devsite: dev server for other.internal is not running (start it with bun dev)" 503',
-      "}",
-      "",
-    ].join("\n"),
-  );
+test("init names the default_bind line it deletes", () => {
+  const caddyfile = makeCaddyfile("{\n\tdefault_bind 127.0.0.1 100.64.0.9\n}\n");
   const r = devsite(["init", "--dry-run"], { cwd: makeRepo(), caddyfile });
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain("migrating 1 host file(s) from other repos into devsite.d/");
-  expect(r.stdout).toContain("+++ devsite.d/other.internal.caddy");
-  // The old file's global block is devsite's own — no user directives, so no warning.
-  expect(r.stderr).not.toContain("global options block");
+  expect(r.stdout).toContain(
+    'deletes "default_bind 127.0.0.1 100.64.0.9" from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out',
+  );
+  expect(r.stdout).toContain("-\tdefault_bind 127.0.0.1 100.64.0.9");
 });
 
 // Idempotence against init's own output is pinned by the round-trip suite
@@ -265,6 +191,4 @@ test("a user's global options block gets devsite's directives added, with a warn
   expect(r.stdout).toContain("+\tlocal_certs");
   expect(r.stdout).not.toContain("-\temail den@example.com");
   expect(r.stdout).not.toContain("-:8080");
-  // The user owns the global block — devsite must not also create its own.
-  expect(r.stdout).not.toContain("00-global.caddy");
 });
