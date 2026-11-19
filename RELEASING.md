@@ -5,7 +5,7 @@
 ## How a release happens
 
 1. Feature PRs merge into `dev`. Releasable work accumulates there — nothing is published until a promotion.
-2. Ask Claude to release ("release", "promote dev"). Claude opens a PR from `dev` into `main`:
+2. Open a PR from `dev` into `main`:
    - title: `Release TBD` — the version does not exist yet, it is computed during the publish run;
    - body: `## What's Changed` with the commits since the last release tag (short hash + subject + PR reference; merge commits excluded).
 3. Merge that PR **with a merge commit — never squash**. The commit prefixes are the version input; a squash would replace them with the PR title and release nothing.
