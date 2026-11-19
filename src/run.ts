@@ -44,14 +44,14 @@ const GLOBAL_FLAGS: Record<string, FlagDef> = {
 const COMMANDS: Record<string, Command> = {
   init: {
     summary: [
-      "One-time machine bootstrap for *.internal dev URLs over Tailscale.",
-      "Run from the repo root, as yourself; sudo runs only for caddy trust.",
+      "Set up *.internal dev URLs over Tailscale; fixes only what doctor finds red.",
+      "Run from the repo root, as yourself; every root step runs in one sudo call.",
     ],
     flags: {
       "dry-run": {
         type: "boolean",
         default: false,
-        help: "Print the diff init would apply; touch nothing.",
+        help: "Print the plan and the diff init would apply; touch nothing.",
       },
     },
     run: (values, ctx) => init({ dryRun: values["dry-run"] === true }, ctx),

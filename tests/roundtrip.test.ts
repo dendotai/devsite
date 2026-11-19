@@ -66,7 +66,7 @@ function devsiteBlock(host: string, project: string) {
     `${host} {`,
     "\ttls {",
     "\t\tissuer internal {",
-    "\t\t\tlifetime 168h",
+    "\t\t\tlifetime 120h",
     "\t\t}",
     "\t}",
     "\t@outside not remote_ip 127.0.0.1 ::1 100.64.0.0/10",

@@ -1,4 +1,4 @@
-// init's wait for Caddy's admin API after the service restart (#59): `caddy trust` and verify both need it to answer.
+// init's wait for Caddy's admin API after it starts Caddy (#59): `caddy trust` and the checks after the run both need it to answer.
 import { afterEach, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";

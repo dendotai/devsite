@@ -173,7 +173,7 @@ test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () 
     stdin: fakeStdin("n\n", true),
   });
   expect(r.status).toBe(1);
-  expect(r.stdout).toContain("Press y to apply");
+  expect(r.stdout).toContain("Apply these changes? [Y/n]");
   expect(r.stderr).toContain("Stopped — nothing changed");
   expect(existsSync(caddyfile)).toBe(false);
   expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);

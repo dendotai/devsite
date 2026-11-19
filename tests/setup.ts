@@ -5,3 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.DEVSITE_STATE_DIR = mkdtempSync(join(tmpdir(), "devsite-state-default-"));
+
+// init and doctor read Caddy's admin API; a closed port keeps every suite off this Mac's real Caddy. Suites that serve a mock re-point the var per test.
+process.env.DEVSITE_CADDY_ADMIN = "http://127.0.0.1:9";
