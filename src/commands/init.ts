@@ -1,20 +1,15 @@
 /**
- * devsite init — one-time machine bootstrap for *.internal dev URLs over Tailscale.
+ * devsite init — machine bootstrap for *.internal dev URLs over Tailscale.
  *
  * Design notes:
  *   - No ports. `package.json#devSite` declares only a host; each host gets a `respond 503` placeholder, and the devsite Vite plugin (vite.mjs) swaps in a live `reverse_proxy` to a free ephemeral port at `bun dev` time via Caddy's admin API. Any number of projects can run at once.
  *   - devsite owns the `devsite.d/` directory next to the Caddyfile — one `<host>.caddy` file per host, first line `# <project>`. The user's Caddyfile is edited exactly once, ever: a single `import devsite.d/*.caddy # devsite` line (the glob covers future files). Registering or renaming hosts only writes `devsite.d/` files; nothing in the user's file is ever re-parsed or regenerated. Global options live in the Caddyfile's own global options block, where every Caddy user expects them: devsite creates the block (once) when the user has none, or adds its two directives into the user's block (once). A block the user has touched is never rewritten — later runs only presence-check; a block that is purely devsite's own rendering re-renders fresh.
- *   - Every write shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
+ *   - State-driven: init runs doctor's Caddy checks first and plans a fix only for each red one, so on a set-up Mac it asks nothing, runs no sudo, and leaves Caddy's live routes alone. Every plan shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
+ *   - Every step that needs root runs in one sudo call, so one password prompt covers the run whatever sudo's `timestamp_timeout` is.
  *
- * Owns the Caddy setup so nobody has to assemble it by hand. It:
- *   - renders `devsite.d/` from every package.json#devSite (repo root, apps/*, packages/*) and imports it from /opt/homebrew/etc/Caddyfile,
- *   - pins Caddy's PKI storage to a fixed path so the local CA is identical no matter how Caddy runs (the service vs a foreground process) — the drift that silently broke phone cert-trust after a restart,
- *   - widens the internal leaf lifetime so certs don't lapse overnight,
- *   - runs Caddy as the user's always-on brew service, started at login, every route behind the LAN guard (ADR 0002).
- *
- * Run it as yourself; a run as root is refused. It calls sudo only for `caddy trust`, so the password prompt lands in your terminal:
+ * Run it as yourself; a run as root is refused:
  *   bunx devsite init            # apply
- *   bunx devsite init --dry-run  # print the diff it would apply; touch nothing
+ *   bunx devsite init --dry-run  # print the plan and the diff it would apply; touch nothing
  *
  * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
  */
@@ -30,12 +25,15 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
+import { caddyChecks, printSection, type Result, storageOf } from "../checks";
 import { type CliContext, processContext } from "../context";
 import { guardCaddyfileLines } from "../guard.mjs";
+import { BOLD, CYAN, DIM, exec, GREEN, type Paint, painter, RED, YELLOW } from "../io";
 import { devSiteName, hostsOf } from "../names.mjs";
 import { caddy } from "../vite.mjs";
 
-const LEAF_LIFETIME = "168h"; // 7d — survives nights/weekends; Caddy renews it while running.
+// Shorter than the 7-day intermediate, as Caddy's docs require (168h made each leaf end at the same second as its intermediate); 120h still outlasts a weekend with the Mac asleep.
+const LEAF_LIFETIME = "120h";
 
 // The one line devsite ever puts in the user's Caddyfile. The trailing comment tags the line for humans; the presence check tolerates it moving or losing the comment.
 const IMPORT_LINE = "import devsite.d/*.caddy # devsite";
@@ -152,12 +150,6 @@ export function renderHostFile(r: Route): string {
   ].join("\n");
 }
 
-export function exec(cmd: string, args: string[], ctx: CliContext, capture = false) {
-  const r = ctx.runCommand(cmd, args, { capture });
-  // outRaw exists for diff output, where trimming could eat a meaningful trailing context line (a lone space) and corrupt the patch.
-  return { status: r.status, out: r.stdout.trim(), outRaw: r.stdout, error: r.error };
-}
-
 // One planned file operation; next === null deletes the file. rel is the path relative to the Caddyfile's directory — the label patch(1) applies against.
 type Change = { rel: string; abs: string; next: string | null };
 
@@ -192,39 +184,27 @@ async function confirm(question: string, ctx: CliContext): Promise<boolean> {
   });
   stdin.setRawMode?.(false);
   stdin.pause();
-  const yes = /^y/i.test(key);
+  // Y is the default, as in apt: Enter applies too.
+  const yes = /^(y|\r|\n)/i.test(key);
   ctx.stdout.write(`${yes ? "y" : "n"}\n`);
   return yes;
 }
 
-// Prints the command, then runs it; a failure stops init.
-function runShown(shown: string[], cmd: string, args: string[], ctx: CliContext) {
-  ctx.stdout.write(`  ${shown.join(" ")}\n`);
-  if (exec(cmd, args, ctx).status !== 0) throw new Error(`\`${shown.join(" ")}\` failed`);
+// Runs the command where the user sees it, sharing the terminal (a sudo password prompt needs it); a failure stops init.
+function runInTerminal(cmd: string, args: string[], ctx: CliContext) {
+  if (exec(cmd, args, ctx).status !== 0) throw new Error(`\`${[cmd, ...args].join(" ")}\` failed`);
 }
 
-function sudo(args: string[], ctx: CliContext) {
-  // sudo prints its prompt only when it asks; the blank line sets it apart from the command above.
-  runShown(["sudo", ...args], "sudo", ["-p", "\n  Password for sudo (%u): ", ...args], ctx);
+const SHELL_SAFE = /^[\w@%+=:,./-]+$/;
+function shellQuote(arg: string): string {
+  return SHELL_SAFE.test(arg) ? arg : `'${arg.replaceAll("'", `'\\''`)}'`;
 }
 
-function asUser(args: string[], ctx: CliContext) {
-  const [cmd = "", ...rest] = args;
-  runShown(args, cmd, rest, ctx);
+// Every root step in one sudo call, so sudo asks for the password at most once per run. sudo prints its prompt only when it asks; the blank line sets it apart from the steps above.
+function sudoAll(commands: string[][], ctx: CliContext) {
+  const script = commands.map((c) => c.map(shellQuote).join(" ")).join(" && ");
+  runInTerminal("sudo", ["-p", "\n  Password for sudo (%u): ", "sh", "-c", script], ctx);
 }
-
-// NO_COLOR: https://no-color.org. The basic 8 colours take the terminal theme's palette.
-export type Paint = (code: number, text: string) => string;
-export function painter(stream: CliContext["stdout"], ctx: CliContext): Paint {
-  const on = (stream as { isTTY?: boolean }).isTTY === true && !ctx.env.NO_COLOR;
-  return (code, text) => (on ? `\x1b[${code}m${text}\x1b[0m` : text);
-}
-export const BOLD = 1;
-export const DIM = 2;
-export const RED = 31;
-export const GREEN = 32;
-const YELLOW = 33;
-const CYAN = 36;
 
 function paintDiff(diff: string, paint: Paint): string {
   return diff
@@ -239,31 +219,95 @@ function paintDiff(diff: string, paint: Paint): string {
     .join("\n");
 }
 
-type Step = { text: string; sudo?: boolean; details?: string[] };
+// A root step's command joins the run's one sudo call.
+type Step = { text: string; details?: string[] } & (
+  | { run: () => Promise<void>; root?: never }
+  | { root: string[]; run?: never }
+);
 
-function planSteps(changes: Change[], caddyDir: string, removedBinds: string[]): Step[] {
+type StepPlan = {
+  changes: Change[];
+  caddyfilePath: string;
+  devsiteDir: string;
+  removedBinds: string[];
+  checks: Result[];
+};
+
+// The steps in the order they run: the user's steps, then the root steps (one sudo call, so it runs back to back after the plan's y).
+function planSteps(p: StepPlan, ctx: CliContext): Step[] {
+  const repairs = new Set(
+    p.checks.flatMap((r) => (r.state !== "green" && r.repair ? [r.repair] : [])),
+  );
   const steps: Step[] = [];
-  if (changes.length > 0) {
+  if (p.changes.length > 0) {
     steps.push({
-      text: `write ${changes.length} file(s) in ${caddyDir}, as the diff below shows`,
-      details: removedBinds.map(
+      text: `write ${p.changes.length} file(s) in ${dirname(p.caddyfilePath)}, as the diff below shows`,
+      details: p.removedBinds.map(
         (b) =>
           `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out`,
       ),
+      run: async () => applyChanges(p.changes, p.caddyfilePath, p.devsiteDir),
     });
   }
-  steps.push({ text: "restart Caddy as you" });
-  steps.push({ text: "trust Caddy's local CA", sudo: true });
+  if (repairs.has("start")) {
+    // Caddy serves nothing while its admin API is down, so the restart drops no live route; the new process reads the files written above.
+    steps.push({
+      text: "start Caddy as you",
+      run: async () => {
+        runInTerminal("brew", ["services", "restart", "caddy"], ctx);
+        if (!(await waitForCaddyAdmin())) {
+          throw new Error(
+            `the Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s — see ${CADDY_LOG}`,
+          );
+        }
+      },
+    });
+  } else if (p.changes.length > 0 || repairs.has("load")) {
+    // `caddy reload` adapts the Caddyfile and posts it to the running Caddy's admin API, whatever service manager runs Caddy.
+    steps.push({
+      text: "load the Caddy config through Caddy's admin API",
+      run: async () =>
+        runInTerminal(
+          "caddy",
+          ["reload", "--config", p.caddyfilePath, "--adapter", "caddyfile"],
+          ctx,
+        ),
+    });
+  }
+  // Caddy's own auto-trust needs an interactive prompt it cannot get as a background service, so init runs `caddy trust`; it reads the CA from the admin API, which the steps above leave answering.
+  if (repairs.has("trust"))
+    steps.push({ text: "trust Caddy's local CA", root: ["caddy", "trust"] });
   return steps;
+}
+
+function stepLine(step: Step, i: number, total: number, paint: Paint): string {
+  const tag = step.root ? `  ${paint(YELLOW, "[sudo]")}` : "";
+  return `${paint(BOLD, `Step ${i + 1} of ${total}:`)} ${step.text}${tag}`;
 }
 
 function printSteps(heading: string, steps: Step[], paint: Paint, ctx: CliContext) {
   ctx.stdout.write(`\n${paint(BOLD, heading)}\n`);
   steps.forEach((s, i) => {
-    const tag = s.sudo ? `  ${paint(YELLOW, "[sudo]")}` : "";
-    ctx.stdout.write(`  ${i + 1}. ${s.text}${tag}\n`);
+    ctx.stdout.write(`  ${stepLine(s, i, steps.length, paint)}\n`);
     for (const d of s.details ?? []) ctx.stdout.write(`     ${paint(DIM, d)}\n`);
   });
+}
+
+async function runSteps(steps: Step[], paint: Paint, ctx: CliContext) {
+  for (const [i, s] of steps.entries()) {
+    if (s.run === undefined) continue;
+    ctx.stdout.write(`\n${stepLine(s, i, steps.length, paint)}\n`);
+    await s.run();
+  }
+  const root = steps.flatMap((s, i) => (s.root ? [{ s, i, root: s.root }] : []));
+  if (root.length === 0) return;
+  ctx.stdout.write("\n");
+  for (const r of root)
+    ctx.stdout.write(`${stepLine(r.s, r.i, steps.length, paint)}\n  sudo ${r.root.join(" ")}\n`);
+  sudoAll(
+    root.map((r) => r.root),
+    ctx,
+  );
 }
 
 function applyChanges(changes: Change[], caddyfilePath: string, devsiteDir: string) {
@@ -283,15 +327,10 @@ function applyChanges(changes: Change[], caddyfilePath: string, devsiteDir: stri
   }
 }
 
-function restartService(ctx: CliContext) {
-  exec("pkill", ["-x", "caddy"], ctx); // the user's own foreground Caddy, if any
-  asUser(["brew", "services", "restart", "caddy"], ctx);
-}
-
 const ADMIN_WAIT_MS = 5000;
 const CADDY_LOG = "/opt/homebrew/var/log/caddy.log";
 
-// `brew services restart` returns before the new Caddy listens; `caddy trust` and verify both need its admin API. Any HTTP answer means the listener is up.
+// Starting the service returns before the new Caddy listens; `caddy trust` and the checks after the run both need its admin API. Any HTTP answer means the listener is up.
 export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -303,101 +342,6 @@ export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<bool
       await new Promise((r) => setTimeout(r, 100));
     }
   }
-}
-
-function tailscale(args: string[], ctx: CliContext): string | null {
-  for (const bin of ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"]) {
-    const r = exec(bin, args, ctx, true);
-    if (r.status === 0) return r.out;
-  }
-  return null;
-}
-
-function check(ok: boolean, label: string, detail: string, ctx: CliContext) {
-  ctx.stdout.write(`  ${ok ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}\n`);
-}
-
-function sha256Fp(opensslOut: string): string | null {
-  return opensslOut.split("=")[1]?.trim() ?? null;
-}
-
-function servedIntermediateFp(host: string, ctx: CliContext): string | null {
-  const r = exec(
-    "bash",
-    [
-      "-c",
-      `echo | openssl s_client -connect ${host}:443 -servername ${host} -showcerts 2>/dev/null ` +
-        `| awk '/BEGIN CERT/{n++} n==2{print}' | openssl x509 -noout -fingerprint -sha256 2>/dev/null`,
-    ],
-    ctx,
-    true,
-  );
-  return r.status === 0 ? sha256Fp(r.out) : null;
-}
-
-function pinnedIntermediateFp(storageRoot: string, ctx: CliContext): string | null {
-  const p = join(storageRoot, "pki", "authorities", "local", "intermediate.crt");
-  if (!existsSync(p)) return null;
-  const r = exec("openssl", ["x509", "-in", p, "-noout", "-fingerprint", "-sha256"], ctx, true);
-  return r.status === 0 ? sha256Fp(r.out) : null;
-}
-
-function verify(routes: Route[], pki: Pki, ctx: CliContext) {
-  const host = routes[0]?.host;
-  if (!host) return;
-  // curl on macOS uses its own trust store, not the keychain devices trust, so check reachability with -k and verify trust separately via the cert chain.
-  // Any HTTP status counts: with no dev server running the placeholder answers 503; the Vite plugin swaps in the real upstream at `bun dev` time.
-  // curl prints "000" as the http_code when the connection itself fails, so success needs both a zero exit status and a real status code.
-  const r = exec(
-    "bash",
-    ["-c", `curl -k -sS -o /dev/null -w '%{http_code}' --max-time 8 https://${host}/`],
-    ctx,
-    true,
-  );
-  check(
-    r.status === 0 && r.out !== "000",
-    `https://${host} answers over TLS (Caddy up)`,
-    `HTTP ${r.out || "—"}`,
-    ctx,
-  );
-
-  const served = servedIntermediateFp(host, ctx);
-  const pinned = pinnedIntermediateFp(pki.storageRoot, ctx);
-  check(
-    Boolean(served && pinned && served === pinned),
-    "served cert chains to the pinned CA (what every trusting device sees)",
-    served && pinned ? (served === pinned ? "match" : "MISMATCH") : "could not compare",
-    ctx,
-  );
-
-  const tsIp = tailscale(["ip", "-4"], ctx)?.split("\n")[0]?.trim();
-  check(Boolean(tsIp), "Tailscale up on this Mac", tsIp ?? "tailscale not reachable", ctx);
-  if (tsIp) {
-    const answered = exec(
-      "dig",
-      ["+short", "+time=3", "+tries=1", `@${tsIp}`, host],
-      ctx,
-      true,
-    ).out;
-    check(
-      answered === tsIp,
-      "dnsmasq answers on the Tailscale IP (the phone's DNS path)",
-      answered || "no answer",
-      ctx,
-    );
-  }
-  check(
-    existsSync("/etc/resolver/internal"),
-    "/etc/resolver/internal present (Mac resolves *.internal locally)",
-    "",
-    ctx,
-  );
-  check(
-    existsSync(pki.caRootCert),
-    "local CA root exists (this is what devices must trust)",
-    pki.caRootCert,
-    ctx,
-  );
 }
 
 function printChecklist(routes: Route[], pki: Pki, ctx: CliContext) {
@@ -571,13 +515,19 @@ export async function init(
     );
   }
 
-  const steps = planSteps(changes, caddyDir, plan.removedBinds);
+  const checks = await caddyChecks(caddyfilePath, storageOf(caddyfilePath), ctx);
+  printSection("Checks", checks, paint, ctx);
+  const steps = planSteps(
+    { changes, caddyfilePath, devsiteDir, removedBinds: plan.removedBinds, checks },
+    ctx,
+  );
 
   // Each piece ends with its own newline; concatenation is one multi-file unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
   const diff = changes.map((c) => unifiedDiff(c, ctx)).join("");
 
   if (dryRun) {
-    printSteps("Without --dry-run, this run would:", steps, paint, ctx);
+    if (steps.length === 0) ctx.stdout.write("\n--dry-run: nothing to do.\n");
+    else printSteps("Plan:", steps, paint, ctx);
     if (changes.length === 0) {
       ctx.stdout.write(
         `\n--dry-run: ${caddyfilePath} and devsite.d are already up to date; nothing to write.\n`,
@@ -590,39 +540,33 @@ export async function init(
     return 0;
   }
 
-  // A run with nothing to write only restarts Caddy and re-trusts the CA, so it asks nothing.
-  const asks = changes.length > 0;
-  printSteps(asks ? "On y, this run will:" : "This run will:", steps, paint, ctx);
+  if (steps.length === 0) {
+    ctx.stdout.write(`\n${paint(GREEN, "Nothing to do: init changed nothing.")}\n`);
+    return 0;
+  }
+  printSteps("Plan:", steps, paint, ctx);
   if (changes.length > 0) {
     ctx.stdout.write(`\n${paint(BOLD, `The diff (paths relative to ${caddyDir}):`)}\n\n`);
     ctx.stdout.write(`${paintDiff(diff, paint)}\n`);
   }
-  if (asks) {
-    if (!ctx.stdin.isTTY) {
-      ctx.stderr.write(
-        "stdin is not a TTY — cannot ask for confirmation; nothing written. " +
-          "Run interactively, or use --dry-run to inspect the diff.\n",
-      );
-      return 1;
-    }
-    if (!(await confirm(`\n${paint(BOLD, "Press y to apply, any other key to stop:")} `, ctx))) {
-      ctx.stderr.write("Stopped — nothing changed.\n");
-      return 1;
-    }
-  }
-  ctx.stdout.write("\n");
-  applyChanges(changes, caddyfilePath, devsiteDir);
-  restartService(ctx);
-  if (!(await waitForCaddyAdmin())) {
+  if (!ctx.stdin.isTTY) {
     ctx.stderr.write(
-      `\nThe Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s — see ${CADDY_LOG}\n`,
+      "stdin is not a TTY — cannot ask for confirmation; nothing changed. " +
+        "Run interactively, or use --dry-run to inspect the plan.\n",
     );
     return 1;
   }
-  // Trust the pinned CA in the Mac keychain. Caddy's own auto-trust needs an interactive prompt it can't get as a background service, so do it explicitly. An already-trusted CA exits 0.
-  sudo(["caddy", "trust"], ctx);
-  ctx.stdout.write("\nVerifying:\n");
-  verify(routes, pki, ctx);
+  if (!(await confirm(`\n${paint(BOLD, "Apply these changes? [Y/n]")} `, ctx))) {
+    ctx.stderr.write("Stopped — nothing changed.\n");
+    return 1;
+  }
+  await runSteps(steps, paint, ctx);
+  printSection(
+    "Checks after this run",
+    await caddyChecks(caddyfilePath, storageOf(caddyfilePath), ctx),
+    paint,
+    ctx,
+  );
   printChecklist(routes, pki, ctx);
   return 0;
 }

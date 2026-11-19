@@ -1,159 +1,22 @@
 // `devsite doctor` scenarios, one per check, green and red: run(["doctor"]) over a scratch Caddy dir, a scripted runner (openssl s_client, security), and a local mock of Caddy's admin API.
-import { afterEach, beforeAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { renderHostFile } from "../src/commands/init";
-import { guardedRoute } from "../src/guard.mjs";
 import { run } from "../src/run";
+import { type CommandCall, cli, makeEmptyRepo, makeIo, makeRepo, scriptedRunner } from "./helpers";
 import {
-  type CommandCall,
-  cli,
-  makeEmptyRepo,
-  makeIo,
-  makeRepo,
-  scratchCaddyfile,
-  scriptedRunner,
-} from "./helpers";
+  HOST,
+  type Machine,
+  mockAdmin,
+  pki,
+  placeholder,
+  setUpMachine,
+  snapshot,
+  useMachine,
+} from "./machine";
 
-const HOST = "web.test.internal";
-
-type Pki = { root: string; served: string; otherRoot: string };
-let pki: Pki;
-
-function openssl(args: string[], cwd: string) {
-  const r = spawnSync("openssl", args, { cwd, encoding: "utf8" });
-  if (r.status !== 0) throw new Error(`openssl ${args.join(" ")}: ${r.stderr}`);
-}
-
-// Two CAs: the one in Caddy's storage (root → intermediate → leaf, the chain Caddy serves) and an unrelated one.
-beforeAll(() => {
-  const dir = mkdtempSync(join(tmpdir(), "devsite-pki-"));
-  const req = (name: string, cn: string) =>
-    openssl(
-      ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2"].concat([
-        "-keyout",
-        `${name}.key`,
-        "-out",
-        `${name}.crt`,
-        "-subj",
-        `/CN=${cn}`,
-      ]),
-      dir,
-    );
-  const signed = (name: string, cn: string, ca: string) => {
-    openssl(
-      ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", `${name}.key`].concat([
-        "-out",
-        `${name}.csr`,
-        "-subj",
-        `/CN=${cn}`,
-      ]),
-      dir,
-    );
-    openssl(
-      ["x509", "-req", "-in", `${name}.csr`, "-CA", `${ca}.crt`, "-CAkey", `${ca}.key`].concat([
-        "-CAcreateserial",
-        "-days",
-        "2",
-        "-out",
-        `${name}.crt`,
-      ]),
-      dir,
-    );
-  };
-  req("root", "Test Root");
-  req("other", "Other Root");
-  signed("inter", "Test Intermediate", "root");
-  signed("leaf", HOST, "inter");
-  const read = (n: string) => readFileSync(join(dir, `${n}.crt`), "utf8");
-  pki = { root: read("root"), served: read("leaf") + read("inter"), otherRoot: read("other") };
-});
-
-// --- the admin API mock ---
-
-const servers: Server[] = [];
-const savedAdmin = process.env.DEVSITE_CADDY_ADMIN;
-
-afterEach(async () => {
-  if (savedAdmin === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
-  else process.env.DEVSITE_CADDY_ADMIN = savedAdmin;
-  await Promise.all(
-    servers.splice(0).map((s) => {
-      s.closeAllConnections();
-      return new Promise((r) => s.close(r));
-    }),
-  );
-});
-
-// Serves `routes` as server srv0's route list, as Caddy's GET /config/apps/http/servers does.
-async function mockAdmin(routes: unknown[]) {
-  const server = createServer((req, res) => {
-    if (req.method === "GET" && req.url === "/config/apps/http/servers") {
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ srv0: { listen: [":443"], routes } }));
-      return;
-    }
-    res.statusCode = 404;
-    res.end();
-  });
-  servers.push(server);
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  process.env.DEVSITE_CADDY_ADMIN = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-}
-
-async function noAdmin() {
-  const server = createServer();
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const port = (server.address() as AddressInfo).port;
-  await new Promise((r) => server.close(r));
-  process.env.DEVSITE_CADDY_ADMIN = `http://127.0.0.1:${port}`;
-}
-
-const placeholder = () => guardedRoute([HOST], [{ handler: "static_response", status_code: 503 }]);
-
-// --- the scratch Caddy dir ---
-
-type Machine = { caddyfile: string; dir: string };
-
-// A Caddy dir as init leaves it: a Caddyfile that pins storage, the CA root in that storage, and one host file of project "web".
-function setUpMachine(opts: { root?: string | null; hostFile?: string | null } = {}): Machine {
-  const caddyfile = scratchCaddyfile();
-  const dir = dirname(caddyfile);
-  const storage = join(dir, "storage");
-  writeFileSync(
-    caddyfile,
-    `{\n\tstorage file_system {\n\t\troot "${storage}"\n\t}\n}\n\nimport devsite.d/*.caddy # devsite\n`,
-  );
-  const root = opts.root === undefined ? pki.root : opts.root;
-  if (root !== null) {
-    const local = join(storage, "pki", "authorities", "local");
-    mkdirSync(local, { recursive: true });
-    writeFileSync(join(local, "root.crt"), root);
-  }
-  const hostFile =
-    opts.hostFile === undefined ? renderHostFile({ host: HOST, project: "web" }) : opts.hostFile;
-  if (hostFile !== null) {
-    mkdirSync(join(dir, "devsite.d"));
-    writeFileSync(join(dir, "devsite.d", `${HOST}.caddy`), hostFile);
-  }
-  return { caddyfile, dir };
-}
-
-// Every file under dir with its content: a run that wrote nothing leaves it equal.
-function snapshot(dir: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const f of readdirSync(dir, { recursive: true, withFileTypes: true })) {
-    if (f.isFile()) {
-      const p = join(f.parentPath, f.name);
-      out[p] = readFileSync(p, "utf8");
-    }
-  }
-  return out;
-}
+useMachine();
 
 type Answers = { served?: string; trusted?: boolean };
 
@@ -233,7 +96,7 @@ test("a Caddyfile with no storage line: the Setup section names Caddy's default 
 // --- the Caddy checks, red ---
 
 test("the admin API does not answer: red with its fix, and the route checks are skipped", async () => {
-  await noAdmin();
+  // The suites' default admin address (tests/setup.ts) has no listener.
   const r = await doctor(setUpMachine());
   expect(r.stdout).toContain("✗ Caddy's admin API answers — no answer");
   expect(r.stdout).toContain("fix: bunx devsite init");

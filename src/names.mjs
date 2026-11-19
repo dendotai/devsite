@@ -1,6 +1,6 @@
 // The one place a project's devSite.name is read, checked, and turned into host names.
 
-// Hosts are interpolated into `bash -c` command strings (verify) and into devsite.d filenames, so a name that is not a plain hostname must never get past this check — a project package.json is not trusted input on a run that holds sudo.
+// Hosts go into command arguments (openssl -servername), Caddyfile site addresses, and devsite.d filenames, so a name that is not a plain hostname must never get past this check — a project package.json is not trusted input on a run that holds sudo.
 export const HOSTNAME_RE =
   /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
