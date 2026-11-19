@@ -12,23 +12,17 @@ export const hostsOf = (name) => {
 };
 
 /**
- * The project's devSite.name, or undefined when the package declares none. The field replaced `devSite.host` in 1.0, so the old field throws instead of being read.
+ * The project's devSite.name, or undefined when the package declares none.
  *
- * @param {{ devSite?: { name?: unknown, host?: unknown } }} pkg
+ * @param {{ devSite?: { name?: unknown } }} pkg
  * @param {string} where
  * @returns {string | undefined}
  */
 export function devSiteName(pkg, where) {
-  if (pkg.devSite?.host !== undefined) {
-    throw new Error(
-      `devSite.host in ${where} is replaced by devSite.name: write { "name": "myapp" } for https://myapp.internal and https://myapp.localhost`,
-    );
-  }
   const name = pkg.devSite?.name;
   if (name !== undefined && (typeof name !== "string" || !HOSTNAME_RE.test(name))) {
     throw new Error(`devSite.name ${JSON.stringify(name)} in ${where} is not a plain hostname`);
   }
-  // The likeliest upgrade slip: the key renamed, the old value kept.
   if (typeof name === "string" && /\.(internal|localhost)$/i.test(name)) {
     throw new Error(
       `devSite.name ${JSON.stringify(name)} in ${where} carries a suffix devsite adds itself: write ${JSON.stringify(name.replace(/\.(internal|localhost)$/i, ""))}`,

@@ -25,16 +25,6 @@ test("package.json without a devSite name: no-op", () => {
   expect(result).toBeUndefined();
 });
 
-test("the old devSite.host field stops the dev server with the field that replaced it", () => {
-  const plugin = devsite();
-  expect(() =>
-    viteConfigHook(plugin)(
-      { root: makeViteRoot({ name: "web", devSite: { host: "web.test.internal" } }) },
-      ENV,
-    ),
-  ).toThrow("devSite.name");
-});
-
 test("devSite.name present: Vite binds an OS-assigned port (port 0) for that host", async () => {
   const plugin = devsite();
   const result = await viteConfigHook(plugin)(

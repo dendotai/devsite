@@ -19,10 +19,11 @@ Boot start, the one thing root adds, serves nothing: the dev servers Caddy proxi
 
 ## Decision
 
-- Caddy runs as the user who runs `devsite init`, through `brew services` without `sudo`, started at login. `init` refuses to run as root. It calls `sudo` only for `caddy trust` and for the move off a root service.
+- By default, Caddy runs as the user who runs `devsite init`, through `brew services` without `sudo`, started at login. `init` refuses to run as root.
+- A root Caddy the user chooses stays: `init` reloads it with `sudo`. Running as the user is a preference, and devsite works under root, so it sets the default and prohibits nothing (ADR 0004).
 - Caddy listens on all addresses. Every route devsite renders starts with a guard: a request whose source is not `127.0.0.1`, `::1`, or the tailnet range `100.64.0.0/10` is aborted with no HTTP response (Caddy's `remote_ip` matcher, then `abort`). A LAN host cannot fake these sources: macOS drops an external packet with a loopback source, and replies to a `100.x` source leave through Tailscale.
 - The guard has one definition (`src/guard.mjs`), used by both places a route comes from: the placeholder `init` writes into `devsite.d/`, and the route the Vite plugin swaps in through the admin API. The plugin's `PATCH` replaces the whole route, so a guard only in the placeholder would vanish while `bun dev` runs.
-- The move from a root service stops the root daemon, stops any other root Caddy, and gives root-owned paths back to the user (the storage root, `devsite.d`, the Caddyfile and its copies, Homebrew's Caddy paths). A `default_bind` line in the Caddyfile's global options block is deleted, and `init` prints the line it deleted; this is the one exception to never rewriting a global block the user edited.
+- A `default_bind` line in the Caddyfile's global options block is deleted, and `init` prints the line it deleted; this is the one exception to never rewriting a global block the user edited.
 
 ## Consequences
 
@@ -30,11 +31,10 @@ Boot start, the one thing root adds, serves nothing: the dev servers Caddy proxi
 - A LAN host can still connect to `:443` and finish a TLS handshake before the abort. It sees a site's certificate, so it can find which names exist, and it reaches Caddy's TLS and HTTP code.
 - Port 80 has no guard: its redirect answers every host name with `308` and no app content.
 - A site block the user writes by hand gets no guard.
-- A placeholder that another repo's `init` wrote before this change has no guard until that repo runs `init` again; it answers only `503` and the name. Its live route from the Vite plugin always has the guard.
 
 ## Rejected
 
-- **Root service with `default_bind`:** the costs above.
+- **Root service with `default_bind` as the default:** the costs above. A user who needs `default_bind` for their own sites can still choose it.
 - **A dedicated `_caddy` user:** still cannot bind chosen addresses, so it needs the same guard; it adds an account to manage and moves storage out of the user's home.
 - **`pf` redirect from 443 to a high port bound to chosen addresses:** adds a firewall rule `init` must install and keep across reboots.
 - **A "LAN on purpose" setting that drops the guard:** no device can use it. A device without Tailscale cannot resolve `.internal` (dnsmasq answers only on the Tailscale IP), and `.localhost` always points to the device itself.
