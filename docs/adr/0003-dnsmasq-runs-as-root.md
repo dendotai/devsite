@@ -19,6 +19,7 @@ With Tailscale on, the Mac's main DNS server is Tailscale's `100.100.100.100`, w
 - devsite runs one dnsmasq of its own, as root, under its own LaunchDaemon and config file. It listens on the Tailscale IP only and answers `address=/internal/<Tailscale IP>`.
 - devsite writes no `/etc/resolver/internal` and runs no dnsmasq for the Mac itself. It never changes a dnsmasq the user runs.
 - With no Tailscale on the Mac, devsite installs no dnsmasq.
+- devsite's LaunchDaemon runs a small root watcher that waits on macOS's network-change notifications (`State:/Network/Interface/[^/]+/IPv4`, `State:/Network/Global/IPv4`), finds the Tailscale IP by its `100.64.0.0/10` address, and starts dnsmasq when the IP appears and stops it when the IP goes, after the burst of events settles. In a test, the notifications arrived 99 to 124 ms after Tailscale went down or up.
 
 ## Consequences
 
@@ -29,5 +30,7 @@ With Tailscale on, the Mac's main DNS server is Tailscale's `100.100.100.100`, w
 
 ## Rejected
 
+- **launchd `KeepAlive` on dnsmasq alone:** while Tailscale is off, a failed start and a log line about every 10 s, and the phone waits up to about 10 s after Tailscale connects.
+- **launchd `WatchPaths` on DNS files:** `/var/run/resolv.conf` and the SystemConfiguration plists never fired; the `/etc/resolv.conf` symlink fired on 3 of 4 changes, 2 to 7 s late.
 - **A Mac dnsmasq run as the user on `127.0.0.1:5354`, with `/etc/resolver/internal` pointing at it:** one more service and one more `sudo` file, only so that `.internal` also works on the Mac while Tailscale is off.
 - **devsite's lines inside the user's dnsmasq config:** its listen lines apply to the whole dnsmasq and would cut the user's dnsmasq off their LAN or kill it when Tailscale is off.
