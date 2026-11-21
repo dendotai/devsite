@@ -37,6 +37,7 @@ import {
   type Servers,
 } from "../checks";
 import { type CliContext, processContext } from "../context";
+import { type DnsmasqPlan, digAnswer, planDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { ALLOWED_SOURCES, guardCaddyfileLines } from "../guard.mjs";
 import { findCaddy, type KnownInstall, unknownFix } from "../install";
 import { BOLD, CYAN, DIM, exec, GREEN, type Paint, painter, RED, YELLOW } from "../io";
@@ -177,7 +178,7 @@ export function renderHostFile(r: Route, portFile: string | null): string {
   ].join("\n");
 }
 
-// One planned file operation; next === null deletes the file. rel is the path relative to the Caddyfile's directory — the label patch(1) applies against.
+// One planned file operation; next === null deletes the file. rel is the diff's label: the path relative to the Caddyfile's directory, or the absolute path of a file outside it.
 type Change = { rel: string; abs: string; next: string | null };
 
 let tmpSeq = 0;
@@ -265,6 +266,8 @@ type StepPlan = {
   stateDir: string;
   // Shown under the load step: one line per live route the load drops, or one line that says init cannot list them.
   dropped: string[];
+  // null when no check calls for devsite's dnsmasq.
+  dnsmasq: DnsmasqPlan | null;
 };
 
 // Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
@@ -473,8 +476,21 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
   if (repairs.has("trust")) {
     steps.push({ text: "trust Caddy's local CA", root: [["caddy", "trust"]] });
   }
+  if (p.dnsmasq !== null) steps.push(...dnsmasqSteps(p.dnsmasq, ctx));
   const rank = (s: Step) => (s.run ? 0 : s.root ? 1 : 2);
   return steps.sort((a, b) => rank(a) - rank(b));
+}
+
+function dnsmasqSteps(plan: DnsmasqPlan, ctx: CliContext): Step[] {
+  const steps: Step[] = [];
+  if (plan.install) {
+    steps.push({
+      text: "install dnsmasq with Homebrew",
+      run: async () => runInTerminal("brew", ["install", "dnsmasq"], ctx),
+    });
+  }
+  steps.push({ text: plan.text, details: plan.details, root: plan.rootCommands(writeTmp) });
+  return steps;
 }
 
 function stepLine(step: Step, i: number, total: number, paint: Paint): string {
@@ -538,6 +554,16 @@ function applyChanges(changes: Change[], caddyfilePath: string | null, devsiteDi
 }
 
 const ADMIN_WAIT_MS = 5000;
+
+const DNSMASQ_WAIT_MS = 3000;
+
+// launchd returns before dnsmasq binds, and the checks after the run ask it.
+async function waitForDnsmasq(ip: string, ctx: CliContext, timeoutMs = DNSMASQ_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (digAnswer(ip, ctx) !== ip && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
 
 // Starting the service returns before the new Caddy listens; `caddy trust` and the checks after the run both need its admin API. Any HTTP answer means the listener is up.
 export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<boolean> {
@@ -855,7 +881,8 @@ export async function init(
     ctx.stdout.write(`  https://${r.host}  ${paint(DIM, `(${r.project})`)}\n`);
   }
 
-  const checks = await caddyChecks(install, storage, ctx);
+  const dns = probeDnsmasq(settings, ctx);
+  const checks = [...(await caddyChecks(install, storage, ctx)), ...dns.checks];
   printSection("Checks", checks, paint, ctx);
   const ownHosts = new Set(
     [...machineHosts(devsiteDir), ...routes.map((r) => r.host)].flatMap((h) => {
@@ -864,6 +891,8 @@ export async function init(
     }),
   );
   const repairs = repairsOf(checks, install);
+  const dnsPlan =
+    repairs.has("run-dnsmasq") && dns.dnsmasq !== null ? planDnsmasq(dns.dnsmasq) : null;
   const dropped = loadsConfig(install, repairs, changes)
     ? await droppedRoutes(install.config, ownHosts, ctx)
     : [];
@@ -878,6 +907,7 @@ export async function init(
       missingPortFiles,
       stateDir,
       dropped,
+      dnsmasq: dnsPlan,
     },
     ctx,
   );
@@ -888,19 +918,26 @@ export async function init(
       ? adaptedJson([renderGuardFile(), ...routes.map((r) => renderHostFile(r, null))], ctx)
       : "";
 
-  // Each piece ends with its own newline; concatenation is one multi-file unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
-  const diff = changes.map((c) => unifiedDiff(c, ctx)).join("");
+  // devsite's dnsmasq files sit outside the Caddy dir, so their diff labels are absolute paths.
+  const dnsChanges: Change[] = (dnsPlan?.files ?? []).map((f) => ({
+    rel: f.abs,
+    abs: f.abs,
+    next: f.next,
+  }));
+  // Each piece ends with its own newline; concatenation is one multi-file unified diff, whose relative labels patch(1) applies with -p0 from the Caddyfile's dir.
+  const diff = [...changes, ...dnsChanges].map((c) => unifiedDiff(c, ctx)).join("");
+  const fileCount = changes.length + dnsChanges.length;
 
   if (dryRun) {
     if (steps.length === 0) ctx.stdout.write("\n--dry-run: nothing to do.\n");
     else printSteps("Plan:", steps, paint, ctx);
-    if (changes.length === 0) {
+    if (fileCount === 0) {
       ctx.stdout.write(
         `\n--dry-run: ${caddyfilePath ?? devsiteDir} and devsite.d are already up to date; nothing to write.\n`,
       );
     } else {
       ctx.stdout.write(
-        `\n--dry-run: would change ${changes.length} file(s) in ${caddyDir}; the diff:\n\n${paintDiff(diff, paint)}\n`,
+        `\n--dry-run: would change ${fileCount} file(s); relative paths are in ${caddyDir}; the diff:\n\n${paintDiff(diff, paint)}\n`,
       );
     }
     ctx.stdout.write(jsonHelp);
@@ -913,8 +950,8 @@ export async function init(
     return 0;
   }
   printSteps("Plan:", steps, paint, ctx);
-  if (changes.length > 0) {
-    ctx.stdout.write(`\n${paint(BOLD, `The diff (paths relative to ${caddyDir}):`)}\n\n`);
+  if (fileCount > 0) {
+    ctx.stdout.write(`\n${paint(BOLD, `The diff (relative paths are in ${caddyDir}):`)}\n\n`);
     ctx.stdout.write(`${paintDiff(diff, paint)}\n`);
   }
   if (!ctx.stdin.isTTY) {
@@ -929,9 +966,14 @@ export async function init(
     return 1;
   }
   await runSteps(steps, paint, ctx);
+  if (dnsPlan !== null && dns.dnsmasq !== null) await waitForDnsmasq(dns.dnsmasq.ip, ctx);
   const after = installAfter(settings, install, ctx);
   const storageAfter = await findStorage(after, ctx);
-  printSection("Checks after this run", await caddyChecks(after, storageAfter, ctx), paint, ctx);
+  const checksAfter = [
+    ...(await caddyChecks(after, storageAfter, ctx)),
+    ...probeDnsmasq(settings, ctx).checks,
+  ];
+  printSection("Checks after this run", checksAfter, paint, ctx);
   ctx.stdout.write(jsonHelp);
   const phoneRoot = join(stateDir, "caddy-root.crt");
   printChecklist(routes, await caRootFile(storageAfter, phoneRoot), ctx);

@@ -77,7 +77,7 @@ async function devsite(
     runCommand,
     stdin: fakeStdin("y", true),
   });
-  if (opts.noPrefixOverride) delete io.ctx.env.DEVSITE_CADDY_PREFIX;
+  if (opts.noPrefixOverride) delete io.ctx.env.DEVSITE_BREW_PREFIX;
   if (opts.stateDir !== undefined) io.ctx.env.DEVSITE_STATE_DIR = opts.stateDir;
   const status = await run(argv, io.ctx);
   const ran = calls.filter((c) => c.cmd !== "diff").map((c) => [c.cmd, ...c.args].join(" "));

@@ -103,7 +103,7 @@ test("init --dry-run through the io context: renders the tree diff, returns 0", 
   expect(stdout.text()).toContain("web.test.internal, web.test.localhost {");
 });
 
-test("init --dry-run runs only ps, for the install seam, and one diff per planned file", async () => {
+test("init --dry-run runs only ps and tailscale, for the install seams, and one diff per planned file", async () => {
   const { runCommand, calls } = scriptedRunner(({ args }) => ({
     status: 1,
     stdout: `scripted diff of ${args.at(-3)}\n`,
@@ -113,6 +113,7 @@ test("init --dry-run runs only ps, for the install seam, and one diff per planne
   // The last argument, the planned content, is a temp file with a per-run name.
   expect(calls.map((c) => [c.cmd, ...c.args.slice(0, -1), c.capture])).toEqual([
     ["ps", "-axo", true],
+    ["tailscale", "ip", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/guard.caddy", "/dev/null", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/web.test.internal.caddy", "/dev/null", true],

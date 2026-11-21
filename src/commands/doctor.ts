@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { caddyChecks, INIT, machineHosts, printSection, type Result } from "../checks";
 import { type CliContext, processContext } from "../context";
+import { type DnsmasqProbe, describeDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
 import { BOLD, GREEN, type Paint, painter, RED } from "../io";
 import { readSettings } from "../settings";
@@ -84,11 +85,18 @@ function unusedHosts(hosts: string[], ctx: CliContext): string[] {
   });
 }
 
-function printSetup(install: CaddyInstall, storage: Storage | null, ctx: CliContext, paint: Paint) {
+function printSetup(
+  install: CaddyInstall,
+  storage: Storage | null,
+  dns: DnsmasqProbe,
+  ctx: CliContext,
+  paint: Paint,
+) {
   const line = (s: string) => ctx.stdout.write(`  ${s}\n`);
   ctx.stdout.write(`\n${paint(BOLD, "Setup")}\n`);
   if (install.kind === "unknown") {
     line(`Caddy: an install devsite does not know (${install.why})`);
+    line(`dnsmasq: ${describeDnsmasq(dns)}`);
     return;
   }
   line(`Caddy: ${describeKind(install)}`);
@@ -105,6 +113,7 @@ function printSetup(install: CaddyInstall, storage: Storage | null, ctx: CliCont
   line(`Runs as: ${install.user === "root" ? "root" : "you"} (${install.userSource})`);
   if (storage !== null)
     line(`Caddy storage: ${storage.root ?? "not read by devsite"} (${storage.source})`);
+  line(`dnsmasq: ${describeDnsmasq(dns)}`);
   const unused = unusedHosts(machineHosts(install.devsiteDir), ctx);
   line(
     `Hosts unused for ${UNUSED_DAYS}+ days: ${unused.length === 0 ? "none" : unused.join(", ")}`,
@@ -124,7 +133,8 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
 
   ctx.stdout.write(`${paint(BOLD, "devsite doctor")}\n`);
   const storage = install.kind === "unknown" ? null : await findStorage(install, ctx);
-  printSetup(install, storage, ctx, paint);
+  const dns = probeDnsmasq(read.settings, ctx);
+  printSetup(install, storage, dns, ctx, paint);
 
   const caddyResults: Result[] =
     install.kind === "unknown"
@@ -143,6 +153,10 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   printSection("Caddy", caddyResults, paint, ctx);
 
   const results = [...caddyResults];
+  if (dns.checks.length > 0) {
+    printSection("dnsmasq", dns.checks, paint, ctx);
+    results.push(...dns.checks);
+  }
   let routes: Route[] = [];
   let invalid: string | null = null;
   try {

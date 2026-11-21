@@ -66,9 +66,9 @@ function brewService(ctx: CliContext): BrewService | null {
   }
 }
 
-// DEVSITE_CADDY_PREFIX points the seam at a scratch Homebrew prefix in tests, in place of `brew --prefix`.
-function brewPrefix(ctx: CliContext): string | null {
-  if (ctx.env.DEVSITE_CADDY_PREFIX) return ctx.env.DEVSITE_CADDY_PREFIX;
+// DEVSITE_BREW_PREFIX points the seam at a scratch Homebrew prefix in tests, in place of `brew --prefix`.
+export function brewPrefix(ctx: CliContext): string | null {
+  if (ctx.env.DEVSITE_BREW_PREFIX) return ctx.env.DEVSITE_BREW_PREFIX;
   const r = exec("brew", ["--prefix"], ctx, true);
   return r.status === 0 && r.out !== "" ? r.out : null;
 }

@@ -4,7 +4,15 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { run } from "../src/run";
 import { portFilePath } from "../src/state.mjs";
-import { type CommandCall, cli, makeEmptyRepo, makeIo, makeRepo, scriptedRunner } from "./helpers";
+import {
+  type CommandCall,
+  cli,
+  MISSING,
+  makeEmptyRepo,
+  makeIo,
+  makeRepo,
+  scriptedRunner,
+} from "./helpers";
 import {
   HOST,
   hostFileOf,
@@ -19,12 +27,15 @@ import {
 
 useMachine();
 
+const TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+
 type Answers = { served?: string; trusted?: boolean };
 
 function runner(a: Answers = {}) {
   return scriptedRunner((c: CommandCall) => {
     if (c.cmd === "openssl" && c.args[0] === "s_client") return { stdout: a.served ?? pki.served };
     if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
+    if (/(?:^|\/)tailscale$/i.test(c.cmd)) return MISSING;
     return { status: 1 };
   });
 }
@@ -75,9 +86,15 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
   expect(r.stdout).not.toContain("✗");
   expect(r.status).toBe(0);
   expect(snapshot(m.dir)).toEqual(before);
-  expect(r.calls.map((c) => c.cmd)).toEqual(["ps", "openssl", "security"]);
+  expect(r.calls.map((c) => c.cmd)).toEqual([
+    "ps",
+    "tailscale",
+    TAILSCALE_APP,
+    "openssl",
+    "security",
+  ]);
   // The certificate check connects to this Mac with the host as SNI, so it needs no DNS.
-  expect(r.calls[1]?.args).toEqual([
+  expect(r.calls[3]?.args).toEqual([
     "s_client",
     "-connect",
     "127.0.0.1:443",
@@ -85,7 +102,7 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
     HOST,
     "-showcerts",
   ]);
-  expect(r.calls[2]?.args).toEqual([
+  expect(r.calls[4]?.args).toEqual([
     "verify-cert",
     "-c",
     join(m.dir, "storage", "pki", "authorities", "local", "root.crt"),
@@ -192,7 +209,7 @@ test("no CA in Caddy's storage: red, and the trust check is skipped", async () =
     "✗ the served certificate chains to the CA in Caddy's storage — no CA at",
   );
   expect(r.stdout).toContain("– that CA is trusted in the keychain — no CA to check");
-  expect(r.calls.map((c) => c.cmd)).toEqual(["ps"]);
+  expect(r.calls.map((c) => c.cmd)).toEqual(["ps", "tailscale", TAILSCALE_APP]);
   expect(r.status).toBe(1);
 });
 
@@ -359,7 +376,7 @@ test("a storage devsite cannot read and no CA from the admin API: the CA checks 
   expect(r.stdout).toContain(
     "– the served certificate chains to the CA in Caddy's storage — devsite cannot read the Caddyfile's storage line, storage redis, and Caddy's admin API gives no CA",
   );
-  expect(r.calls.map((c) => c.cmd)).toEqual(["ps"]);
+  expect(r.calls.map((c) => c.cmd)).toEqual(["ps", "tailscale", TAILSCALE_APP]);
   expect(r.status).toBe(0);
 });
 
