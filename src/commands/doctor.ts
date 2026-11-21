@@ -8,13 +8,21 @@ import { type CliContext, processContext } from "../context";
 import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
 import { BOLD, GREEN, type Paint, painter, RED } from "../io";
 import { readSettings } from "../settings";
-import { resolveStateDir } from "../state.mjs";
+import { portFilePath, resolveStateDir } from "../state.mjs";
 import { findStorage, type Storage } from "../storage";
 import { discoverRoutes, type Route, refuseRoot, renderHostFile } from "./init";
 
 const UNUSED_DAYS = 30;
 
-function projectChecks(routes: Route[], devsiteDir: string): Result[] {
+// A host file's first line, `# <project>`, names the project that owns it.
+function hostFileOwner(text: string): string | undefined {
+  return text
+    .split("\n", 1)[0]
+    ?.match(/^# (.+)$/)?.[1]
+    ?.trim();
+}
+
+function projectChecks(routes: Route[], devsiteDir: string, stateDir: string): Result[] {
   const results: Result[] = [];
   for (const r of routes) {
     const path = join(devsiteDir, `${r.host}.caddy`);
@@ -24,10 +32,7 @@ function projectChecks(routes: Route[], devsiteDir: string): Result[] {
       continue;
     }
     const current = readFileSync(path, "utf8");
-    const owner = current
-      .split("\n", 1)[0]
-      ?.match(/^# (.+)$/)?.[1]
-      ?.trim();
+    const owner = hostFileOwner(current);
     const ownerLabel = `${r.host} is used by ${r.project} only`;
     if (owner !== undefined && owner !== r.project) {
       results.push({
@@ -40,12 +45,28 @@ function projectChecks(routes: Route[], devsiteDir: string): Result[] {
     }
     results.push({ state: "green", label: ownerLabel });
     results.push(
-      current === renderHostFile(r)
+      current === renderHostFile(r, portFilePath(r.host, stateDir))
         ? { state: "green", label }
         : { state: "red", label, detail: "it differs", fix: INIT },
     );
   }
   return results;
+}
+
+// Every host file in devsite.d imports its host's port file, so one missing port file makes every `caddy reload` fail, for each repo's hosts.
+function portFileChecks(devsiteDir: string, stateDir: string): Result[] {
+  return machineHosts(devsiteDir).map((host) => {
+    const label = `${host}'s port file exists`;
+    const path = portFilePath(host, stateDir);
+    if (existsSync(path)) return { state: "green", label };
+    const project = hostFileOwner(readFileSync(join(devsiteDir, `${host}.caddy`), "utf8"));
+    return {
+      state: "red",
+      label,
+      detail: `no ${path}, so \`caddy reload\` fails`,
+      fix: project === undefined ? INIT : `${INIT}, in the repo of ${project}`,
+    };
+  });
 }
 
 // The Vite plugin stamps each host's last-used date on every dev-server start (#48). A host with no stamp is left out: its file may predate the stamps.
@@ -99,6 +120,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   }
   const install = findCaddy(read.settings, ctx);
   const paint = painter(ctx.stdout, ctx);
+  const stateDir = resolveStateDir(ctx.env);
 
   ctx.stdout.write(`${paint(BOLD, "devsite doctor")}\n`);
   const storage = install.kind === "unknown" ? null : await findStorage(install, ctx);
@@ -114,7 +136,10 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
             fix: unknownFix(ctx),
           },
         ]
-      : await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx);
+      : [
+          ...(await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx)),
+          ...portFileChecks(install.devsiteDir, stateDir),
+        ];
   printSection("Caddy", caddyResults, paint, ctx);
 
   const results = [...caddyResults];
@@ -148,7 +173,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
               detail: "they need Caddy's paths",
             } as const,
           ]
-        : projectChecks(routes, install.devsiteDir)),
+        : projectChecks(routes, install.devsiteDir, stateDir)),
     ];
     results.push(...repoResults);
     printSection(`This repo (${ctx.cwd})`, repoResults, paint, ctx);

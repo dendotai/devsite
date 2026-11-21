@@ -1,8 +1,9 @@
 // `devsite init` scenarios: run(["init"]) over a scratch Caddy dir, a scripted runner, and a local mock of Caddy's admin API. Each test reads what init printed, which commands it ran, and its exit code.
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type CliContext, processRunner } from "../src/context";
+import { portFilePath } from "../src/state.mjs";
 import { type CommandCall, cli, fakeStdin, makeRepo, scriptedRunner } from "./helpers";
 import { HOST, mockAdmin, pki, placeholder, setUpMachine, snapshot, useMachine } from "./machine";
 
@@ -152,5 +153,29 @@ test("a certificate from another CA: init loads the Caddyfile, so Caddy uses its
   expect(r.stdout).toContain(`is served a certificate from another CA`);
   expect(r.stdout).toContain("Step 1 of 1: load the Caddy config through Caddy's admin API");
   expect(r.acted).toEqual([`caddy reload --config ${m.caddyfile} --adapter caddyfile`]);
+  expect(r.status).toBe(0);
+});
+
+test("a host with no port file: init writes the placeholder as you, before the host files", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, portFile: false });
+  const portFile = portFilePath(HOST, m.stateDir);
+  const r = await init(m.caddyfile);
+  expect(r.stdout).toContain(
+    `Step 1 of 1: write the port file of ${HOST} in ${join(m.stateDir, "ports")}`,
+  );
+  expect(readFileSync(portFile, "utf8")).toBe("error 503\n");
+  expect(r.acted).toEqual([]);
+  expect(r.status).toBe(0);
+});
+
+test("a port file that holds a live port: init leaves it as it is", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const portFile = portFilePath(HOST, m.stateDir);
+  writeFileSync(portFile, "reverse_proxy 127.0.0.1:50300\n");
+  const r = await init(m.caddyfile, { stdin: fakeStdin("", false) });
+  expect(r.stdout).toContain("Nothing to do: init changed nothing.");
+  expect(readFileSync(portFile, "utf8")).toBe("reverse_proxy 127.0.0.1:50300\n");
   expect(r.status).toBe(0);
 });

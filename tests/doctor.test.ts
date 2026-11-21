@@ -2,11 +2,12 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { renderHostFile } from "../src/commands/init";
 import { run } from "../src/run";
+import { portFilePath } from "../src/state.mjs";
 import { type CommandCall, cli, makeEmptyRepo, makeIo, makeRepo, scriptedRunner } from "./helpers";
 import {
   HOST,
+  hostFileOf,
   type Machine,
   mockAdmin,
   pki,
@@ -58,6 +59,7 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
     `Caddy storage: ${join(m.dir, "storage")} (the Caddyfile's storage line)`,
   );
   expect(r.stdout).toContain("Hosts unused for 30+ days: none");
+  expect(r.stdout).toContain(`✓ ${HOST}'s port file exists`);
   expect(r.stdout).toContain(`✓ Caddy is installed — Homebrew at ${m.prefix}`);
   expect(r.stdout).toContain("✓ Caddy's admin API answers");
   expect(r.stdout).toContain(`✓ ${HOST}'s route starts with the LAN guard`);
@@ -219,7 +221,8 @@ test("the repo's host has no host file: red", async () => {
 
 test("a project in another repo uses the same name: red, naming it", async () => {
   await mockAdmin([placeholder()]);
-  const m = setUpMachine({ hostFile: renderHostFile({ host: HOST, project: "shop" }) });
+  const m = setUpMachine();
+  writeFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), hostFileOf("shop"));
   const r = await doctor(m);
   expect(r.stdout).toContain(
     `✗ ${HOST} is used by web only — project shop in another repo uses it too`,
@@ -358,4 +361,15 @@ test("a storage devsite cannot read and no CA from the admin API: the CA checks 
   );
   expect(r.calls.map((c) => c.cmd)).toEqual(["ps"]);
   expect(r.status).toBe(0);
+});
+
+test("a host with no port file: red, because every Caddy reload fails, with init in its repo as the fix", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ portFile: false });
+  const r = await doctor(m);
+  expect(r.stdout).toContain(
+    `✗ ${HOST}'s port file exists — no ${portFilePath(HOST, m.stateDir)}, so \`caddy reload\` fails`,
+  );
+  expect(r.stdout).toContain("fix: bunx devsite init, in the repo of web");
+  expect(r.status).toBe(1);
 });

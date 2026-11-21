@@ -20,8 +20,8 @@ A `devSite` field in `package.json` declares the project's name, and devsite ser
 
 devsite has two parts:
 
-- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` name in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block answering `503` as a placeholder), and (re)starts Caddy as an always-on service that runs as you. Every devsite route answers only this machine and your tailnet: a request from the LAN gets no response. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo` (for `caddy trust`).
-- **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, and swaps the host's placeholder route for a live `reverse_proxy` through Caddy's admin API on localhost. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
+- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` name in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block that takes its handler from the host's port file in devsite's state dir, which answers `503` as a placeholder), and (re)starts Caddy as an always-on service that runs as you. Every devsite route answers only this machine and your tailnet: a request from the LAN gets no response. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo` (for `caddy trust`).
+- **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, writes a live `reverse_proxy` to the host's port file, and swaps the host's placeholder route for it through Caddy's admin API on localhost. When the dev server stops, the plugin writes the placeholder back. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
   - It only updates a route that `devsite init` wrote. For a name `init` has not seen yet (a new project, a renamed one), `bun dev` warns that Caddy has no route for `<name>.internal`, names `bunx devsite init`, and serves on the raw local URL.
   - It also routes `<name>.localhost` to the same port. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
@@ -33,7 +33,7 @@ Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA)
                                       Vite dev server (ephemeral port)
 ```
 
-The live route exists only in Caddy's running config. If the Caddy service restarts mid-session, `<name>.internal` reverts to the `503` placeholder and `<name>.localhost` stops answering until you restart the dev server.
+The host's port file holds the live route too, so a Caddy reload or restart mid-session keeps it. `bunx devsite doctor` reports a missing port file, which makes every `caddy reload` fail.
 
 ## Quick start
 

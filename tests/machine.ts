@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { renderGuardFile, renderHostFile } from "../src/commands/init";
 import { guardedRoute } from "../src/guard.mjs";
+import { PORT_PLACEHOLDER, portFilePath, writePortFile } from "../src/state.mjs";
 import { scratchCaddyfile } from "./helpers";
 
 export const HOST = "web.test.internal";
@@ -82,10 +83,12 @@ const servers: Server[] = [];
 // Each suite calls this once at its top: a hook registered at this module's load would bind only to the first suite that imports it.
 export function useMachine() {
   const savedAdmin = process.env.DEVSITE_CADDY_ADMIN;
+  const savedState = process.env.DEVSITE_STATE_DIR;
   beforeAll(makePki);
   afterEach(async () => {
     if (savedAdmin === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
     else process.env.DEVSITE_CADDY_ADMIN = savedAdmin;
+    process.env.DEVSITE_STATE_DIR = savedState;
     await Promise.all(
       servers.splice(0).map((s) => {
         s.closeAllConnections();
@@ -135,15 +138,22 @@ export const placeholder = () =>
 
 // --- the scratch Caddy dir ---
 
-export type Machine = { caddyfile: string; dir: string; storage: string; prefix: string };
+export type Machine = {
+  caddyfile: string;
+  dir: string;
+  storage: string;
+  prefix: string;
+  stateDir: string;
+};
 
-// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web" beside devsite's guard snippet.
+// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web" beside devsite's guard snippet. A fresh state dir holds the host's port file (unless `portFile` is false).
 export function setUpMachine(
   opts: {
     root?: string | null;
     hostFile?: string | null;
     caddyfile?: string;
     installed?: boolean;
+    portFile?: boolean;
   } = {},
 ): Machine {
   const caddyfile = scratchCaddyfile();
@@ -167,14 +177,21 @@ export function setUpMachine(
     mkdirSync(local, { recursive: true });
     writeFileSync(join(local, "root.crt"), root);
   }
-  const hostFile =
-    opts.hostFile === undefined ? renderHostFile({ host: HOST, project: "web" }) : opts.hostFile;
+  const stateDir = mkdtempSync(join(tmpdir(), "devsite-state-"));
+  process.env.DEVSITE_STATE_DIR = stateDir;
+  if (opts.portFile !== false) writePortFile(HOST, PORT_PLACEHOLDER, stateDir);
+  const hostFile = opts.hostFile === undefined ? hostFileOf("web") : opts.hostFile;
   if (hostFile !== null) {
     mkdirSync(join(dir, "devsite.d"));
     writeFileSync(join(dir, "devsite.d", `${HOST}.caddy`), hostFile);
     writeFileSync(join(dir, "devsite.d", "guard.caddy"), renderGuardFile());
   }
-  return { caddyfile, dir, storage, prefix };
+  return { caddyfile, dir, storage, prefix, stateDir };
+}
+
+// The host file init writes for HOST, for the state dir the latest setUpMachine set.
+export function hostFileOf(project: string): string {
+  return renderHostFile({ host: HOST, project }, portFilePath(HOST, process.env.DEVSITE_STATE_DIR));
 }
 
 // Every file under dir with its content: a run that wrote nothing leaves it equal.

@@ -72,7 +72,7 @@ async function devsite(
     runCommand,
     stdin: opts.stdin ?? fakeStdin("y", true),
   });
-  io.ctx.env.DEVSITE_STATE_DIR = opts.stateDir ?? makeStateDir();
+  io.ctx.env.DEVSITE_STATE_DIR = opts.stateDir ?? process.env.DEVSITE_STATE_DIR;
   const status = await run(argv, io.ctx);
   const ran = calls.filter((c) => c.cmd !== "diff").map((c) => [c.cmd, ...c.args].join(" "));
   return { status, stdout: io.stdout.text(), stderr: io.stderr.text(), ran };
