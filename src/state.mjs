@@ -1,6 +1,6 @@
 // devsite's user-space state: per-host last-used dates (#48).
 //
-// Each dev-server start stamps `host → date` into last-used.json here, so a future `clean`/`doctor` can flag hosts unseen for N days. No reader ships yet — the data only accrues. User-space by design: the plugin writes only its own state, never `devsite.d`, which `init` owns.
+// Each dev-server start stamps `host → date` into last-used.json here; `doctor` lists the hosts unseen for 30+ days. User-space by design: the plugin writes only its own state, never `devsite.d`, which `init` owns.
 //
 // Plain .mjs for the same reason as vite.mjs (its only importer): Vite's config loader hands bare imports to the Node runtime, which won't execute TypeScript from node_modules.
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";

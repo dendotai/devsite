@@ -2,11 +2,16 @@
  * devsite doctor — prints how this Mac is set up, then checks the outcomes devsite needs, whoever set them up. It writes nothing and runs no sudo, so it is safe to run any time; it exits 1 on any red check, so a script can use it as a gate.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { caddyChecks, INIT, printSection, type Result, storageOf } from "../checks";
+import { join } from "node:path";
+import { caddyChecks, INIT, machineHosts, printSection, type Result, storageOf } from "../checks";
 import { type CliContext, processContext } from "../context";
-import { BOLD, GREEN, painter, RED } from "../io";
-import { caddyfileOf, discoverRoutes, type Route, refuseRoot, renderHostFile } from "./init";
+import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
+import { BOLD, GREEN, type Paint, painter, RED } from "../io";
+import { readSettings } from "../settings";
+import { resolveStateDir } from "../state.mjs";
+import { discoverRoutes, type Route, refuseRoot, renderHostFile } from "./init";
+
+const UNUSED_DAYS = 30;
 
 function projectChecks(routes: Route[], devsiteDir: string): Result[] {
   const results: Result[] = [];
@@ -42,21 +47,68 @@ function projectChecks(routes: Route[], devsiteDir: string): Result[] {
   return results;
 }
 
+// The Vite plugin stamps each host's last-used date on every dev-server start (#48). A host with no stamp is left out: its file may predate the stamps.
+function unusedHosts(hosts: string[], ctx: CliContext): string[] {
+  let stamps: Record<string, unknown> = {};
+  try {
+    stamps = JSON.parse(readFileSync(join(resolveStateDir(ctx.env), "last-used.json"), "utf8"));
+  } catch {
+    return [];
+  }
+  const cutoff = new Date(Date.now() - UNUSED_DAYS * 86_400_000).toISOString().slice(0, 10);
+  return hosts.flatMap((h) => {
+    const day = stamps[h];
+    return typeof day === "string" && day <= cutoff ? [`${h} (last used ${day})`] : [];
+  });
+}
+
+function printSetup(install: CaddyInstall, ctx: CliContext, paint: Paint) {
+  const line = (s: string) => ctx.stdout.write(`  ${s}\n`);
+  ctx.stdout.write(`\n${paint(BOLD, "Setup")}\n`);
+  if (install.kind === "unknown") {
+    line(`Caddy: an install devsite does not know (${install.why})`);
+    return;
+  }
+  line(`Caddy: ${describeKind(install)}`);
+  line(`Caddy config: ${install.config} (${install.configSource})`);
+  line(`devsite's Caddy config: ${install.devsiteDir}`);
+  line(`Caddy log: ${install.log ?? "unknown"}`);
+  line(
+    `Service manager: ${install.manager ?? (install.installed ? "none, Caddy does not run" : "none, Caddy is not installed")}`,
+  );
+  line(`Runs as: ${install.user === "root" ? "root" : "you"} (${install.userSource})`);
+  const storage = storageOf(install.config);
+  line(`Caddy storage: ${storage.root ?? "not read by devsite yet"} (${storage.source})`);
+  const unused = unusedHosts(machineHosts(install.devsiteDir), ctx);
+  line(
+    `Hosts unused for ${UNUSED_DAYS}+ days: ${unused.length === 0 ? "none" : unused.join(", ")}`,
+  );
+}
+
 export async function doctor(ctx: CliContext = processContext()): Promise<number> {
   if (refuseRoot("doctor", ctx)) return 1;
-  const caddyfile = caddyfileOf(ctx);
-  const devsiteDir = join(dirname(caddyfile), "devsite.d");
-  const storage = storageOf(caddyfile);
+  const read = readSettings(ctx);
+  if (!read.ok) {
+    ctx.stderr.write(`${read.error}\n`);
+    return 1;
+  }
+  const install = findCaddy(read.settings, ctx);
   const paint = painter(ctx.stdout, ctx);
 
   ctx.stdout.write(`${paint(BOLD, "devsite doctor")}\n`);
-  ctx.stdout.write(`\n${paint(BOLD, "Setup")}\n`);
-  ctx.stdout.write(`  Caddy: config ${caddyfile}\n`);
-  ctx.stdout.write(
-    `  Caddy storage: ${storage.root ?? "not read by devsite yet"} (${storage.source})\n`,
-  );
+  printSetup(install, ctx, paint);
 
-  const caddyResults = await caddyChecks(caddyfile, storage, ctx);
+  const caddyResults: Result[] =
+    install.kind === "unknown"
+      ? [
+          {
+            state: "red",
+            label: "devsite knows this Mac's Caddy install",
+            detail: install.why,
+            fix: unknownFix(ctx),
+          },
+        ]
+      : await caddyChecks(install, storageOf(install.config), ctx);
   printSection("Caddy", caddyResults, paint, ctx);
 
   const results = [...caddyResults];
@@ -82,7 +134,15 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   } else {
     const repoResults: Result[] = [
       { state: "green", label: namesLabel },
-      ...projectChecks(routes, devsiteDir),
+      ...(install.kind === "unknown"
+        ? [
+            {
+              state: "skipped",
+              label: "the host files of this repo",
+              detail: "they need Caddy's paths",
+            } as const,
+          ]
+        : projectChecks(routes, install.devsiteDir)),
     ];
     results.push(...repoResults);
     printSection(`This repo (${ctx.cwd})`, repoResults, paint, ctx);

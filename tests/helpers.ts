@@ -4,7 +4,7 @@ import "./setup";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import type { Plugin } from "vite";
 import { type CliContext, type CommandResult, processRunner } from "../src/context";
@@ -30,12 +30,15 @@ export function fakeStdin(input: string, isTTY: boolean) {
 
 export type IoOpts = {
   cwd?: string;
+  // A Caddyfile at <prefix>/etc/Caddyfile: the run sees <prefix> as the Homebrew prefix.
   caddyfile?: string;
+  // The dir that holds devsite/config.json.
+  configHome?: string;
   stdin?: CliContext["stdin"];
   runCommand?: CliContext["runCommand"];
 };
 
-// A CliContext over in-memory io. The env holds only DEVSITE_CADDYFILE, so an ambient DEVSITE_UID can never leak in.
+// A CliContext over in-memory io. The env holds only the scratch prefix and settings dir, so an ambient DEVSITE_UID can never leak in.
 export function makeIo(opts: IoOpts = {}) {
   const stdout = sink();
   const stderr = sink();
@@ -44,13 +47,28 @@ export function makeIo(opts: IoOpts = {}) {
     stderr,
     stdin: opts.stdin ?? fakeStdin("", false),
     cwd: opts.cwd ?? makeEmptyRepo(),
-    env: { DEVSITE_CADDYFILE: opts.caddyfile ?? scratchCaddyfile() },
-    runCommand: opts.runCommand ?? processRunner,
+    env: {
+      DEVSITE_CADDY_PREFIX: dirname(dirname(opts.caddyfile ?? scratchCaddyfile())),
+      XDG_CONFIG_HOME: opts.configHome ?? mkdtempSync(join(tmpdir(), "devsite-config-")),
+    },
+    runCommand: opts.runCommand ?? quietRunner().runCommand,
   };
   return { ctx, stdout, stderr };
 }
 
 export type CommandCall = { cmd: string; args: string[]; capture: boolean };
+
+// diff runs for real; every other command fails as if missing, so no test reads this Mac's processes, Homebrew, or Caddy.
+export function quietRunner(
+  answer: (call: CommandCall) => Partial<CommandResult> | null = () => null,
+) {
+  return scriptedRunner((c) => {
+    const scripted = answer(c);
+    if (scripted !== null) return scripted;
+    if (c.cmd === "diff") return processRunner(c.cmd, c.args, { capture: c.capture });
+    return { status: 1 };
+  });
+}
 
 // Runs nothing and records each call; a field the answer leaves out reads as exit 0 with empty stdout.
 export function scriptedRunner(answer: (call: CommandCall) => Partial<CommandResult>) {
@@ -91,9 +109,11 @@ export function makeStateDir() {
   return mkdtempSync(join(tmpdir(), "devsite-state-"));
 }
 
-// A Caddyfile path in its own fresh scratch dir. Starts nonexistent; suites that only dry-run share one, the round-trip suite writes and patches it.
+// A Caddyfile path at etc/Caddyfile of a fresh scratch Homebrew prefix. Starts nonexistent; suites that only dry-run share one, the round-trip suite writes and patches it.
 export function scratchCaddyfile() {
-  return join(mkdtempSync(join(tmpdir(), "devsite-none-")), "Caddyfile");
+  const etc = join(mkdtempSync(join(tmpdir(), "devsite-prefix-")), "etc");
+  mkdirSync(etc);
+  return join(etc, "Caddyfile");
 }
 
 // A throwaway Vite root; pkg (when given) becomes its package.json.

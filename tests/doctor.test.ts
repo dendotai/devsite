@@ -48,10 +48,17 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
   const m = setUpMachine();
   const before = snapshot(m.dir);
   const r = await doctor(m);
-  expect(r.stdout).toContain(`Caddy: config ${m.caddyfile}`);
+  expect(r.stdout).toContain(`Caddy: Homebrew at ${m.prefix}`);
+  expect(r.stdout).toContain(`Caddy config: ${m.caddyfile} (Homebrew's default)`);
+  expect(r.stdout).toContain(`devsite's Caddy config: ${join(m.dir, "devsite.d")}`);
+  expect(r.stdout).toContain(`Caddy log: ${join(m.prefix, "var", "log", "caddy.log")}`);
+  expect(r.stdout).toContain("Service manager: none, Caddy does not run");
+  expect(r.stdout).toContain("Runs as: you (devsite's default)");
   expect(r.stdout).toContain(
     `Caddy storage: ${join(m.dir, "storage")} (the Caddyfile's storage line)`,
   );
+  expect(r.stdout).toContain("Hosts unused for 30+ days: none");
+  expect(r.stdout).toContain(`✓ Caddy is installed — Homebrew at ${m.prefix}`);
   expect(r.stdout).toContain("✓ Caddy's admin API answers");
   expect(r.stdout).toContain(`✓ ${HOST}'s route starts with the LAN guard`);
   expect(r.stdout).toContain(`✓ no route before ${HOST}'s also matches it`);
@@ -66,9 +73,9 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
   expect(r.stdout).not.toContain("✗");
   expect(r.status).toBe(0);
   expect(snapshot(m.dir)).toEqual(before);
-  expect(r.calls.map((c) => c.cmd)).toEqual(["openssl", "security"]);
+  expect(r.calls.map((c) => c.cmd)).toEqual(["ps", "openssl", "security"]);
   // The certificate check connects to this Mac with the host as SNI, so it needs no DNS.
-  expect(r.calls[0]?.args).toEqual([
+  expect(r.calls[1]?.args).toEqual([
     "s_client",
     "-connect",
     "127.0.0.1:443",
@@ -76,7 +83,7 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
     HOST,
     "-showcerts",
   ]);
-  expect(r.calls[1]?.args).toEqual([
+  expect(r.calls[2]?.args).toEqual([
     "verify-cert",
     "-c",
     join(m.dir, "storage", "pki", "authorities", "local", "root.crt"),
@@ -181,7 +188,7 @@ test("no CA in Caddy's storage: red, and the trust check is skipped", async () =
     "✗ the served certificate chains to the CA in Caddy's storage — no CA at",
   );
   expect(r.stdout).toContain("– that CA is trusted in the keychain — no CA to check");
-  expect(r.calls).toEqual([]);
+  expect(r.calls.map((c) => c.cmd)).toEqual(["ps"]);
   expect(r.status).toBe(1);
 });
 
@@ -256,9 +263,7 @@ test("doctor as root refuses, with init's reason", async () => {
   const io = makeIo({ runCommand });
   io.ctx.env.DEVSITE_UID = "0";
   expect(await run(["doctor"], io.ctx)).toBe(1);
-  expect(io.stderr.text()).toContain(
-    "devsite doctor is running as root, but Caddy must run as you.",
-  );
+  expect(io.stderr.text()).toContain("devsite doctor is running as root.");
   expect(io.stderr.text()).toContain("bunx devsite doctor");
   expect(calls).toEqual([]);
 });
@@ -339,6 +344,6 @@ test("a storage kind other than file_system: the CA checks are skipped, not red"
   expect(r.stdout).toContain(
     "– the served certificate chains to the CA in Caddy's storage — devsite reads only file_system storage yet",
   );
-  expect(r.calls).toEqual([]);
+  expect(r.calls.map((c) => c.cmd)).toEqual(["ps"]);
   expect(r.status).toBe(0);
 });

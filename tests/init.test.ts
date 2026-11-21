@@ -20,7 +20,7 @@ function runner(a: Answers = {}) {
     if (c.cmd === "diff") return processRunner(c.cmd, c.args, { capture: c.capture });
     if (c.cmd === "openssl" && c.args[0] === "s_client") return { stdout: pki.served };
     if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
-    if (c.cmd === "brew") a.onBrew?.();
+    if (c.cmd === "brew" && c.args[0] === "services") a.onBrew?.();
     return {};
   });
 }
@@ -52,6 +52,7 @@ test("a set-up Mac: no prompt, no sudo, no reload, nothing written, exit 0", asy
   expect(r.stdout).toContain("Nothing to do: init changed nothing.");
   expect(r.stdout).not.toContain("Apply these changes?");
   expect(r.ran).toEqual([
+    "ps -axo pid=,ppid=,user=,args=",
     `openssl s_client -connect 127.0.0.1:443 -servername ${HOST} -showcerts`,
     `security verify-cert -c ${join(m.storage, "pki", "authorities", "local", "root.crt")} -p ssl`,
   ]);
@@ -85,18 +86,29 @@ test("an untrusted CA: one step, one sudo call, no write and no reload", async (
   expect(r.status).toBe(0);
 });
 
-test("a fresh Mac: write, start Caddy, then the one sudo call, in that order", async () => {
-  const m = setUpMachine({ caddyfile: "", root: null, hostFile: null });
-  // `brew services restart` brings up the admin API, as the real service does.
+test("a fresh Mac with no Caddy: install, write, start Caddy, then the one sudo call", async () => {
+  const m = setUpMachine({ caddyfile: "", root: null, hostFile: null, installed: false });
+  // `brew services start` brings up the admin API, as the real service does.
   const r = await init(m.caddyfile, { answers: { onBrew: () => void mockAdmin([placeholder()]) } });
-  expect(r.stdout).toContain("Step 1 of 3: write 2 file(s)");
-  expect(r.stdout).toContain("Step 2 of 3: start Caddy as you");
-  expect(r.stdout).toContain("Step 3 of 3: trust Caddy's local CA  [sudo]");
+  expect(r.stdout).toContain(`✗ Caddy is installed — Homebrew has no caddy formula at ${m.prefix}`);
+  expect(r.stdout).toContain("Step 1 of 4: install Caddy with Homebrew");
+  expect(r.stdout).toContain("Step 2 of 4: write 2 file(s)");
+  expect(r.stdout).toContain("Step 3 of 4: start Caddy as you");
+  expect(r.stdout).toContain("Step 4 of 4: trust Caddy's local CA  [sudo]");
   expect(r.acted).toEqual([
-    "brew services restart caddy",
+    "brew install caddy",
+    "brew services start caddy",
     "sudo -p \n  Password for sudo (%u):  sh -c caddy trust",
   ]);
   expect(existsSync(join(m.dir, "devsite.d", `${HOST}.caddy`))).toBe(true);
+  expect(r.status).toBe(0);
+});
+
+test("an installed Caddy that does not run: started with brew services start, not installed", async () => {
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const r = await init(m.caddyfile, { answers: { onBrew: () => void mockAdmin([placeholder()]) } });
+  expect(r.stdout).toContain("Step 1 of 1: start Caddy as you");
+  expect(r.acted).toEqual(["brew services start caddy"]);
   expect(r.status).toBe(0);
 });
 

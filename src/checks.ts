@@ -2,17 +2,18 @@
 import { X509Certificate } from "node:crypto";
 import { existsSync, globSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { CliContext } from "./context";
 import { startsWithGuard } from "./guard.mjs";
+import { describeKind, type KnownInstall } from "./install";
 import { BOLD, DIM, exec, GREEN, type Paint, RED } from "./io";
 import { HOSTNAME_RE } from "./names.mjs";
-import { caddy, findHostRoute } from "./vite.mjs";
+import { adminBase, caddy, findHostRoute } from "./vite.mjs";
 
 export const INIT = "bunx devsite init";
 
-// What init does about a check that is not green: start Caddy, load its config through the admin API, or trust its CA. A check with no repair is one init only reports.
-export type Repair = "start" | "load" | "trust";
+// What init does about a check that is not green: install Caddy, start it, load its config through the admin API, or trust its CA. A check with no repair is one init only reports.
+export type Repair = "install" | "start" | "load" | "trust";
 
 export type Result =
   | { state: "green"; label: string; detail?: string }
@@ -42,7 +43,7 @@ export function storageOf(caddyfile: string): Storage {
 }
 
 // devsite's hosts on this Mac: one `<host>.caddy` file each in devsite.d. A file whose name is not a `.internal` hostname is a snippet, not a host.
-function machineHosts(devsiteDir: string): string[] {
+export function machineHosts(devsiteDir: string): string[] {
   if (!existsSync(devsiteDir)) return [];
   return globSync("*.caddy", { cwd: devsiteDir })
     .map((f) => f.replace(/\.caddy$/, ""))
@@ -207,25 +208,51 @@ function certChecks(host: string | undefined, storage: Storage, ctx: CliContext)
   return results;
 }
 
+// Who starts a Caddy whose admin API is down: init, for a Homebrew Caddy that does not run; the user, for a Caddy that runs (its admin API sits elsewhere or is off) or one of a kind devsite does not know.
+function adminDown(install: KnownInstall, why: string): Result {
+  const label = "Caddy's admin API answers";
+  if (install.running !== null) {
+    return {
+      state: "red",
+      label,
+      detail: `${why} at ${adminBase()}, but Caddy runs (pid ${install.running.pid})`,
+      fix: `make Caddy's admin API listen on ${adminBase()}: the admin option in ${install.config}`,
+    };
+  }
+  if (install.kind !== "homebrew") {
+    return { state: "red", label, detail: why, fix: "start Caddy the way you run it" };
+  }
+  return { state: "red", label, detail: why, fix: INIT, repair: "start" };
+}
+
+function installCheck(install: KnownInstall): Result {
+  const label = "Caddy is installed";
+  if (install.installed) {
+    const detail = describeKind(install);
+    return { state: "green", label, detail };
+  }
+  return {
+    state: "red",
+    label,
+    detail: `Homebrew has no caddy formula at ${install.prefix}`,
+    fix: INIT,
+    repair: "install",
+  };
+}
+
 export async function caddyChecks(
-  caddyfile: string,
+  install: KnownInstall,
   storage: Storage,
   ctx: CliContext,
 ): Promise<Result[]> {
-  const hosts = machineHosts(join(dirname(caddyfile), "devsite.d"));
-  const results: Result[] = [];
+  const hosts = machineHosts(install.devsiteDir);
+  const results: Result[] = [installCheck(install)];
   const admin = await readServers();
   if (admin.ok) {
     results.push({ state: "green", label: "Caddy's admin API answers" });
     results.push(...routeChecks(hosts, admin.servers));
   } else {
-    results.push({
-      state: "red",
-      label: "Caddy's admin API answers",
-      detail: admin.why,
-      fix: INIT,
-      repair: "start",
-    });
+    results.push(adminDown(install, admin.why));
     if (hosts.length > 0) {
       results.push({
         state: "skipped",

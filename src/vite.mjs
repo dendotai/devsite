@@ -11,7 +11,7 @@ import { stampLastUsed } from "./state.mjs";
 
 // DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the plugin at a local mock; read per call, so the override needs no import-order care.
 const DEFAULT_ADMIN = "http://localhost:2019";
-function adminBase() {
+export function adminBase() {
   return process.env.DEVSITE_CADDY_ADMIN ?? DEFAULT_ADMIN;
 }
 

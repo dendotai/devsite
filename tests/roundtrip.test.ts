@@ -3,10 +3,10 @@
 // The suite observes init only through its public surface — an in-process run(["init", "--dry-run"]) and the multi-file unified diff it prints — applies that diff to a scratch tree with patch(1), and asserts the resulting tree's bytes. No init internals are imported, so the suite survives (and guards) an ownership rewrite. patch(1) is exact: the patched tree holds the same bytes a confirmed real run would write.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { cli, makeRepo } from "./helpers";
+import { cli, makeRepo, scratchCaddyfile } from "./helpers";
 
 // Run a dry-run and extract its unified diff; null = already up to date.
 async function dryRunDiff(cwd: string, caddyfile: string): Promise<string | null> {
@@ -52,7 +52,7 @@ function readTree(caddyfile: string): Record<string, string> {
 
 // A Caddyfile whose target exists from the start — patch needs a file to patch, and an empty file renders identically to a missing one.
 function makeCaddyfile(content = "") {
-  const p = join(mkdtempSync(join(tmpdir(), "devsite-tree-")), "Caddyfile");
+  const p = scratchCaddyfile();
   writeFileSync(p, content);
   return p;
 }

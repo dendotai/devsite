@@ -1,7 +1,14 @@
 // A Mac as init and doctor see it: a scratch Caddy dir, a test CA, and a local mock of Caddy's admin API.
 import { afterEach, beforeAll } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -109,14 +116,27 @@ export const placeholder = () =>
 
 // --- the scratch Caddy dir ---
 
-export type Machine = { caddyfile: string; dir: string; storage: string };
+export type Machine = { caddyfile: string; dir: string; storage: string; prefix: string };
 
-// A Caddy dir as init leaves it: a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web".
+// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web".
 export function setUpMachine(
-  opts: { root?: string | null; hostFile?: string | null; caddyfile?: string } = {},
+  opts: {
+    root?: string | null;
+    hostFile?: string | null;
+    caddyfile?: string;
+    installed?: boolean;
+  } = {},
 ): Machine {
   const caddyfile = scratchCaddyfile();
   const dir = dirname(caddyfile);
+  const prefix = dirname(dir);
+  if (opts.installed !== false) {
+    // As Homebrew lays it out: the formula under opt/, and bin/caddy a link to it.
+    mkdirSync(join(prefix, "opt", "caddy", "bin"), { recursive: true });
+    writeFileSync(join(prefix, "opt", "caddy", "bin", "caddy"), "");
+    mkdirSync(join(prefix, "bin"));
+    symlinkSync(join(prefix, "opt", "caddy", "bin", "caddy"), join(prefix, "bin", "caddy"));
+  }
   const storage = join(dir, "storage");
   const text =
     opts.caddyfile ??
@@ -134,7 +154,7 @@ export function setUpMachine(
     mkdirSync(join(dir, "devsite.d"));
     writeFileSync(join(dir, "devsite.d", `${HOST}.caddy`), hostFile);
   }
-  return { caddyfile, dir, storage };
+  return { caddyfile, dir, storage, prefix };
 }
 
 // Every file under dir with its content: a run that wrote nothing leaves it equal.

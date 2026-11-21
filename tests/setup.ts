@@ -8,3 +8,6 @@ process.env.DEVSITE_STATE_DIR = mkdtempSync(join(tmpdir(), "devsite-state-defaul
 
 // init and doctor read Caddy's admin API; a closed port keeps every suite off this Mac's real Caddy. Suites that serve a mock re-point the var per test.
 process.env.DEVSITE_CADDY_ADMIN = "http://127.0.0.1:9";
+
+// The settings file (~/.config/devsite/config.json) lives under XDG_CONFIG_HOME; a scratch dir keeps every suite, and every spawned CLI, off the developer's real settings.
+process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "devsite-config-default-"));
