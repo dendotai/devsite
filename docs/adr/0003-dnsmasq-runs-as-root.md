@@ -20,6 +20,7 @@ With Tailscale on, the Mac's main DNS server is Tailscale's `100.100.100.100`, w
 - devsite writes no `/etc/resolver/internal` and runs no dnsmasq for the Mac itself. It never changes a dnsmasq the user runs.
 - With no Tailscale on the Mac, devsite installs no dnsmasq.
 - devsite's LaunchDaemon runs a small root watcher that waits on macOS's network-change notifications (`State:/Network/Interface/[^/]+/IPv4`, `State:/Network/Global/IPv4`), finds the Tailscale IP by its `100.64.0.0/10` address, and starts dnsmasq when the IP appears and stops it when the IP goes, after the burst of events settles. In a test, the notifications arrived 99 to 124 ms after Tailscale went down or up.
+- The watcher exits non-zero only when `scutil` ends, and launchd starts it again only then (`KeepAlive` with `SuccessfulExit` false), so a lost notifier does not leave dnsmasq down until the next `init`.
 
 ## Consequences
 
