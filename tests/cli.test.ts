@@ -16,7 +16,7 @@ function devsite(args: string[], opts: { cwd?: string } = {}) {
   // An ambient DEVSITE_UID must never leak into a run.
   const env: Record<string, string | undefined> = {
     ...process.env,
-    DEVSITE_CADDY_PREFIX: join(SCRATCH, "..", ".."),
+    DEVSITE_BREW_PREFIX: join(SCRATCH, "..", ".."),
   };
   delete env.DEVSITE_UID;
   const r = spawnSync("bun", [CLI, ...args], { cwd: opts.cwd, encoding: "utf8", env });

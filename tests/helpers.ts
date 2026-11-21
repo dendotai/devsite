@@ -36,6 +36,7 @@ export type IoOpts = {
   configHome?: string;
   stdin?: CliContext["stdin"];
   runCommand?: CliContext["runCommand"];
+  env?: CliContext["env"];
 };
 
 // A CliContext over in-memory io. The env holds only the scratch prefix, the settings dir, and the state dir tests/setup.ts points at, so an ambient DEVSITE_UID can never leak in.
@@ -48,9 +49,10 @@ export function makeIo(opts: IoOpts = {}) {
     stdin: opts.stdin ?? fakeStdin("", false),
     cwd: opts.cwd ?? makeEmptyRepo(),
     env: {
-      DEVSITE_CADDY_PREFIX: dirname(dirname(opts.caddyfile ?? scratchCaddyfile())),
+      DEVSITE_BREW_PREFIX: dirname(dirname(opts.caddyfile ?? scratchCaddyfile())),
       XDG_CONFIG_HOME: opts.configHome ?? mkdtempSync(join(tmpdir(), "devsite-config-")),
       DEVSITE_STATE_DIR: process.env.DEVSITE_STATE_DIR,
+      ...opts.env,
     },
     runCommand: opts.runCommand ?? quietRunner().runCommand,
   };
@@ -58,6 +60,12 @@ export function makeIo(opts: IoOpts = {}) {
 }
 
 export type CommandCall = { cmd: string; args: string[]; capture: boolean };
+
+// What spawnSync gives for a command that is not on PATH.
+export const MISSING: Partial<CommandResult> = {
+  status: 1,
+  error: Object.assign(new Error("spawnSync ENOENT"), { code: "ENOENT" }),
+};
 
 // diff runs for real; every other command fails as if missing, so no test reads this Mac's processes, Homebrew, or Caddy.
 export function quietRunner(
@@ -67,7 +75,7 @@ export function quietRunner(
     const scripted = answer(c);
     if (scripted !== null) return scripted;
     if (c.cmd === "diff") return processRunner(c.cmd, c.args, { capture: c.capture });
-    return { status: 1 };
+    return MISSING;
   });
 }
 

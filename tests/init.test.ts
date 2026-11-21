@@ -4,7 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type CliContext, processRunner } from "../src/context";
 import { portFilePath } from "../src/state.mjs";
-import { type CommandCall, cli, fakeStdin, makeRepo, scriptedRunner } from "./helpers";
+import { type CommandCall, cli, fakeStdin, MISSING, makeRepo, scriptedRunner } from "./helpers";
 import { HOST, mockAdmin, pki, placeholder, setUpMachine, snapshot, useMachine } from "./machine";
 
 useMachine();
@@ -22,6 +22,7 @@ function runner(a: Answers = {}) {
     if (c.cmd === "diff") return processRunner(c.cmd, c.args, { capture: c.capture });
     if (c.cmd === "openssl" && c.args[0] === "s_client") return { stdout: pki.served };
     if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
+    if (/(?:^|\/)tailscale$/i.test(c.cmd)) return MISSING;
     if (c.cmd === "brew" && c.args[0] === "services") a.onBrew?.();
     if (c.cmd === "caddy" && c.args[0] === "adapt") {
       return a.adapted === null ? { status: 1 } : { stdout: JSON.stringify(a.adapted ?? {}) };
@@ -58,6 +59,8 @@ test("a set-up Mac: no prompt, no sudo, no reload, nothing written, exit 0", asy
   expect(r.stdout).not.toContain("Apply these changes?");
   expect(r.ran).toEqual([
     "ps -axo pid=,ppid=,user=,args=",
+    "tailscale ip -4",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4",
     `openssl s_client -connect 127.0.0.1:443 -servername ${HOST} -showcerts`,
     `security verify-cert -c ${join(m.storage, "pki", "authorities", "local", "root.crt")} -p ssl`,
   ]);

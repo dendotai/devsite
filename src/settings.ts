@@ -15,6 +15,10 @@ export type Settings = {
     // "manual": init writes devsite's files and the user reloads Caddy.
     reload?: "manual";
   };
+  dnsmasq: {
+    // "manual": init runs no dnsmasq of devsite's, and the user makes a DNS server answer .internal on the Tailscale IP.
+    run?: "manual";
+  };
 };
 
 export function settingsPath(ctx: CliContext): string {
@@ -22,48 +26,60 @@ export function settingsPath(ctx: CliContext): string {
   return join(base, "devsite", "config.json");
 }
 
-const RULES: Record<keyof Settings["caddy"], { valid: (v: unknown) => boolean; expected: string }> =
-  {
+type Rule = { valid: (v: unknown) => boolean; expected: string };
+
+const RULES: { [S in keyof Settings]: Record<keyof Settings[S], Rule> } = {
+  caddy: {
     config: {
       valid: (v) => typeof v === "string" && v.startsWith("/"),
       expected: "an absolute path",
     },
     user: { valid: (v) => v === "user" || v === "root", expected: '"user" or "root"' },
     reload: { valid: (v) => v === "manual", expected: '"manual"' },
-  };
+  },
+  dnsmasq: {
+    run: { valid: (v) => v === "manual", expected: '"manual"' },
+  },
+};
+
+const known = Object.entries(RULES)
+  .flatMap(([section, rules]) => Object.keys(rules).map((k) => `${section}.${k}`))
+  .join(", ");
 
 // A missing file is no settings. A file devsite cannot use stops the command: a setting the user wrote and devsite ignored would act on the shared thing the user took over.
 export function readSettings(
   ctx: CliContext,
 ): { ok: true; settings: Settings } | { ok: false; error: string } {
   const path = settingsPath(ctx);
-  if (!existsSync(path)) return { ok: true, settings: { caddy: {} } };
+  const settings: Settings = { caddy: {}, dnsmasq: {} };
+  if (!existsSync(path)) return { ok: true, settings };
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
     return { ok: false, error: `${path} is not valid JSON: ${(err as Error).message}` };
   }
-  const caddy = (raw as { caddy?: unknown } | null)?.caddy ?? {};
-  if (typeof caddy !== "object" || caddy === null || Array.isArray(caddy)) {
-    return { ok: false, error: `${path}: "caddy" must be an object` };
-  }
-  for (const [key, value] of Object.entries(caddy)) {
-    const rule = RULES[key as keyof Settings["caddy"]];
-    if (rule === undefined) {
-      return {
-        ok: false,
-        error: `${path}: unknown setting caddy.${key} (known: ${Object.keys(RULES)
-          .map((k) => `caddy.${k}`)
-          .join(", ")})`,
-      };
+  for (const [section, value] of Object.entries(raw ?? {})) {
+    const rules = RULES[section as keyof Settings] as Record<string, Rule> | undefined;
+    if (rules === undefined) {
+      return { ok: false, error: `${path}: unknown section "${section}" (known: ${known})` };
     }
-    if (!rule.valid(value)) {
-      return {
-        ok: false,
-        error: `${path}: caddy.${key} must be ${rule.expected}, not ${JSON.stringify(value)}`,
-      };
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return { ok: false, error: `${path}: "${section}" must be an object` };
     }
+    for (const [key, v] of Object.entries(value)) {
+      const rule = rules[key];
+      if (rule === undefined) {
+        return { ok: false, error: `${path}: unknown setting ${section}.${key} (known: ${known})` };
+      }
+      if (!rule.valid(v)) {
+        return {
+          ok: false,
+          error: `${path}: ${section}.${key} must be ${rule.expected}, not ${JSON.stringify(v)}`,
+        };
+      }
+    }
+    Object.assign(settings[section as keyof Settings], value);
   }
-  return { ok: true, settings: { caddy: caddy as Settings["caddy"] } };
+  return { ok: true, settings };
 }
