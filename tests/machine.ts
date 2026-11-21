@@ -13,7 +13,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { renderHostFile } from "../src/commands/init";
+import { renderGuardFile, renderHostFile } from "../src/commands/init";
 import { guardedRoute } from "../src/guard.mjs";
 import { scratchCaddyfile } from "./helpers";
 
@@ -95,12 +95,31 @@ export function useMachine() {
   });
 }
 
-// Serves `routes` as server srv0's route list, as Caddy's GET /config/apps/http/servers does.
-export async function mockAdmin(routes: unknown[]) {
+// Serves `routes` as server srv0's route list, as Caddy's GET /config/apps/http/servers does; `storage` as the live config's storage (Caddy answers null when there is none), and `caRoot` as the local CA's root, as GET /pki/ca/local does.
+export async function mockAdmin(
+  routes: unknown[],
+  opts: { caRoot?: string; storage?: object } = {},
+) {
+  const json = (res: import("node:http").ServerResponse, body: unknown) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(body));
+  };
   const server = createServer((req, res) => {
-    if (req.method === "GET" && req.url === "/config/apps/http/servers") {
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ srv0: { listen: [":443"], routes } }));
+    if (req.method !== "GET") {
+      res.statusCode = 404;
+      res.end();
+      return;
+    }
+    if (req.url === "/config/apps/http/servers") {
+      json(res, { srv0: { listen: [":443"], routes } });
+      return;
+    }
+    if (req.url === "/config/storage") {
+      json(res, opts.storage ?? null);
+      return;
+    }
+    if (req.url === "/pki/ca/local" && opts.caRoot !== undefined) {
+      json(res, { id: "local", root_certificate: opts.caRoot });
       return;
     }
     res.statusCode = 404;
@@ -118,7 +137,7 @@ export const placeholder = () =>
 
 export type Machine = { caddyfile: string; dir: string; storage: string; prefix: string };
 
-// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web".
+// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web" beside devsite's guard snippet.
 export function setUpMachine(
   opts: {
     root?: string | null;
@@ -153,6 +172,7 @@ export function setUpMachine(
   if (hostFile !== null) {
     mkdirSync(join(dir, "devsite.d"));
     writeFileSync(join(dir, "devsite.d", `${HOST}.caddy`), hostFile);
+    writeFileSync(join(dir, "devsite.d", "guard.caddy"), renderGuardFile());
   }
   return { caddyfile, dir, storage, prefix };
 }

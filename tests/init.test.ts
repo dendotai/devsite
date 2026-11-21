@@ -10,7 +10,7 @@ useMachine();
 
 // The Caddyfile init leaves when the user has a global options block of their own: init keeps it as it is.
 const SET_UP_CADDYFILE =
-  '{\n\temail dev@example.com\n\tstorage file_system {\n\t\troot "STORAGE"\n\t}\n\tlocal_certs\n}\n\nimport devsite.d/*.caddy # devsite\n';
+  '{\n\temail dev@example.com\n\tstorage file_system {\n\t\troot "STORAGE"\n\t}\n}\n\nimport devsite.d/*.caddy # devsite\n';
 
 type Answers = { trusted?: boolean; onBrew?: () => void };
 
@@ -92,7 +92,7 @@ test("a fresh Mac with no Caddy: install, write, start Caddy, then the one sudo 
   const r = await init(m.caddyfile, { answers: { onBrew: () => void mockAdmin([placeholder()]) } });
   expect(r.stdout).toContain(`✗ Caddy is installed — Homebrew has no caddy formula at ${m.prefix}`);
   expect(r.stdout).toContain("Step 1 of 4: install Caddy with Homebrew");
-  expect(r.stdout).toContain("Step 2 of 4: write 2 file(s)");
+  expect(r.stdout).toContain("Step 2 of 4: write 3 file(s)");
   expect(r.stdout).toContain("Step 3 of 4: start Caddy as you");
   expect(r.stdout).toContain("Step 4 of 4: trust Caddy's local CA  [sudo]");
   expect(r.acted).toEqual([
@@ -117,7 +117,7 @@ test("init --dry-run prints the numbered plan and the diff, and changes nothing"
   const before = snapshot(m.dir);
   const r = await init(m.caddyfile, { argv: ["init", "--dry-run"] });
   expect(r.stdout).toContain("Plan:");
-  expect(r.stdout).toContain("Step 1 of 3: write 2 file(s)");
+  expect(r.stdout).toContain("Step 1 of 3: write 3 file(s)");
   expect(r.stdout).toContain("Step 3 of 3: trust Caddy's local CA  [sudo]");
   expect(r.stdout).toContain(`+++ devsite.d/${HOST}.caddy`);
   expect(r.stdout).toContain("+\t\t\tlifetime 120h");

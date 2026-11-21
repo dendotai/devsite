@@ -84,7 +84,7 @@ test("init --dry-run renders the devsite.d tree and touches nothing", async () =
   expect(r.stdout).toContain("--dry-run: would change");
   expect(r.stdout).toContain("import devsite.d/*.caddy # devsite");
   expect(r.stdout).toContain("+++ devsite.d/web.test.internal.caddy");
-  expect(r.stdout).toContain("web.test.internal {");
+  expect(r.stdout).toContain("web.test.internal, web.test.localhost {");
 });
 
 test("a single-package repo: root package.json#devSite is discovered", async () => {
@@ -95,7 +95,7 @@ test("a single-package repo: root package.json#devSite is discovered", async () 
   );
   const r = await dryRun({ cwd: repo });
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain("solo.test.internal {");
+  expect(r.stdout).toContain("solo.test.internal, solo.test.localhost {");
 });
 
 test("root and workspace devSite hosts are both discovered", async () => {
@@ -106,8 +106,8 @@ test("root and workspace devSite hosts are both discovered", async () => {
   );
   const r = await dryRun({ cwd: repo });
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain("root.test.internal {");
-  expect(r.stdout).toContain("web.test.internal {");
+  expect(r.stdout).toContain("root.test.internal, root.test.localhost {");
+  expect(r.stdout).toContain("web.test.internal, web.test.localhost {");
 });
 
 test("a host that is not a plain hostname is rejected at discovery", async () => {
@@ -185,13 +185,14 @@ test("init names the default_bind line it deletes", async () => {
 // (roundtrip.test.ts), which applies the printed diff with patch(1) and
 // asserts a second dry-run reports "already up to date".
 
-test("a user's global options block gets devsite's directives added, with a warning", async () => {
+test("a user's global options block with no storage gets devsite's pin, and never local_certs", async () => {
   const caddyfile = makeCaddyfile('{\n\temail den@example.com\n}\n\n:8080 {\n\trespond "ok"\n}\n');
   const r = await dryRun({ cwd: makeRepo(), caddyfile });
   expect(r.status).toBe(0);
-  expect(r.stderr).toContain("global options block");
-  // The directives land inside the user's block; the block itself survives.
-  expect(r.stdout).toContain("+\tlocal_certs");
+  expect(r.stderr).toBe("");
+  // The pin lands inside the user's block; the block itself survives.
+  expect(r.stdout).toContain("+\tstorage file_system {");
+  expect(r.stdout).not.toContain("local_certs");
   expect(r.stdout).not.toContain("-\temail den@example.com");
   expect(r.stdout).not.toContain("-:8080");
 });

@@ -3,12 +3,13 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { caddyChecks, INIT, machineHosts, printSection, type Result, storageOf } from "../checks";
+import { caddyChecks, INIT, machineHosts, printSection, type Result } from "../checks";
 import { type CliContext, processContext } from "../context";
 import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
 import { BOLD, GREEN, type Paint, painter, RED } from "../io";
 import { readSettings } from "../settings";
 import { resolveStateDir } from "../state.mjs";
+import { findStorage, type Storage } from "../storage";
 import { discoverRoutes, type Route, refuseRoot, renderHostFile } from "./init";
 
 const UNUSED_DAYS = 30;
@@ -62,7 +63,7 @@ function unusedHosts(hosts: string[], ctx: CliContext): string[] {
   });
 }
 
-function printSetup(install: CaddyInstall, ctx: CliContext, paint: Paint) {
+function printSetup(install: CaddyInstall, storage: Storage | null, ctx: CliContext, paint: Paint) {
   const line = (s: string) => ctx.stdout.write(`  ${s}\n`);
   ctx.stdout.write(`\n${paint(BOLD, "Setup")}\n`);
   if (install.kind === "unknown") {
@@ -70,15 +71,19 @@ function printSetup(install: CaddyInstall, ctx: CliContext, paint: Paint) {
     return;
   }
   line(`Caddy: ${describeKind(install)}`);
-  line(`Caddy config: ${install.config} (${install.configSource})`);
+  line(
+    install.config === null
+      ? `Caddy config: none (${install.configSource})`
+      : `Caddy config: ${install.config} (${install.configSource})`,
+  );
   line(`devsite's Caddy config: ${install.devsiteDir}`);
   line(`Caddy log: ${install.log ?? "unknown"}`);
   line(
     `Service manager: ${install.manager ?? (install.installed ? "none, Caddy does not run" : "none, Caddy is not installed")}`,
   );
   line(`Runs as: ${install.user === "root" ? "root" : "you"} (${install.userSource})`);
-  const storage = storageOf(install.config);
-  line(`Caddy storage: ${storage.root ?? "not read by devsite yet"} (${storage.source})`);
+  if (storage !== null)
+    line(`Caddy storage: ${storage.root ?? "not read by devsite"} (${storage.source})`);
   const unused = unusedHosts(machineHosts(install.devsiteDir), ctx);
   line(
     `Hosts unused for ${UNUSED_DAYS}+ days: ${unused.length === 0 ? "none" : unused.join(", ")}`,
@@ -96,7 +101,8 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   const paint = painter(ctx.stdout, ctx);
 
   ctx.stdout.write(`${paint(BOLD, "devsite doctor")}\n`);
-  printSetup(install, ctx, paint);
+  const storage = install.kind === "unknown" ? null : await findStorage(install, ctx);
+  printSetup(install, storage, ctx, paint);
 
   const caddyResults: Result[] =
     install.kind === "unknown"
@@ -108,7 +114,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
             fix: unknownFix(ctx),
           },
         ]
-      : await caddyChecks(install, storageOf(install.config), ctx);
+      : await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx);
   printSection("Caddy", caddyResults, paint, ctx);
 
   const results = [...caddyResults];

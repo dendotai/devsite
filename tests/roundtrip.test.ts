@@ -4,7 +4,6 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { cli, makeRepo, scratchCaddyfile } from "./helpers";
 
@@ -63,7 +62,7 @@ const IMPORT_LINE = "import devsite.d/*.caddy # devsite";
 function devsiteBlock(host: string, project: string) {
   return [
     `# ${project}`,
-    `${host} {`,
+    `${host}, ${host.replace(/\.internal$/, ".localhost")} {`,
     "\ttls {",
     "\t\tissuer internal {",
     "\t\t\tlifetime 120h",
@@ -77,8 +76,7 @@ function devsiteBlock(host: string, project: string) {
 }
 
 // The global options block devsite creates in the Caddyfile when the user has none — hand-written to track planCaddyfile in src/commands/init.ts, for the same black-box reason.
-function devsiteGlobalBlock() {
-  const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
+function devsiteGlobalBlock(storageRoot: string) {
   return [
     "{",
     "\t# Pin PKI storage so Caddy's local CA is the SAME no matter how Caddy runs",
@@ -87,7 +85,6 @@ function devsiteGlobalBlock() {
     "\tstorage file_system {",
     `\t\troot "${storageRoot}"`,
     "\t}",
-    "\tlocal_certs",
     "}",
   ].join("\n");
 }
@@ -100,10 +97,24 @@ test("fresh init: the Caddyfile gets the global block and the import line; hosts
   expect(first.changed).toBe(true);
   const tree = readTree(caddyfile);
   // No user global block, so devsite creates one — in the Caddyfile, where global options normally live; the import line follows it.
-  expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
+  // Caddy is stopped, so the pin is the data dir `brew services` starts it with.
+  const brewData = join(dirname(dirname(caddyfile)), "var", "lib", "caddy");
+  expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock(brewData)}\n\n${IMPORT_LINE}\n`);
   expect(tree["devsite.d/web.test.internal.caddy"]).toBe(
     `${devsiteBlock("web.test.internal", "web")}\n`,
   );
+  expect(tree["devsite.d/guard.caddy"]).toBe(
+    [
+      "# devsite: `import devsite-guard` in a site block keeps the LAN out of it",
+      "(devsite-guard) {",
+      "\t@devsite_outside not remote_ip 127.0.0.1 ::1 100.64.0.0/10",
+      "\tabort @devsite_outside",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  // Each host file carries its own `issuer internal`, so nothing gives the user's other sites internal certificates.
+  expect(Object.values(tree).join("\n")).not.toContain("local_certs");
 
   const second = await reInit(repo, caddyfile);
   expect(second.changed).toBe(false);
@@ -175,7 +186,7 @@ test("a user-owned global options block is kept in place and gets devsite's dire
   // The user's block stays theirs (comment above it included), augmented in place.
   expect(tree.Caddyfile).toContain("# my note");
   expect(tree.Caddyfile).toContain("\temail den@example.com");
-  expect(tree.Caddyfile).toContain("\tlocal_certs");
+  expect(tree.Caddyfile).not.toContain("local_certs");
   expect(tree.Caddyfile).toContain("storage file_system");
   // The import line sits directly after the user's block — never before it.
   expect(tree.Caddyfile?.indexOf(IMPORT_LINE)).toBeGreaterThan(
@@ -207,7 +218,6 @@ test("a global block left with only devsite's directives once default_bind goes 
       "\tstorage file_system {",
       '\t\troot "/somewhere"',
       "\t}",
-      "\tlocal_certs",
       "\t# keep off the Wi-Fi",
       "\tdefault_bind 127.0.0.1",
       "}",
@@ -215,7 +225,10 @@ test("a global block left with only devsite's directives once default_bind goes 
     ].join("\n"),
   );
   expect((await reInit(makeRepo(), caddyfile)).changed).toBe(true);
-  expect(readTree(caddyfile).Caddyfile).toBe(`${devsiteGlobalBlock()}\n\n${IMPORT_LINE}\n`);
+  // The pinned storage is the one Caddy already uses, so it survives the re-render.
+  expect(readTree(caddyfile).Caddyfile).toBe(
+    `${devsiteGlobalBlock("/somewhere")}\n\n${IMPORT_LINE}\n`,
+  );
 });
 
 test("rename cleanup: the stale host file of a still-present project is deleted, others are not", async () => {
