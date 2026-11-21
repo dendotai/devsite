@@ -64,7 +64,10 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "test": "bun test",
-    "prepare": "git config core.hooksPath .githooks"
+    "prepare": "[ -n \"$CI\" ] || ! git rev-parse --git-dir >/dev/null 2>&1 || git config core.hooksPath .githooks",
+    "check:commit-msg": "commitlint --edit",
+    "check:pre-commit": "bun run lint",
+    "check:pre-push": "bun run typecheck && bun run test"
   },
   "peerDependencies": {
     "vite": "^8.0.0"
