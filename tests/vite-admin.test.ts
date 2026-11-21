@@ -1,9 +1,12 @@
 // The Vite plugin's route registration against a real local mock of the Caddy admin API (#28). The mock mirrors Caddy's contract: any request without an Origin header is 403'd — so a refactor that silently loses the pinned header fails every test here, not one assertion. Tests point the plugin at the mock via DEVSITE_CADDY_ADMIN (the env seam this suite exists to cover).
 import { expect, spyOn, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
+import { renderGuardFile, renderHostFile } from "../src/commands/init";
+import { portFilePath } from "../src/state.mjs";
 import { caddy, devsite } from "../src/vite.mjs";
 import {
   fakeViteServer,
@@ -113,7 +116,7 @@ async function registerViaPlugin(port: number) {
   fake.httpServer.emit("listening");
 
   await plugin.api.settled;
-  return { infos: fake.infos, warns: fake.warns };
+  return { infos: fake.infos, warns: fake.warns, httpServer: fake.httpServer };
 }
 
 // tests/setup.ts defaults DEVSITE_STATE_DIR to a shared scratch dir; suites that assert on the stamp re-point it here per test.
@@ -241,7 +244,7 @@ test("the swapped-in route aborts a request from outside this Mac and the tailne
   }
 });
 
-test("a host `devsite init` never registered: a warning naming the host and the command, and no route write", async () => {
+test("a host `devsite init` never registered: a warning naming the host and `devsite doctor`, and no route write", async () => {
   const mock = await startMockCaddy({
     servers: {
       srv0: { listen: [":443"], routes: [{ match: [{ host: ["someone.else.internal"] }] }] },
@@ -251,31 +254,33 @@ test("a host `devsite init` never registered: a warning naming the host and the 
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50124));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain(`no Caddy route for ${HOST}`);
-    expect(warns.join("\n")).toContain("run `bunx devsite init`");
+    expect(warns.join("\n")).toContain("run `bunx devsite doctor`");
     expect(mock.requests.filter((r) => r.method !== "GET")).toEqual([]);
   } finally {
     await mock.close();
   }
 });
 
-test("the admin API does not answer: a warning that asks whether Caddy runs", async () => {
+test("the admin API does not answer: a warning that says so and names `devsite doctor`", async () => {
   const mock = await startMockCaddy();
   await mock.close();
   const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50128));
   expect(infos).toEqual([]);
   expect(warns.join("\n")).toContain("could not register");
-  expect(warns.join("\n")).toContain("is the Caddy service running");
+  expect(warns.join("\n")).toContain(
+    "the Caddy admin API does not answer — run `bunx devsite doctor`",
+  );
 });
 
-test("config read answers an error status: a warning with the status and `devsite init`", async () => {
+test("config read answers an error status: a warning with the status and `devsite doctor`", async () => {
   const mock = await startMockCaddy({ failConfig: true });
   try {
     const { infos, warns } = await withAdmin(mock.url, () => registerViaPlugin(50125));
     expect(infos).toEqual([]);
     expect(warns.join("\n")).toContain("could not register");
     expect(warns.join("\n")).toContain("HTTP 500");
-    expect(warns.join("\n")).toContain("bunx devsite init");
-    expect(warns.join("\n")).not.toContain("is the Caddy service running");
+    expect(warns.join("\n")).toContain("run `bunx devsite doctor`");
+    expect(warns.join("\n")).not.toContain("does not answer");
   } finally {
     await mock.close();
   }
@@ -351,4 +356,90 @@ test("without the env override, the admin endpoint is the local default", async 
     }
     expect(seen).toEqual(["http://localhost:2019/config/apps/http/servers"]);
   });
+});
+
+// The route init leaves for the host, which the plugin PATCHes on start.
+const HOST_ROUTE = { srv0: { listen: [":443"], routes: [{ match: [{ host: [HOST] }] }] } };
+
+test("a start writes the live port to the port file; a stop writes the placeholder back and keeps the file", async () => {
+  const mock = await startMockCaddy({ servers: HOST_ROUTE });
+  const stateDir = makeStateDir();
+  try {
+    const { httpServer } = await withAdmin(mock.url, () =>
+      withStateDir(stateDir, () => registerViaPlugin(50310)),
+    );
+    const portFile = portFilePath(HOST, stateDir);
+    expect(readFileSync(portFile, "utf8")).toBe("reverse_proxy 127.0.0.1:50310\n");
+    await withStateDir(stateDir, async () => httpServer.emit("close"));
+    expect(existsSync(portFile)).toBe(true);
+    expect(readFileSync(portFile, "utf8")).toBe("error 503\n");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("Ctrl-C writes the placeholder back, and a stop leaves no signal listener behind", async () => {
+  const mock = await startMockCaddy({ servers: HOST_ROUTE });
+  const stateDir = makeStateDir();
+  // The plugin exits after Ctrl-C; the stub keeps the test run alive and records the code.
+  const exit = spyOn(process, "exit").mockImplementation((() => {}) as never);
+  // The earlier tests' starts never close, so their listeners stay; only this start's are compared.
+  const before = { SIGINT: process.listeners("SIGINT"), SIGHUP: process.listeners("SIGHUP") };
+  const added = (signal: "SIGINT" | "SIGHUP") =>
+    process.listeners(signal).filter((l) => !before[signal].includes(l));
+  try {
+    const { httpServer } = await withAdmin(mock.url, () =>
+      withStateDir(stateDir, () => registerViaPlugin(50311)),
+    );
+    expect(added("SIGINT")).toHaveLength(1);
+    expect(added("SIGHUP")).toHaveLength(1);
+    await withStateDir(stateDir, async () => process.emit("SIGINT", "SIGINT"));
+    expect(readFileSync(portFilePath(HOST, stateDir), "utf8")).toBe("error 503\n");
+    expect(exit).toHaveBeenCalledWith(130);
+    await withStateDir(stateDir, async () => httpServer.emit("close"));
+    expect(added("SIGINT")).toEqual([]);
+    expect(added("SIGHUP")).toEqual([]);
+  } finally {
+    exit.mockRestore();
+    await mock.close();
+  }
+});
+
+// `caddy reload` adapts the Caddyfile and loads the result, so the route a reload gives the host is the route `caddy adapt` makes of devsite's files.
+function reloadedUpstream(stateDir: string): unknown {
+  const caddyfile = join(makeStateDir(), "Caddyfile");
+  writeFileSync(
+    caddyfile,
+    renderGuardFile() +
+      renderHostFile({ host: HOST, project: "web" }, portFilePath(HOST, stateDir)),
+  );
+  const r = spawnSync("caddy", ["adapt", "--config", caddyfile, "--adapter", "caddyfile"], {
+    encoding: "utf8",
+  });
+  if (r.status !== 0) throw new Error(`caddy adapt failed: ${r.stderr}`);
+  const config = JSON.parse(r.stdout);
+  const route = Object.values(config.apps.http.servers as Record<string, { routes: object[] }>)
+    .flatMap((srv) => srv.routes)
+    .find((rt) => JSON.stringify(rt).includes(HOST));
+  // The handler after the LAN guard in the host's subroute.
+  return (route as { handle: { routes: { handle: unknown[] }[] }[] }).handle[0]?.routes[1]
+    ?.handle[0];
+}
+
+test("a Caddy reload after a start keeps the live port; after a stop it gives the placeholder", async () => {
+  const mock = await startMockCaddy({ servers: HOST_ROUTE });
+  const stateDir = makeStateDir();
+  try {
+    const { httpServer } = await withAdmin(mock.url, () =>
+      withStateDir(stateDir, () => registerViaPlugin(50312)),
+    );
+    expect(reloadedUpstream(stateDir)).toEqual({
+      handler: "reverse_proxy",
+      upstreams: [{ dial: "127.0.0.1:50312" }],
+    });
+    await withStateDir(stateDir, async () => httpServer.emit("close"));
+    expect(reloadedUpstream(stateDir)).toEqual({ handler: "error", status_code: 503 });
+  } finally {
+    await mock.close();
+  }
 });

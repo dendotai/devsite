@@ -4,10 +4,11 @@
 //
 // Plain .mjs (not .ts): Vite's config loader externalizes bare imports and hands them to the Node runtime, which won't execute TypeScript from node_modules. The published type surface lives in vite.types.d.mts — named so it does NOT shadow this module in the typecheck program (tsc skips a .js root file when an adjacent same-named .d.ts exists, and checkJs would then never look at this file); the exports map wires the two together.
 import { readFileSync } from "node:fs";
+import { constants } from "node:os";
 import { join } from "node:path";
 import { guardedRoute } from "./guard.mjs";
 import { devSiteName, hostsOf } from "./names.mjs";
-import { stampLastUsed } from "./state.mjs";
+import { liveProxy, PORT_PLACEHOLDER, stampLastUsed, writePortFile } from "./state.mjs";
 
 // DEVSITE_CADDY_ADMIN overrides the admin endpoint so tests can point the plugin at a local mock; read per call, so the override needs no import-order care.
 const DEFAULT_ADMIN = "http://localhost:2019";
@@ -45,15 +46,12 @@ function devsiteRoute(hosts, port) {
  */
 async function registerRoute(hosts, port) {
   const res = await caddy("/config/apps/http/servers").catch((cause) => {
-    throw new Error(
-      "the Caddy admin API does not answer — is the Caddy service running? `bunx devsite init` from the repo root sets it up",
-      { cause },
-    );
+    throw new Error("the Caddy admin API does not answer — run `bunx devsite doctor`", { cause });
   });
   // A Caddy that runs with no HTTP app (init never ran on this machine) answers 400 here.
   if (!res.ok)
     throw new Error(
-      `Caddy admin API: HTTP ${res.status} for its HTTP servers — \`bunx devsite init\` from the repo root sets them up`,
+      `Caddy admin API: HTTP ${res.status} for its HTTP servers — run \`bunx devsite doctor\``,
     );
   // The slice of Caddy's config shape this function walks; everything else in the response is passed through untyped.
   const servers = /** @type {Record<string, { routes?: { match?: { host?: string[] }[] }[] }>} */ (
@@ -62,9 +60,7 @@ async function registerRoute(hosts, port) {
 
   const found = findHostRoute(servers, hosts[0] ?? "");
   if (found === null) {
-    throw new Error(
-      `no Caddy route for ${hosts[0]} — run \`bunx devsite init\` from the repo root`,
-    );
+    throw new Error(`no Caddy route for ${hosts[0]} — run \`bunx devsite doctor\``);
   }
   const patch = await caddy(`/config/apps/http/servers/${found.server}/routes/${found.index}`, {
     method: "PATCH",
@@ -89,6 +85,36 @@ export function findHostRoute(servers, host) {
     if (index !== -1) return { server, index };
   }
   return null;
+}
+
+/**
+ * Ctrl-C ends the dev server with SIGINT and no `close` event, so the plugin writes the placeholder on that signal too, then exits with Vite's own code for a signal exit. A listener on a signal takes over Node's default exit, and the `signal-exit` listener Vite loads leaves the exit to any other listener, so with no exit here Ctrl-C would hang.
+ *
+ * @param {string} host
+ * @param {(msg: string) => void} warn
+ */
+function placeholderOnStop(host, warn) {
+  const stop = () => {
+    try {
+      writePortFile(host, PORT_PLACEHOLDER);
+    } catch (err) {
+      warn(
+        `devsite: could not write the port file of ${host} (${err instanceof Error ? err.message : err})`,
+      );
+    }
+  };
+  /** @param {NodeJS.Signals} signal */
+  const onSignal = (signal) => {
+    stop();
+    process.exit(128 + constants.signals[signal]);
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGHUP", onSignal);
+  return () => {
+    process.off("SIGINT", onSignal);
+    process.off("SIGHUP", onSignal);
+    stop();
+  };
 }
 
 /**
@@ -151,6 +177,18 @@ export function devsite() {
           server.config.logger.warn(
             `devsite: could not record last-used date for ${h} (${err instanceof Error ? err.message : err})`,
           ),
+        );
+        // The live port goes to the port file before the route swap, so a `caddy reload` after the swap keeps the route.
+        try {
+          writePortFile(h, liveProxy(p));
+        } catch (err) {
+          server.config.logger.warn(
+            `devsite: could not write the port file of ${h} (${err instanceof Error ? err.message : err}). A Caddy reload drops the route until the next start.`,
+          );
+        }
+        server.httpServer?.once(
+          "close",
+          placeholderOnStop(h, (m) => server.config.logger.warn(m)),
         );
         const registered = registerRoute([h, local], p).then(
           () =>

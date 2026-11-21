@@ -1,11 +1,12 @@
-// devsite's user-space state: per-host last-used dates (#48).
+// devsite's user-space state: per-host last-used dates (#48) and per-host port files.
 //
 // Each dev-server start stamps `host → date` into last-used.json here; `doctor` lists the hosts unseen for 30+ days. User-space by design: the plugin writes only its own state, never `devsite.d`, which `init` owns.
 //
-// Plain .mjs for the same reason as vite.mjs (its only importer): Vite's config loader hands bare imports to the Node runtime, which won't execute TypeScript from node_modules.
+// Plain .mjs for the same reason as vite.mjs, which imports it: Vite's config loader hands bare imports to the Node runtime, which won't execute TypeScript from node_modules.
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /**
  * @param {{ DEVSITE_STATE_DIR?: string; XDG_STATE_HOME?: string; [key: string]: string | undefined }} [env]
@@ -50,4 +51,36 @@ export async function stampLastUsed(host, dir = resolveStateDir()) {
   const tmp = join(dir, `.last-used.${process.pid}.${stampSeq++}.tmp`);
   await writeFile(tmp, `${JSON.stringify(stamps, null, 2)}\n`);
   await rename(tmp, file);
+}
+
+// The placeholder a host's port file holds while no dev server runs. Caddy raises a 503 that the host file's handle_errors answers; a server that died answers 502 instead (its route still dials the dead port), so the offline page can tell the two apart (#14).
+export const PORT_PLACEHOLDER = "error 503";
+
+/** @param {number} port */
+export const liveProxy = (port) => `reverse_proxy 127.0.0.1:${port}`;
+
+/**
+ * The file the host's Caddyfile site block imports for its handler: the live proxy while a dev server runs, the placeholder otherwise. A missing file makes every `caddy reload` fail, so nothing deletes it.
+ *
+ * @param {string} host
+ * @param {string} [dir]
+ */
+export function portFilePath(host, dir = resolveStateDir()) {
+  return join(dir, "ports", `${host}.caddy`);
+}
+
+/**
+ * Sync, so a dev server that exits right after its `close` event still leaves the placeholder behind.
+ *
+ * @param {string} host
+ * @param {string} directive
+ * @param {string} [dir]
+ */
+export function writePortFile(host, directive, dir = resolveStateDir()) {
+  const file = portFilePath(host, dir);
+  mkdirSync(dirname(file), { recursive: true });
+  // Write-then-rename: a `caddy reload` never reads a truncated file.
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${directive}\n`);
+  renameSync(tmp, file);
 }

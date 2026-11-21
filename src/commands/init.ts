@@ -2,7 +2,7 @@
  * devsite init — machine bootstrap for *.internal dev URLs over Tailscale.
  *
  * Design notes:
- *   - No ports. `package.json#devSite` declares only a host; each host gets a `respond 503` placeholder, and the devsite Vite plugin (vite.mjs) swaps in a live `reverse_proxy` to a free ephemeral port at `bun dev` time via Caddy's admin API. Any number of projects can run at once.
+ *   - No ports. `package.json#devSite` declares only a host; each host's site block imports a port file in devsite's state dir, which holds a placeholder until the devsite Vite plugin (vite.mjs) writes a live `reverse_proxy` to a free ephemeral port at `bun dev` time and swaps the same route in through Caddy's admin API. Any number of projects can run at once.
  *   - devsite owns the `devsite.d/` directory next to the Caddyfile — one `<host>.caddy` file per host, first line `# <project>`. The user's Caddyfile is edited exactly once, ever: a single `import devsite.d/*.caddy # devsite` line (the glob covers future files). Registering or renaming hosts only writes `devsite.d/` files; nothing in the user's file is ever re-parsed or regenerated. devsite keeps the storage Caddy already uses: with no `storage` line it pins that storage in the Caddyfile's global options block, creating the block (once) when the user has none, or adding the pin into the user's block (once). A block the user has touched is never rewritten — later runs only presence-check; a block that is purely devsite's own rendering re-renders fresh.
  *   - State-driven: init runs doctor's Caddy checks first and plans a fix only for each red one, so on a set-up Mac it asks nothing, runs no sudo, and leaves Caddy's live routes alone. Every plan shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
  *   - Every step that needs root runs in one sudo call, so one password prompt covers the run whatever sudo's `timestamp_timeout` is.
@@ -33,7 +33,7 @@ import { findCaddy, type KnownInstall, unknownFix } from "../install";
 import { BOLD, CYAN, DIM, exec, GREEN, type Paint, painter, RED, YELLOW } from "../io";
 import { devSiteName, hostsOf } from "../names.mjs";
 import { readSettings, type Settings, settingsPath } from "../settings";
-import { resolveStateDir } from "../state.mjs";
+import { PORT_PLACEHOLDER, portFilePath, resolveStateDir, writePortFile } from "../state.mjs";
 import { caRootFile, findStorage, rootCrtIn } from "../storage";
 import { adminBase, caddy } from "../vite.mjs";
 
@@ -142,9 +142,14 @@ export function renderGuardFile(): string {
   ].join("\n");
 }
 
-// Placeholder only — the devsite Vite plugin swaps in a reverse_proxy to the dev server's ephemeral port at runtime via the admin API. The first line (`# <project>`) is the file's ownership record, read by rename cleanup. Each host file carries its own `issuer internal`, so no global local_certs moves the user's other sites off their real certificates.
-export function renderHostFile(r: Route): string {
+// The handler comes from the host's port file, which the devsite Vite plugin keeps on the live port, so a `caddy reload` keeps a running dev server's route. portFile null inlines the placeholder, for the JSON printed to a Caddy with no Caddyfile. handle_errors answers the placeholder's 503 and a dead dev server's 502. The first line (`# <project>`) is the file's ownership record, read by rename cleanup. Each host file carries its own `issuer internal`, so no global local_certs moves the user's other sites off their real certificates.
+export function renderHostFile(r: Route, portFile: string | null): string {
   const localhost = r.host.replace(/\.internal$/, ".localhost");
+  if (portFile !== null && /["\\\n]/.test(portFile)) {
+    throw new Error(
+      `devsite's state dir cannot hold a quote, a backslash, or a newline: ${portFile}`,
+    );
+  }
   return [
     `# ${r.project}`,
     `${r.host}, ${localhost} {`,
@@ -154,7 +159,10 @@ export function renderHostFile(r: Route): string {
     "\t\t}",
     "\t}",
     ...guardCaddyfileLines(),
-    `\trespond "devsite: dev server for ${r.host} is not running (start it with bun dev)" 503`,
+    portFile === null ? `\t${PORT_PLACEHOLDER}` : `\timport "${portFile}"`,
+    "\thandle_errors 502 503 {",
+    `\t\trespond "devsite: dev server for ${r.host} is not running (start it with bun dev)" 503`,
+    "\t}",
     "}",
     "",
   ].join("\n");
@@ -243,6 +251,9 @@ type StepPlan = {
   removedBinds: string[];
   guardedSites: string[];
   checks: Result[];
+  // The hosts with no port file yet. An existing one is never written: it can hold a running dev server's live port.
+  missingPortFiles: string[];
+  stateDir: string;
 };
 
 // Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
@@ -292,6 +303,15 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
     ),
   );
   const steps: Step[] = [];
+  // Before the host files that import them, so no reload ever reads a host file whose port file is missing. User space, so no sudo even for a root Caddy.
+  if (p.missingPortFiles.length > 0) {
+    steps.push({
+      text: `write the port file of ${p.missingPortFiles.join(", ")} in ${join(p.stateDir, "ports")}`,
+      run: async () => {
+        for (const host of p.missingPortFiles) writePortFile(host, PORT_PLACEHOLDER, p.stateDir);
+      },
+    });
+  }
   if (repairs.has("install")) {
     steps.push({
       text: "install Caddy with Homebrew",
@@ -713,8 +733,14 @@ export async function init(
     }
   }
 
+  const stateDir = resolveStateDir(ctx.env);
   const desired = new Map<string, string>([[GUARD_FILE, renderGuardFile()]]);
-  for (const r of routes) desired.set(`${r.host}.caddy`, renderHostFile(r));
+  for (const r of routes) {
+    desired.set(`${r.host}.caddy`, renderHostFile(r, portFilePath(r.host, stateDir)));
+  }
+  const missingPortFiles = routes
+    .map((r) => r.host)
+    .filter((h) => !existsSync(portFilePath(h, stateDir)));
 
   // The rename cleanup: a host file whose `# <project>` header names a project of THIS run but whose host is no longer declared. Files of other projects are never touched.
   const deletions: string[] = [];
@@ -746,12 +772,15 @@ export async function init(
 
   const checks = await caddyChecks(install, storage, ctx);
   printSection("Checks", checks, paint, ctx);
-  const steps = planSteps({ changes, install, settings, removedBinds, guardedSites, checks }, ctx);
+  const steps = planSteps(
+    { changes, install, settings, removedBinds, guardedSites, checks, missingPortFiles, stateDir },
+    ctx,
+  );
   // Printed until Caddy has the routes, so a set-up Mac prints nothing.
   const routesMissing = checks.some((r) => r.state === "red" && r.repair === "load");
   const jsonHelp =
     caddyfilePath === null && (changes.length > 0 || routesMissing)
-      ? adaptedJson([...desired.values()], ctx)
+      ? adaptedJson([renderGuardFile(), ...routes.map((r) => renderHostFile(r, null))], ctx)
       : "";
 
   // Each piece ends with its own newline; concatenation is one multi-file unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
@@ -799,7 +828,7 @@ export async function init(
   const storageAfter = await findStorage(after, ctx);
   printSection("Checks after this run", await caddyChecks(after, storageAfter, ctx), paint, ctx);
   ctx.stdout.write(jsonHelp);
-  const phoneRoot = join(resolveStateDir(ctx.env), "caddy-root.crt");
+  const phoneRoot = join(stateDir, "caddy-root.crt");
   printChecklist(routes, await caRootFile(storageAfter, phoneRoot), ctx);
   return 0;
 }

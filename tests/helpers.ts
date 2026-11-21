@@ -38,7 +38,7 @@ export type IoOpts = {
   runCommand?: CliContext["runCommand"];
 };
 
-// A CliContext over in-memory io. The env holds only the scratch prefix and settings dir, so an ambient DEVSITE_UID can never leak in.
+// A CliContext over in-memory io. The env holds only the scratch prefix, the settings dir, and the state dir tests/setup.ts points at, so an ambient DEVSITE_UID can never leak in.
 export function makeIo(opts: IoOpts = {}) {
   const stdout = sink();
   const stderr = sink();
@@ -50,6 +50,7 @@ export function makeIo(opts: IoOpts = {}) {
     env: {
       DEVSITE_CADDY_PREFIX: dirname(dirname(opts.caddyfile ?? scratchCaddyfile())),
       XDG_CONFIG_HOME: opts.configHome ?? mkdtempSync(join(tmpdir(), "devsite-config-")),
+      DEVSITE_STATE_DIR: process.env.DEVSITE_STATE_DIR,
     },
     runCommand: opts.runCommand ?? quietRunner().runCommand,
   };
