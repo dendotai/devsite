@@ -21,8 +21,8 @@ export type Result =
   | { state: "red"; label: string; detail?: string; fix: string; repair?: Repair }
   | { state: "skipped"; label: string; detail: string; repair?: Repair };
 
-type CaddyRoute = { match?: { host?: string[] }[]; handle?: unknown[] };
-type Servers = Record<string, { routes?: CaddyRoute[] }>;
+export type CaddyRoute = { match?: { host?: string[] }[]; handle?: unknown[] };
+export type Servers = Record<string, { routes?: CaddyRoute[] }>;
 
 // devsite's hosts on this Mac: one `<host>.caddy` file each in devsite.d. A file whose name is not a `.internal` hostname is a snippet, not a host.
 export function machineHosts(devsiteDir: string): string[] {
@@ -33,7 +33,9 @@ export function machineHosts(devsiteDir: string): string[] {
     .sort();
 }
 
-async function readServers(): Promise<{ ok: true; servers: Servers } | { ok: false; why: string }> {
+export async function readServers(): Promise<
+  { ok: true; servers: Servers } | { ok: false; why: string }
+> {
   try {
     const res = await caddy("/config/apps/http/servers", { signal: AbortSignal.timeout(2000) });
     if (!res.ok) return { ok: false, why: `HTTP ${res.status} for its HTTP servers` };

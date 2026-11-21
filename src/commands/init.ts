@@ -26,7 +26,16 @@ import {
 import { BlockList, isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
-import { caddyChecks, printSection, type Result } from "../checks";
+import {
+  type CaddyRoute,
+  caddyChecks,
+  machineHosts,
+  printSection,
+  type Repair,
+  type Result,
+  readServers,
+  type Servers,
+} from "../checks";
 import { type CliContext, processContext } from "../context";
 import { ALLOWED_SOURCES, guardCaddyfileLines } from "../guard.mjs";
 import { findCaddy, type KnownInstall, unknownFix } from "../install";
@@ -250,10 +259,12 @@ type StepPlan = {
   settings: Settings;
   removedBinds: string[];
   guardedSites: string[];
-  checks: Result[];
+  repairs: Set<Repair>;
   // The hosts with no port file yet. An existing one is never written: it can hold a running dev server's live port.
   missingPortFiles: string[];
   stateDir: string;
+  // Shown under the load step: one line per live route the load drops, or one line that says init cannot list them.
+  dropped: string[];
 };
 
 // Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
@@ -288,20 +299,90 @@ function waitForAdminCommand(): string[] {
   ];
 }
 
-// The steps in the order they run: the user's steps, then the root steps (one sudo call, so it runs back to back after the plan's y), then the steps a setting hands to the user.
-function planSteps(p: StepPlan, ctx: CliContext): Step[] {
-  const { install } = p;
-  const caddyfilePath = install.config;
-  const asRoot = install.user === "root";
+function repairsOf(checks: Result[], install: KnownInstall): Set<Repair> {
   // A start would run Homebrew's Caddyfile and a reload would replace the config, so a Caddy with no Caddyfile gets neither: init prints the JSON for it instead.
   const loadable = install.configKind === "caddyfile";
-  const repairs = new Set(
-    p.checks.flatMap((r) =>
+  return new Set(
+    checks.flatMap((r) =>
       r.state !== "green" && r.repair && (loadable || (r.repair !== "start" && r.repair !== "load"))
         ? [r.repair]
         : [],
     ),
   );
+}
+
+// A start reads the files written before it, so a run that starts Caddy needs no load.
+function loadsConfig(
+  install: KnownInstall,
+  repairs: Set<Repair>,
+  changes: Change[],
+): install is KnownInstall & { configKind: "caddyfile"; config: string } {
+  return (
+    install.configKind === "caddyfile" &&
+    !repairs.has("start") &&
+    (changes.length > 0 || repairs.has("load"))
+  );
+}
+
+// Empty for a route that matches every host: one with no match set, or with a match set that has no host matcher.
+function routeHosts(route: CaddyRoute): string[] {
+  const sets = route.match ?? [];
+  if (sets.length === 0 || sets.some((m) => m.host === undefined)) return [];
+  return sets.flatMap((m) => m.host ?? []).map((h) => h.toLowerCase());
+}
+
+function allRoutes(servers: Servers): CaddyRoute[] {
+  return Object.values(servers).flatMap((s) => s.routes ?? []);
+}
+
+// A load replaces the live config with the adapted Caddyfile, so it drops each route another tool added through the admin API at runtime. devsite's own hosts are left out: their port files bring their routes back.
+async function droppedRoutes(
+  config: string,
+  ownHosts: Set<string>,
+  ctx: CliContext,
+): Promise<string[]> {
+  const live = await readServers();
+  if (!live.ok) return [];
+  let adapted: CaddyRoute[] = [];
+  if (existsSync(config)) {
+    const adapt = ["adapt", "--config", config, "--adapter", "caddyfile"];
+    const r = exec("caddy", adapt, ctx, true);
+    let parsed: { apps?: { http?: { servers?: Servers } } } | null = null;
+    try {
+      parsed = r.status === 0 ? JSON.parse(r.out) : null;
+    } catch {}
+    if (parsed === null) {
+      return [
+        `cannot list the routes this load drops: \`caddy ${adapt.join(" ")}\` failed; run it to see why`,
+      ];
+    }
+    adapted = allRoutes(parsed.apps?.http?.servers ?? {});
+  }
+  const kept = new Set([...ownHosts, ...adapted.flatMap(routeHosts)]);
+  const keptHostless = new Set(
+    adapted.filter((r) => routeHosts(r).length === 0).map((r) => JSON.stringify(r)),
+  );
+  return allRoutes(live.servers).flatMap((route) => {
+    const hosts = routeHosts(route);
+    const lost =
+      hosts.length > 0
+        ? hosts.filter((h) => !kept.has(h))
+        : keptHostless.has(JSON.stringify(route))
+          ? []
+          : ["every host"];
+    if (lost.length === 0) return [];
+    const what =
+      hosts.length > 0 ? `the route for ${lost.join(", ")}` : "a route that matches every host";
+    return [`drops ${what}, added at runtime by another tool`];
+  });
+}
+
+// The steps in the order they run: the user's steps, then the root steps (one sudo call, so it runs back to back after the plan's y), then the steps a setting hands to the user.
+function planSteps(p: StepPlan, ctx: CliContext): Step[] {
+  const { install } = p;
+  const caddyfilePath = install.config;
+  const asRoot = install.user === "root";
+  const { repairs } = p;
   const steps: Step[] = [];
   // Before the host files that import them, so no reload ever reads a host file whose port file is missing. User space, so no sudo even for a root Caddy.
   if (p.missingPortFiles.length > 0) {
@@ -365,21 +446,25 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
             },
           },
     );
-  } else if (install.configKind === "caddyfile" && (p.changes.length > 0 || repairs.has("load"))) {
+  } else if (loadsConfig(install, repairs, p.changes)) {
     // `caddy reload` adapts the Caddyfile and posts it to the running Caddy's admin API, whatever service manager runs Caddy.
     const reload = ["caddy", "reload", "--config", install.config, "--adapter", "caddyfile"];
     const text = "load the Caddy config through Caddy's admin API";
     if (p.settings.caddy.reload === "manual") {
       steps.push({
         text: "reload Caddy yourself, so it reads the files written above",
-        details: ["caddy.reload is manual in your devsite settings, so init does not reload it"],
+        details: [
+          "caddy.reload is manual in your devsite settings, so init does not reload it",
+          ...p.dropped,
+        ],
         handedToUser: reload,
       });
     } else if (asRoot) {
-      steps.push({ text, root: [reload] });
+      steps.push({ text, details: p.dropped, root: [reload] });
     } else {
       steps.push({
         text,
+        details: p.dropped,
         run: async () => runInTerminal("caddy", reload.slice(1), ctx),
       });
     }
@@ -772,8 +857,28 @@ export async function init(
 
   const checks = await caddyChecks(install, storage, ctx);
   printSection("Checks", checks, paint, ctx);
+  const ownHosts = new Set(
+    [...machineHosts(devsiteDir), ...routes.map((r) => r.host)].flatMap((h) => {
+      const { internal, localhost } = hostsOf(h.replace(/\.internal$/, ""));
+      return [internal, localhost];
+    }),
+  );
+  const repairs = repairsOf(checks, install);
+  const dropped = loadsConfig(install, repairs, changes)
+    ? await droppedRoutes(install.config, ownHosts, ctx)
+    : [];
   const steps = planSteps(
-    { changes, install, settings, removedBinds, guardedSites, checks, missingPortFiles, stateDir },
+    {
+      changes,
+      install,
+      settings,
+      removedBinds,
+      guardedSites,
+      repairs,
+      missingPortFiles,
+      stateDir,
+      dropped,
+    },
     ctx,
   );
   // Printed until Caddy has the routes, so a set-up Mac prints nothing.
