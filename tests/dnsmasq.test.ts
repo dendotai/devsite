@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { processRunner } from "../src/context";
-import { renderConf, renderPlist } from "../src/dnsmasq";
+import { renderConf, renderPlist, renderWatcher } from "../src/dnsmasq";
 import { type CommandCall, cli, fakeStdin, MISSING, makeRepo, scriptedRunner } from "./helpers";
 import { mockAdmin, pki, placeholder, setUpMachine, snapshot, useMachine } from "./machine";
 
@@ -33,18 +33,20 @@ type Mac = {
   caddyfile: string;
   systemRoot: string;
   conf: string;
+  watcher: string;
   plist: string;
   binary: string;
 };
 
-// A set-up Caddy, a scratch root for devsite's root-owned files, and a dnsmasq of the user's own config in the Homebrew prefix. dnsmasq: the formula is installed; files: devsite's dnsmasq files as init writes them for that IP; oldBinary: the LaunchDaemon names that dnsmasq binary instead.
+// A set-up Caddy, a scratch root for devsite's root-owned files, and a dnsmasq of the user's own config in the Homebrew prefix. dnsmasq: the formula is installed; files: devsite's dnsmasq files as init writes them for that IP; oldBinary: the LaunchDaemon names that dnsmasq binary instead; noWatcher: the watcher file is missing.
 async function setUp(
-  opts: { dnsmasq?: boolean; files?: string; oldBinary?: string } = {},
+  opts: { dnsmasq?: boolean; files?: string; oldBinary?: string; noWatcher?: boolean } = {},
 ): Promise<Mac> {
   await mockAdmin([placeholder()]);
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
   const systemRoot = mkdtempSync(join(tmpdir(), "devsite-system-"));
   const conf = join(systemRoot, "Library", "Application Support", "devsite", "dnsmasq.conf");
+  const watcher = join(dirname(conf), "dnsmasq-watcher.zsh");
   const plist = join(systemRoot, "Library", "LaunchDaemons", `${LABEL}.plist`);
   const binary = join(m.prefix, "opt", "dnsmasq", "sbin", "dnsmasq");
   writeFileSync(join(m.dir, "dnsmasq.conf"), USER_CONF);
@@ -56,9 +58,19 @@ async function setUp(
     mkdirSync(dirname(conf), { recursive: true });
     mkdirSync(dirname(plist), { recursive: true });
     writeFileSync(conf, renderConf(opts.files));
-    writeFileSync(plist, renderPlist(opts.oldBinary ?? binary, conf));
+    if (!opts.noWatcher) writeFileSync(watcher, renderWatcher());
+    writeFileSync(plist, renderPlist(opts.oldBinary ?? binary, conf, watcher));
   }
-  return { prefix: m.prefix, dir: m.dir, caddyfile: m.caddyfile, systemRoot, conf, plist, binary };
+  return {
+    prefix: m.prefix,
+    dir: m.dir,
+    caddyfile: m.caddyfile,
+    systemRoot,
+    conf,
+    watcher,
+    plist,
+    binary,
+  };
 }
 
 function runner(net: Net) {
@@ -188,16 +200,20 @@ test("a fresh install: init installs dnsmasq, writes devsite's config and Launch
   expect(r.stdout).toContain("Step 1 of 2: install dnsmasq with Homebrew");
   expect(r.stdout).toContain(`Step 2 of 2: run devsite's dnsmasq on ${IP}  [sudo]`);
   expect(r.stdout).toContain(
-    `devsite's LaunchDaemon ${m.plist} runs dnsmasq as root with ${m.conf}: it listens on ${IP} only and answers .internal with ${IP}`,
+    `devsite's LaunchDaemon ${m.plist} runs dnsmasq as root with ${m.conf} while this Mac has a Tailscale IP: it listens on ${IP} only and answers .internal with ${IP}`,
   );
   expect(r.stdout).toContain(`+listen-address=${IP}`);
   expect(r.stdout).toContain(`+address=/internal/${IP}`);
   expect(r.stdout).toContain(`+\t\t<string>${m.binary}</string>`);
+  expect(r.stdout).toContain(`+\t\t<string>${m.watcher}</string>`);
+  expect(r.stdout).toContain("+coproc scutil");
+  expect(r.stdout).toContain("+\t\t<key>SuccessfulExit</key>\n+\t\t<false/>");
   expect(r.ran).toContain("brew install dnsmasq");
   expect(r.sudo).toHaveLength(1);
   const script = r.sudo[0] as string;
   expect(script).toContain(`install -d -m 755 '${dirname(m.conf)}'`);
   expect(script).toMatch(/install -m 644 -o root -g wheel \S+ '[^']+dnsmasq\.conf'/);
+  expect(script).toMatch(/install -m 644 -o root -g wheel \S+ '[^']+dnsmasq-watcher\.zsh'/);
   expect(script).toContain(` ${m.plist} && launchctl bootstrap system ${m.plist}`);
   expect(script).not.toContain("bootout");
   expect(script).not.toContain("kickstart");
@@ -297,6 +313,24 @@ test("devsite's files are current but dnsmasq gives no answer: init restarts it,
   expect(r.sudo).toEqual([
     `sudo -p \n  Password for sudo (%u):  sh -c launchctl kickstart -k system/${LABEL}`,
   ]);
+  expect(r.status).toBe(0);
+});
+
+test("the watcher file is missing: init writes it and restarts the loaded LaunchDaemon", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP, noWatcher: true });
+  const r = await devsite(["init"], m, {
+    tailscale: IP,
+    dig: null,
+    digAfter: IP,
+    mac: IP,
+    loaded: true,
+  });
+  expect(r.stdout).toContain(`Step 1 of 1: run devsite's dnsmasq on ${IP}  [sudo]`);
+  const script = r.sudo[0] as string;
+  expect(script).toMatch(
+    /dnsmasq-watcher\.zsh' && launchctl kickstart -k system\/ai\.den\.devsite\.dnsmasq$/,
+  );
+  expect(script).not.toContain("dnsmasq.conf'");
   expect(r.status).toBe(0);
 });
 

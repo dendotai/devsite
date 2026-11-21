@@ -23,6 +23,7 @@ export type Dnsmasq = {
   binary: string | null;
   installed: boolean;
   conf: DnsFile;
+  watcher: DnsFile;
   plist: DnsFile;
   loaded: boolean;
   // The listen address of devsite's config on disk, when it names another IP.
@@ -65,11 +66,66 @@ export function renderConf(ip: string): string {
   ].join("\n");
 }
 
+// The LaunchDaemon's program (ADR 0003). It starts a dnsmasq that exited only on the next settled change, so a failing dnsmasq never loops. zsh, because macOS's bash 3.2 takes no fractional read timeout.
+export function renderWatcher(): string {
+  return [
+    "#!/bin/zsh -f",
+    "# devsite's dnsmasq watcher (ADR 0003): runs dnsmasq while this Mac has a Tailscale IP. `devsite init` writes this file.",
+    "# Usage: dnsmasq-watcher.zsh <dnsmasq binary> <dnsmasq config>",
+    "zmodload zsh/parameter",
+    "dnsmasq=$1 conf=$2",
+    "# Seconds with no notification before the watcher acts: one change sends a burst of them. DEVSITE_WATCHER_SETTLE is for tests.",
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a zsh parameter expansion, not a JS template.
+    "settle=${DEVSITE_WATCHER_SETTLE:-0.5}",
+    "child= notifier=",
+    "trap 'stop; [[ -n $notifier ]] && kill $notifier 2>/dev/null; exit 0' TERM INT",
+    "",
+    "# Tailscale's IP is in 100.64.0.0/10; its utun interface name differs per Mac.",
+    "tailscale_up() {",
+    "  ifconfig | grep -Eq '^[[:space:]]+inet 100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.'",
+    "}",
+    "",
+    "# zsh's job table drops dnsmasq once it exits, so a reused PID never reads as dnsmasq.",
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a zsh parameter expansion, not a JS template.
+    'running() { [[ -n $child && " ${(v)jobstates} " == *":$child="* ]] }',
+    "",
+    "stop() {",
+    "  running && { kill $child; wait $child }",
+    "  child=",
+    "}",
+    "",
+    "apply() {",
+    "  if tailscale_up; then",
+    "    running || { $dnsmasq --keep-in-foreground --conf-file=$conf & child=$! }",
+    "  else",
+    "    stop",
+    "  fi",
+    "}",
+    "",
+    "# A coprocess keeps scutil's stdin open, so it watches until the watcher stops it.",
+    "coproc scutil",
+    "notifier=$!",
+    "print -p 'n.add State:/Network/Global/IPv4'",
+    "print -p 'n.add State:/Network/Interface/[^/]+/IPv4 pattern'",
+    "print -p 'n.watch'",
+    "apply",
+    "# Any line from scutil is a notification; the state is read after the burst ends.",
+    "while read -p -r _; do",
+    "  while read -p -r -t $settle _; do :; done",
+    "  apply",
+    "done",
+    "# scutil ended with no SIGTERM: a non-zero exit makes launchd start the watcher again.",
+    "stop",
+    "exit 1",
+    "",
+  ].join("\n");
+}
+
 const xml = (s: string) =>
   s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
-// ADR 0003 rejects KeepAlive, which retries and logs every 10 s while Tailscale is off; the root watcher (#75) takes over starting and stopping dnsmasq.
-export function renderPlist(binary: string, conf: string): string {
+// The watcher starts and stops dnsmasq (ADR 0003). KeepAlive starts the watcher again only after a non-zero exit, which it gives when scutil ends; a SIGTERM exits 0, so a bootout stays stopped. launchd waits at least 10 s between starts.
+export function renderPlist(binary: string, conf: string, watcher: string): string {
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -79,12 +135,19 @@ export function renderPlist(binary: string, conf: string): string {
     `\t<string>${LABEL}</string>`,
     "\t<key>ProgramArguments</key>",
     "\t<array>",
+    "\t\t<string>/bin/zsh</string>",
+    "\t\t<string>-f</string>",
+    `\t\t<string>${xml(watcher)}</string>`,
     `\t\t<string>${xml(binary)}</string>`,
-    "\t\t<string>--keep-in-foreground</string>",
-    `\t\t<string>--conf-file=${xml(conf)}</string>`,
+    `\t\t<string>${xml(conf)}</string>`,
     "\t</array>",
     "\t<key>RunAtLoad</key>",
     "\t<true/>",
+    "\t<key>KeepAlive</key>",
+    "\t<dict>",
+    "\t\t<key>SuccessfulExit</key>",
+    "\t\t<false/>",
+    "\t</dict>",
     "</dict>",
     "</plist>",
     "",
@@ -102,7 +165,9 @@ function readOrNull(path: string): string | null {
 function findDnsmasq(ip: string, ctx: CliContext): Dnsmasq {
   const prefix = brewPrefix(ctx);
   const binary = prefix === null ? null : join(prefix, "opt", "dnsmasq", "sbin", "dnsmasq");
-  const confPath = systemPath(ctx, "Library", "Application Support", "devsite", "dnsmasq.conf");
+  const appSupport = systemPath(ctx, "Library", "Application Support", "devsite");
+  const confPath = join(appSupport, "dnsmasq.conf");
+  const watcherPath = join(appSupport, "dnsmasq-watcher.zsh");
   const plistPath = systemPath(ctx, "Library", "LaunchDaemons", `${LABEL}.plist`);
   const confNow = readOrNull(confPath);
   const listen = confNow?.match(/^listen-address=(.+)$/m)?.[1]?.trim() ?? null;
@@ -111,10 +176,11 @@ function findDnsmasq(ip: string, ctx: CliContext): Dnsmasq {
     binary,
     installed: binary !== null && existsSync(binary),
     conf: { abs: confPath, current: confNow, next: renderConf(ip) },
+    watcher: { abs: watcherPath, current: readOrNull(watcherPath), next: renderWatcher() },
     plist: {
       abs: plistPath,
       current: readOrNull(plistPath),
-      next: renderPlist(binary ?? "dnsmasq", confPath),
+      next: renderPlist(binary ?? "dnsmasq", confPath, watcherPath),
     },
     loaded: isLoaded(ctx),
     staleIp: listen !== null && listen !== ip ? listen : null,
@@ -257,7 +323,9 @@ function waitUntilUnloaded(): string[] {
 
 // One root step: write devsite's files when they differ, then load the LaunchDaemon, or restart dnsmasq so it rereads its config.
 export function planDnsmasq(d: Dnsmasq): DnsmasqPlan {
-  const files = [d.conf, d.plist].filter(changed).map((f) => ({ abs: f.abs, next: f.next }));
+  const files = [d.conf, d.watcher, d.plist]
+    .filter(changed)
+    .map((f) => ({ abs: f.abs, next: f.next }));
   const launchd: string[][] = [];
   if (d.loaded && changed(d.plist)) {
     launchd.push(["launchctl", "bootout", `system/${LABEL}`], waitUntilUnloaded());
@@ -284,7 +352,7 @@ export function planDnsmasq(d: Dnsmasq): DnsmasqPlan {
     ...launchd,
   ];
   const details = [
-    `devsite's LaunchDaemon ${d.plist.abs} runs dnsmasq as root with ${d.conf.abs}: it listens on ${d.ip} only and answers .internal with ${d.ip}`,
+    `devsite's LaunchDaemon ${d.plist.abs} runs dnsmasq as root with ${d.conf.abs} while this Mac has a Tailscale IP: it listens on ${d.ip} only and answers .internal with ${d.ip}`,
     ...(d.staleIp === null
       ? []
       : [
