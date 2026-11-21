@@ -3,7 +3,7 @@
  *
  * Design notes:
  *   - No ports. `package.json#devSite` declares only a host; each host gets a `respond 503` placeholder, and the devsite Vite plugin (vite.mjs) swaps in a live `reverse_proxy` to a free ephemeral port at `bun dev` time via Caddy's admin API. Any number of projects can run at once.
- *   - devsite owns the `devsite.d/` directory next to the Caddyfile — one `<host>.caddy` file per host, first line `# <project>`. The user's Caddyfile is edited exactly once, ever: a single `import devsite.d/*.caddy # devsite` line (the glob covers future files). Registering or renaming hosts only writes `devsite.d/` files; nothing in the user's file is ever re-parsed or regenerated. Global options live in the Caddyfile's own global options block, where every Caddy user expects them: devsite creates the block (once) when the user has none, or adds its two directives into the user's block (once). A block the user has touched is never rewritten — later runs only presence-check; a block that is purely devsite's own rendering re-renders fresh.
+ *   - devsite owns the `devsite.d/` directory next to the Caddyfile — one `<host>.caddy` file per host, first line `# <project>`. The user's Caddyfile is edited exactly once, ever: a single `import devsite.d/*.caddy # devsite` line (the glob covers future files). Registering or renaming hosts only writes `devsite.d/` files; nothing in the user's file is ever re-parsed or regenerated. devsite keeps the storage Caddy already uses: with no `storage` line it pins that storage in the Caddyfile's global options block, creating the block (once) when the user has none, or adding the pin into the user's block (once). A block the user has touched is never rewritten — later runs only presence-check; a block that is purely devsite's own rendering re-renders fresh.
  *   - State-driven: init runs doctor's Caddy checks first and plans a fix only for each red one, so on a set-up Mac it asks nothing, runs no sudo, and leaves Caddy's live routes alone. Every plan shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
  *   - Every step that needs root runs in one sudo call, so one password prompt covers the run whatever sudo's `timestamp_timeout` is.
  *
@@ -23,15 +23,18 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { BlockList, isIP } from "node:net";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
-import { caddyChecks, printSection, type Result, storageOf } from "../checks";
+import { caddyChecks, printSection, type Result } from "../checks";
 import { type CliContext, processContext } from "../context";
-import { guardCaddyfileLines } from "../guard.mjs";
+import { ALLOWED_SOURCES, guardCaddyfileLines } from "../guard.mjs";
 import { findCaddy, type KnownInstall, unknownFix } from "../install";
 import { BOLD, CYAN, DIM, exec, GREEN, type Paint, painter, RED, YELLOW } from "../io";
 import { devSiteName, hostsOf } from "../names.mjs";
-import { readSettings, type Settings } from "../settings";
+import { readSettings, type Settings, settingsPath } from "../settings";
+import { resolveStateDir } from "../state.mjs";
+import { caRootFile, findStorage, rootCrtIn } from "../storage";
 import { adminBase, caddy } from "../vite.mjs";
 
 // Shorter than the 7-day intermediate, as Caddy's docs require (168h made each leaf end at the same second as its intermediate); 120h still outlasts a weekend with the Mac asleep.
@@ -40,9 +43,6 @@ const LEAF_LIFETIME = "120h";
 // The one line devsite ever puts in the user's Caddyfile. The trailing comment tags the line for humans; the presence check tolerates it moving or losing the comment.
 const IMPORT_LINE = "import devsite.d/*.caddy # devsite";
 const IMPORT_RE = /^import devsite\.d\/\*\.caddy(?:[ \t]+#.*)?$/m;
-
-// Where the pinned PKI storage lives; derived from the *human's* home once per run.
-type Pki = { storageRoot: string; caRootCert: string };
 
 const SUDO_NOTE = {
   init: "it calls sudo itself for the steps that need it",
@@ -116,25 +116,38 @@ function foreignGlobalDirectives(inner: string): string[] {
   return withoutStorage
     .split("\n")
     .map((l) => l.trimEnd())
-    .filter((l) => l.trim() !== "" && l.trim() !== "local_certs" && !l.trim().startsWith("#"));
+    .filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
 }
 
-function storagePinLines(pki: Pki): string[] {
+function storagePinLines(root: string): string[] {
   return [
     "\t# Pin PKI storage so Caddy's local CA is the SAME no matter how Caddy runs",
     "\t# it (the always-on service vs a foreground process). Every device trusts",
-    `\t# this one CA root: ${pki.caRootCert}`,
+    `\t# this one CA root: ${rootCrtIn(root)}`,
     "\tstorage file_system {",
-    `\t\troot "${pki.storageRoot}"`,
+    `\t\troot "${root}"`,
     "\t}",
   ];
 }
 
-// Placeholder only — the devsite Vite plugin swaps in a reverse_proxy to the dev server's ephemeral port at runtime via the admin API. The first line (`# <project>`) is the file's ownership record, read by rename cleanup.
+// The snippet a site block of the user's own imports to take devsite's LAN guard in place of a default_bind. Its matcher name is devsite's, so it cannot clash with one in the user's block.
+const GUARD_FILE = "guard.caddy";
+export function renderGuardFile(): string {
+  return [
+    "# devsite: `import devsite-guard` in a site block keeps the LAN out of it",
+    "(devsite-guard) {",
+    ...guardCaddyfileLines().map((l) => l.replace("@outside", "@devsite_outside")),
+    "}",
+    "",
+  ].join("\n");
+}
+
+// Placeholder only — the devsite Vite plugin swaps in a reverse_proxy to the dev server's ephemeral port at runtime via the admin API. The first line (`# <project>`) is the file's ownership record, read by rename cleanup. Each host file carries its own `issuer internal`, so no global local_certs moves the user's other sites off their real certificates.
 export function renderHostFile(r: Route): string {
+  const localhost = r.host.replace(/\.internal$/, ".localhost");
   return [
     `# ${r.project}`,
-    `${r.host} {`,
+    `${r.host}, ${localhost} {`,
     "\ttls {",
     "\t\tissuer internal {",
     `\t\t\tlifetime ${LEAF_LIFETIME}`,
@@ -228,13 +241,18 @@ type StepPlan = {
   install: KnownInstall;
   settings: Settings;
   removedBinds: string[];
+  guardedSites: string[];
   checks: Result[];
 };
 
 // Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
-function rootWriteCommands(changes: Change[], caddyfilePath: string, devsiteDir: string) {
+function rootWriteCommands(changes: Change[], caddyfilePath: string | null, devsiteDir: string) {
   const commands: string[][] = [];
-  if (changes.some((c) => c.abs === caddyfilePath) && existsSync(caddyfilePath)) {
+  if (
+    caddyfilePath !== null &&
+    changes.some((c) => c.abs === caddyfilePath) &&
+    existsSync(caddyfilePath)
+  ) {
     if (!existsSync(`${caddyfilePath}.pre-devsite`)) {
       commands.push(["cp", caddyfilePath, `${caddyfilePath}.pre-devsite`]);
     }
@@ -264,8 +282,14 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
   const { install } = p;
   const caddyfilePath = install.config;
   const asRoot = install.user === "root";
+  // A start would run Homebrew's Caddyfile and a reload would replace the config, so a Caddy with no Caddyfile gets neither: init prints the JSON for it instead.
+  const loadable = install.configKind === "caddyfile";
   const repairs = new Set(
-    p.checks.flatMap((r) => (r.state !== "green" && r.repair ? [r.repair] : [])),
+    p.checks.flatMap((r) =>
+      r.state !== "green" && r.repair && (loadable || (r.repair !== "start" && r.repair !== "load"))
+        ? [r.repair]
+        : [],
+    ),
   );
   const steps: Step[] = [];
   if (repairs.has("install")) {
@@ -275,11 +299,20 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
     });
   }
   if (p.changes.length > 0) {
-    const text = `write ${p.changes.length} file(s) in ${dirname(caddyfilePath)}, as the diff below shows`;
-    const details = p.removedBinds.map(
-      (b) =>
-        `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out`,
-    );
+    const text = `write ${p.changes.length} file(s) in ${dirname(install.devsiteDir)}, as the diff below shows`;
+    const details = [
+      ...p.guardedSites.map(
+        (s) =>
+          `adds "import devsite-guard" to your site ${s}: the guard keeps the LAN out of it in place of default_bind`,
+      ),
+      ...p.removedBinds.map(
+        (b) =>
+          `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out`,
+      ),
+      ...(p.guardedSites.length > 0
+        ? [`to keep default_bind instead, answer n and ${keepBindsWithRoot(ctx)}`]
+        : []),
+    ];
     steps.push(
       asRoot
         ? { text, details, root: rootWriteCommands(p.changes, caddyfilePath, install.devsiteDir) }
@@ -290,7 +323,6 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
           },
     );
   }
-  const reload = ["caddy", "reload", "--config", caddyfilePath, "--adapter", "caddyfile"];
   if (repairs.has("start")) {
     // Caddy serves nothing while its admin API is down, so the start drops no live route; the new process reads the files written above.
     steps.push(
@@ -313,8 +345,9 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
             },
           },
     );
-  } else if (p.changes.length > 0 || repairs.has("load")) {
+  } else if (install.configKind === "caddyfile" && (p.changes.length > 0 || repairs.has("load"))) {
     // `caddy reload` adapts the Caddyfile and posts it to the running Caddy's admin API, whatever service manager runs Caddy.
+    const reload = ["caddy", "reload", "--config", install.config, "--adapter", "caddyfile"];
     const text = "load the Caddy config through Caddy's admin API";
     if (p.settings.caddy.reload === "manual") {
       steps.push({
@@ -378,8 +411,12 @@ async function runSteps(steps: Step[], paint: Paint, ctx: CliContext) {
   }
 }
 
-function applyChanges(changes: Change[], caddyfilePath: string, devsiteDir: string) {
-  if (changes.some((c) => c.abs === caddyfilePath) && existsSync(caddyfilePath)) {
+function applyChanges(changes: Change[], caddyfilePath: string | null, devsiteDir: string) {
+  if (
+    caddyfilePath !== null &&
+    changes.some((c) => c.abs === caddyfilePath) &&
+    existsSync(caddyfilePath)
+  ) {
     // The world before devsite ever touched it — created once, never written again.
     if (!existsSync(`${caddyfilePath}.pre-devsite`)) {
       copyFileSync(caddyfilePath, `${caddyfilePath}.pre-devsite`);
@@ -411,14 +448,14 @@ export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<bool
   }
 }
 
-function printChecklist(routes: Route[], pki: Pki, ctx: CliContext) {
+function printChecklist(routes: Route[], caRoot: string | null, ctx: CliContext) {
   ctx.stdout.write(
     [
       "",
       "Manual, per-device (one-time — can't be automated from here):",
       `  • Tailscale admin → DNS → split-DNS: domain 'internal' → this Mac's Tailscale IP.`,
       `  • On each phone: install AND trust the CA root, then reload https://${routes[0]?.host}`,
-      `      ${pki.caRootCert}`,
+      `      ${caRoot ?? `the root_certificate that ${adminBase()}/pki/ca/local answers`}`,
       `      (iOS: install the profile, THEN Settings → General → About →`,
       `       Certificate Trust Settings → toggle it ON — installing ≠ trusting.)`,
       "",
@@ -428,68 +465,54 @@ function printChecklist(routes: Route[], pki: Pki, ctx: CliContext) {
   );
 }
 
-// The planned end state of the user's Caddyfile, plus what the planning learned along the way (whether the local_certs warning applies, which default_bind lines go).
-type CaddyfilePlan = {
-  next: string;
-  // Non-null when the plan puts local_certs into a block the user owns — the path-specific first half of the warning; init appends the blast radius.
-  globalWarning: string | null;
-  removedBinds: string[];
-};
-
 const DEFAULT_BIND_RE = /^\s*default_bind\b/;
+const isBind = (l: string) => DEFAULT_BIND_RE.test(l);
 
-// devsite's two global directives, as presence checks on a block's inner text.
-function hasLocalCerts(inner: string): boolean {
-  return /^\s*local_certs\s*$/m.test(inner);
+function defaultBinds(text: string): string[] {
+  return (findGlobalBlock(text)?.full.split("\n") ?? []).filter(isBind).map((l) => l.trim());
 }
+
 function hasStoragePin(inner: string): boolean {
   return inner.includes("storage file_system");
 }
 
-function planCaddyfile(existing: string, pki: Pki): CaddyfilePlan {
+function planCaddyfile(
+  existing: string,
+  pinRoot: string | null,
+  dropBinds: boolean,
+): { next: string; removedBinds: string[] } {
   let text = existing;
-  const isBind = (l: string) => DEFAULT_BIND_RE.test(l);
   // The one exception to never rewriting the user's global block: Caddy as the user cannot start with a default_bind (ADR 0002), and the guard does its job.
   const userBlock = findGlobalBlock(text);
-  const blockLines = userBlock?.full.split("\n") ?? [];
-  const removedBinds = blockLines.filter(isBind).map((l) => l.trim());
-  if (userBlock !== null) {
+  const removedBinds = dropBinds ? defaultBinds(text) : [];
+  if (userBlock !== null && removedBinds.length > 0) {
+    const blockLines = userBlock.full.split("\n");
     const lines = blockLines.filter((l) => !isBind(l));
     text = text.slice(0, userBlock.start) + lines.join("\n") + text.slice(userBlock.end);
   }
 
   // The global options block lives in the Caddyfile — Caddy allows exactly one, first in the file. Three cases:
-  //   - none: devsite creates one with its two directives.
-  //   - purely devsite's own rendering (nothing of the user's inside): re-render fresh, so a stale storage root can't survive.
-  //   - anything the user touched: preserved byte-for-byte; devsite only appends what's missing, once, and never rewrites it again.
-  let globalWarning: string | null = null;
+  //   - purely devsite's own rendering (nothing of the user's inside): re-render fresh, keeping the pinned storage.
+  //   - anything the user touched: preserved byte-for-byte; devsite appends its pin when the block names no storage, once.
+  //   - none: devsite creates one for its pin.
   const g = findGlobalBlock(text);
-  let needBlock = g === null;
+  let block: string[] | null = pinRoot === null ? null : storagePinLines(pinRoot);
   if (g !== null) {
-    const leftover = foreignGlobalDirectives(g.inner);
-    const hasOurs = hasLocalCerts(g.inner) || hasStoragePin(g.inner);
-    if (leftover.length === 0 && hasOurs) {
+    if (hasStoragePin(g.inner) && foreignGlobalDirectives(g.inner).length === 0) {
+      const kept = g.inner.match(/^\s*root\s+"?([^"\n]+?)"?\s*$/m)?.[1];
+      block = kept !== undefined ? storagePinLines(kept) : block;
       text = text.slice(0, g.start) + text.slice(g.end);
-      needBlock = true;
     } else {
-      const additions: string[] = [];
-      if (!hasStoragePin(g.inner)) additions.push(...storagePinLines(pki));
-      if (!hasLocalCerts(g.inner)) {
-        additions.push("\tlocal_certs");
-        globalWarning =
-          "Your Caddyfile has its own global options block, so devsite adds its two " +
-          "directives (pinned storage, local_certs) into that block, once — see the diff.";
-      }
-      if (additions.length > 0) {
+      if (block !== null && !hasStoragePin(g.inner)) {
         const closing = g.full.lastIndexOf("}");
-        const augmented = `${g.full.slice(0, closing)}${additions.join("\n")}\n${g.full.slice(closing)}`;
+        const augmented = `${g.full.slice(0, closing)}${block.join("\n")}\n${g.full.slice(closing)}`;
         text = text.slice(0, g.start) + augmented + text.slice(g.end);
       }
+      block = null;
     }
   }
-  if (needBlock) {
-    const block = ["{", ...storagePinLines(pki), "\tlocal_certs", "}"].join("\n");
-    text = `${block}\n\n${text.replace(/^(?:[ \t]*\n)+/, "")}`;
+  if (block !== null) {
+    text = `${["{", ...block, "}"].join("\n")}\n\n${text.replace(/^(?:[ \t]*\n)+/, "")}`;
   }
 
   if (!IMPORT_RE.test(text)) {
@@ -503,7 +526,121 @@ function planCaddyfile(existing: string, pki: Pki): CaddyfilePlan {
   }
 
   const trimmed = text.replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "");
-  return { next: `${trimmed}\n`, globalWarning, removedBinds };
+  return { next: `${trimmed}\n`, removedBinds };
+}
+
+// A top-level entry of the user's own that does not import devsite-guard, so a deleted default_bind would open it to the LAN. line is the index of a site block's opening line, where init can add the import; null for an entry init cannot guard: an import of the user's own (the sites it pulls in are not read here) or a site with no braces.
+type UnguardedSite = { address: string; line: number | null };
+
+// Quoted text and comments are dropped before braces are counted.
+function unguardedSites(text: string): UnguardedSite[] {
+  const out: UnguardedSite[] = [];
+  let depth = 0;
+  let site: (UnguardedSite & { guarded: boolean }) | null = null;
+  let globalSeen = false;
+  for (const [i, raw] of text.split("\n").entries()) {
+    const line = raw.replace(/"(?:[^"\\]|\\.)*"|`[^`]*`/g, '""').replace(/(^|\s)#.*$/, "$1");
+    const t = line.trim();
+    if (depth === 0) {
+      if (site !== null) {
+        if (!site.guarded) out.push({ address: site.address, line: site.line });
+        site = null;
+      }
+      if (t === "" || IMPORT_RE.test(t)) continue;
+      if (t === "{" && !globalSeen) {
+        globalSeen = true;
+      } else if (/^import\s/.test(t)) {
+        out.push({ address: t, line: null });
+      } else if (!/^\(.+\)\s*\{$/.test(t)) {
+        const braces = t.endsWith("{");
+        site = { address: t.replace(/\s*\{$/, ""), line: braces ? i : null, guarded: false };
+        // A Caddyfile with one site may leave out the braces: the rest of the file is that site.
+        if (!braces) depth = Number.POSITIVE_INFINITY;
+      }
+    } else if (site !== null && /^import\s+devsite-guard\b/.test(t)) {
+      site.guarded = true;
+    }
+    if (depth !== Number.POSITIVE_INFINITY) {
+      for (const ch of line) depth += ch === "{" ? 1 : ch === "}" ? -1 : 0;
+    }
+  }
+  if (site !== null && !site.guarded) out.push({ address: site.address, line: site.line });
+  return out;
+}
+
+// The import goes first in each block, so the guard runs before the site's own handlers.
+function addGuardImports(text: string, sites: UnguardedSite[]): string {
+  const lines = text.split("\n");
+  const at = sites.flatMap((s) => (s.line === null ? [] : [s.line])).sort((a, b) => b - a);
+  for (const i of at) lines.splice(i + 1, 0, "\timport devsite-guard");
+  return lines.join("\n");
+}
+
+const guardSources = new BlockList();
+for (const src of ALLOWED_SOURCES) {
+  const [addr = "", bits] = src.split("/");
+  const type = isIP(addr) === 6 ? "ipv6" : "ipv4";
+  if (bits === undefined) guardSources.addAddress(addr, type);
+  else guardSources.addSubnet(addr, Number(bits), type);
+}
+
+// A bind address the LAN guard also allows: a site that takes the guard in place of the default_bind keeps the same sources.
+function guardAllows(bind: string): boolean {
+  const addr = bind.replace(/^(?:tcp|udp)[46]?\//, "");
+  if (addr === "localhost") return true;
+  const version = isIP(addr);
+  return version !== 0 && guardSources.check(addr, version === 6 ? "ipv6" : "ipv4");
+}
+
+const bindsGuardAllows = (binds: string[]) =>
+  binds.flatMap((b) => b.split(/\s+/).slice(1)).every(guardAllows);
+
+const keepBindsWithRoot = (ctx: CliContext) =>
+  `set caddy.user to "root" in ${settingsPath(ctx)}; init then keeps default_bind`;
+
+// init reaches this only when it cannot add the guard itself: a bind address the guard would cut off, or an entry with no block to add the import to.
+function defaultBindStop(binds: string[], sites: UnguardedSite[], ctx: CliContext): string {
+  const ways = [
+    ...(bindsGuardAllows(binds)
+      ? [
+          "  - add `import devsite-guard` to each of those site blocks, and for an import, to the site blocks of the files it pulls in: init then deletes default_bind, and devsite's LAN guard keeps the LAN out of your sites",
+        ]
+      : []),
+    `  - run Caddy as root: ${keepBindsWithRoot(ctx)}`,
+  ];
+  return [
+    "Your Caddyfile has a default_bind line and site blocks of your own:",
+    ...binds.map((b) => `  ${b}`),
+    ...sites.map((s) => `  ${s.address}`),
+    "Caddy as you cannot start with default_bind, and deleting the line would open your sites to the LAN. init changed nothing.",
+    "To go on, do one of these, then run `bunx devsite init` again:",
+    ...ways,
+    "",
+  ].join("\n");
+}
+
+// A Caddy with no Caddyfile cannot load devsite's files, so init prints them adapted to JSON. Caddy's adapter makes one server for the hosts and one TLS policy per host's `issuer internal`.
+function adaptedJson(files: string[], ctx: CliContext): string {
+  const r = exec(
+    "caddy",
+    ["adapt", "--config", writeTmp(files.join("\n")), "--adapter", "caddyfile"],
+    ctx,
+    true,
+  );
+  if (r.status !== 0) throw new Error("`caddy adapt` could not adapt devsite's host files");
+  const config = JSON.parse(r.out) as {
+    apps?: { http?: { servers?: unknown }; tls?: { automation?: { policies?: unknown } } };
+  };
+  const json = (v: unknown) => JSON.stringify(v ?? null, null, 2).replace(/^/gm, "    ");
+  return [
+    "",
+    "Add devsite's hosts to your Caddy config, as JSON, then run `bunx devsite doctor`:",
+    "  apps.http.servers — the routes go into your server that listens on :443:",
+    json(config.apps?.http?.servers),
+    "  apps.tls.automation.policies — append these policies:",
+    json(config.apps?.tls?.automation?.policies),
+    "",
+  ].join("\n");
 }
 
 // The run can install and start Caddy, so the checks after it read the install again.
@@ -520,11 +657,6 @@ export async function init(
   // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the repo root.
   const cwd = ctx.cwd;
   if (refuseRoot("init", ctx)) return 1;
-  const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
-  const pki: Pki = {
-    storageRoot,
-    caRootCert: join(storageRoot, "pki", "authorities", "local", "root.crt"),
-  };
 
   const routes = discoverRoutes(cwd);
   if (routes.length === 0) {
@@ -551,14 +683,37 @@ export async function init(
     );
     return 1;
   }
-  const caddyfilePath = install.config;
-  const caddyDir = dirname(caddyfilePath);
+  const caddyfilePath = install.configKind === "caddyfile" ? install.config : null;
+  const caddyDir = dirname(install.devsiteDir);
   const devsiteDir = install.devsiteDir;
+  const storage = await findStorage(install, ctx);
 
-  const existing = existsSync(caddyfilePath) ? readFileSync(caddyfilePath, "utf8") : "";
-  const plan = planCaddyfile(existing, pki);
+  const changes: Change[] = [];
+  let removedBinds: string[] = [];
+  let guardedSites: string[] = [];
+  if (caddyfilePath !== null) {
+    const existing = existsSync(caddyfilePath) ? readFileSync(caddyfilePath, "utf8") : "";
+    let text = existing;
+    const binds = defaultBinds(existing);
+    // A root Caddy can listen on the default_bind addresses, so the line stays.
+    const dropBinds = binds.length > 0 && install.user === "user";
+    if (dropBinds) {
+      const sites = unguardedSites(existing);
+      if (sites.length > 0 && (!bindsGuardAllows(binds) || sites.some((s) => s.line === null))) {
+        ctx.stderr.write(defaultBindStop(binds, sites, ctx));
+        return 1;
+      }
+      text = addGuardImports(existing, sites);
+      guardedSites = sites.map((s) => s.address);
+    }
+    const plan = planCaddyfile(text, storage.fromConfig ? null : storage.root, dropBinds);
+    removedBinds = plan.removedBinds;
+    if (plan.next !== existing) {
+      changes.push({ rel: basename(caddyfilePath), abs: caddyfilePath, next: plan.next });
+    }
+  }
 
-  const desired = new Map<string, string>();
+  const desired = new Map<string, string>([[GUARD_FILE, renderGuardFile()]]);
   for (const r of routes) desired.set(`${r.host}.caddy`, renderHostFile(r));
 
   // The rename cleanup: a host file whose `# <project>` header names a project of THIS run but whose host is no longer declared. Files of other projects are never touched.
@@ -572,10 +727,6 @@ export async function init(
     }
   }
 
-  const changes: Change[] = [];
-  if (plan.next !== existing) {
-    changes.push({ rel: basename(caddyfilePath), abs: caddyfilePath, next: plan.next });
-  }
   for (const [name, content] of desired) {
     const abs = join(devsiteDir, name);
     if (!existsSync(abs) || readFileSync(abs, "utf8") !== content) {
@@ -592,23 +743,16 @@ export async function init(
   for (const r of routes) {
     ctx.stdout.write(`  https://${r.host}  ${paint(DIM, `(${r.project})`)}\n`);
   }
-  if (plan.globalWarning !== null) {
-    ctx.stderr.write(
-      painter(ctx.stderr, ctx)(
-        YELLOW,
-        `\n⚠ ${plan.globalWarning} ` +
-          "Note: `local_certs` gives EVERY site on this Caddy an internal-CA cert; " +
-          "a public site in this file will lose its real certificate.\n",
-      ),
-    );
-  }
 
-  const checks = await caddyChecks(install, storageOf(caddyfilePath), ctx);
+  const checks = await caddyChecks(install, storage, ctx);
   printSection("Checks", checks, paint, ctx);
-  const steps = planSteps(
-    { changes, install, settings, removedBinds: plan.removedBinds, checks },
-    ctx,
-  );
+  const steps = planSteps({ changes, install, settings, removedBinds, guardedSites, checks }, ctx);
+  // Printed until Caddy has the routes, so a set-up Mac prints nothing.
+  const routesMissing = checks.some((r) => r.state === "red" && r.repair === "load");
+  const jsonHelp =
+    caddyfilePath === null && (changes.length > 0 || routesMissing)
+      ? adaptedJson([...desired.values()], ctx)
+      : "";
 
   // Each piece ends with its own newline; concatenation is one multi-file unified diff that patch(1) applies with -p0 from the Caddyfile's dir.
   const diff = changes.map((c) => unifiedDiff(c, ctx)).join("");
@@ -618,18 +762,20 @@ export async function init(
     else printSteps("Plan:", steps, paint, ctx);
     if (changes.length === 0) {
       ctx.stdout.write(
-        `\n--dry-run: ${caddyfilePath} and devsite.d are already up to date; nothing to write.\n`,
+        `\n--dry-run: ${caddyfilePath ?? devsiteDir} and devsite.d are already up to date; nothing to write.\n`,
       );
     } else {
       ctx.stdout.write(
         `\n--dry-run: would change ${changes.length} file(s) in ${caddyDir}; the diff:\n\n${paintDiff(diff, paint)}\n`,
       );
     }
+    ctx.stdout.write(jsonHelp);
     return 0;
   }
 
   if (steps.length === 0) {
     ctx.stdout.write(`\n${paint(GREEN, "Nothing to do: init changed nothing.")}\n`);
+    ctx.stdout.write(jsonHelp);
     return 0;
   }
   printSteps("Plan:", steps, paint, ctx);
@@ -649,12 +795,11 @@ export async function init(
     return 1;
   }
   await runSteps(steps, paint, ctx);
-  printSection(
-    "Checks after this run",
-    await caddyChecks(installAfter(settings, install, ctx), storageOf(caddyfilePath), ctx),
-    paint,
-    ctx,
-  );
-  printChecklist(routes, pki, ctx);
+  const after = installAfter(settings, install, ctx);
+  const storageAfter = await findStorage(after, ctx);
+  printSection("Checks after this run", await caddyChecks(after, storageAfter, ctx), paint, ctx);
+  ctx.stdout.write(jsonHelp);
+  const phoneRoot = join(resolveStateDir(ctx.env), "caddy-root.crt");
+  printChecklist(routes, await caRootFile(storageAfter, phoneRoot), ctx);
   return 0;
 }

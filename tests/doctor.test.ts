@@ -92,12 +92,14 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
   ]);
 });
 
-test("a Caddyfile with no storage line: the Setup section names Caddy's default storage", async () => {
+test("a Caddyfile with no storage line and Caddy stopped: the Setup section names the data dir brew services gives Caddy", async () => {
   await mockAdmin([placeholder()]);
   const m = setUpMachine();
   writeFileSync(m.caddyfile, "import devsite.d/*.caddy # devsite\n");
   const r = await doctor(m);
-  expect(r.stdout).toContain("Library/Application Support/Caddy (Caddy's default)");
+  expect(r.stdout).toContain(
+    `Caddy storage: ${join(m.prefix, "var", "lib", "caddy")} (the data dir \`brew services\` gives Caddy)`,
+  );
 });
 
 // --- the Caddy checks, red ---
@@ -333,16 +335,26 @@ test("a one-line `storage file_system <path>`: the CA checks read that storage",
   expect(r.status).toBe(0);
 });
 
-test("a storage kind other than file_system: the CA checks are skipped, not red", async () => {
+test("a storage kind other than file_system: the CA checks read the CA from GET /pki/ca/local", async () => {
+  await mockAdmin([placeholder()], { caRoot: pki.root });
+  const m = setUpMachine();
+  writeFileSync(m.caddyfile, "{\n\tstorage redis {\n\t\thost 127.0.0.1\n\t}\n}\n");
+  const r = await doctor(m);
+  expect(r.stdout).toContain(
+    "Caddy storage: not read by devsite (the Caddyfile's storage line, storage redis)",
+  );
+  expect(r.stdout).toContain("✓ the served certificate chains to the CA in Caddy's storage");
+  expect(r.stdout).toContain("✓ that CA is trusted in the keychain");
+  expect(r.status).toBe(0);
+});
+
+test("a storage devsite cannot read and no CA from the admin API: the CA checks are skipped, not red", async () => {
   await mockAdmin([placeholder()]);
   const m = setUpMachine();
   writeFileSync(m.caddyfile, "{\n\tstorage redis {\n\t\thost 127.0.0.1\n\t}\n}\n");
   const r = await doctor(m);
   expect(r.stdout).toContain(
-    "Caddy storage: not read by devsite yet (the Caddyfile's storage line, storage redis)",
-  );
-  expect(r.stdout).toContain(
-    "– the served certificate chains to the CA in Caddy's storage — devsite reads only file_system storage yet",
+    "– the served certificate chains to the CA in Caddy's storage — devsite cannot read the Caddyfile's storage line, storage redis, and Caddy's admin API gives no CA",
   );
   expect(r.calls.map((c) => c.cmd)).toEqual(["ps"]);
   expect(r.status).toBe(0);

@@ -18,7 +18,7 @@ import { HOST, mockAdmin, pki, placeholder, setUpMachine, useMachine } from "./m
 useMachine();
 
 const SET_UP_CADDYFILE =
-  '{\n\temail dev@example.com\n\tstorage file_system {\n\t\troot "STORAGE"\n\t}\n\tlocal_certs\n}\n\nimport devsite.d/*.caddy # devsite\n';
+  '{\n\temail dev@example.com\n\tstorage file_system {\n\t\troot "STORAGE"\n\t}\n}\n\nimport devsite.d/*.caddy # devsite\n';
 
 type Answers = {
   // The `caddy run` line ps prints, without pid and ppid.
@@ -123,9 +123,11 @@ test("a running Caddy with another --config: init writes beside that config and 
   expect(r.ran).toContain(`caddy reload --config ${other.caddyfile} --adapter caddyfile`);
   expect(r.ran.filter((c) => c.startsWith("brew services start"))).toEqual([]);
   expect(readFileSync(join(other.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(
-    `${HOST} {`,
+    `${HOST}, web.test.localhost {`,
   );
-  expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(`${HOST} {`);
+  expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(
+    `${HOST}, web.test.localhost {`,
+  );
   expect(r.status).toBe(0);
 
   const d = await devsite(["doctor"], {
@@ -224,17 +226,6 @@ test("Caddy from outside Homebrew: init stops and names caddy.config, doctor rep
   expect(d.status).toBe(1);
 });
 
-test("a Caddy run with no --config: init stops, because a reload of Homebrew's Caddyfile would replace its config", async () => {
-  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
-  const caddy = { user: "den", args: `${m.prefix}/opt/caddy/bin/caddy run`, pid: 4242 };
-  const r = await devsite(["init"], { caddyfile: m.caddyfile, answers: { caddy } });
-  expect(r.stderr).toContain(
-    "devsite does not know this Mac's Caddy install: Caddy runs (pid 4242) with no --config.",
-  );
-  expect(r.ran.filter((c) => c.startsWith("caddy") || c.startsWith("sudo"))).toEqual([]);
-  expect(r.status).toBe(1);
-});
-
 test("a caddy put under the Homebrew prefix by hand: not Homebrew's, so init stops", async () => {
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, installed: false });
   mkdirSync(join(m.prefix, "bin"));
@@ -269,7 +260,9 @@ test("caddy.config gets an unknown install past the stop: init writes beside tha
   });
   expect(r.stdout).toContain(`✓ Caddy is installed — a kind devsite does not know`);
   expect(r.ran).toContain(`caddy reload --config ${m.caddyfile} --adapter caddyfile`);
-  expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(`${HOST} {`);
+  expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(
+    `${HOST}, web.test.localhost {`,
+  );
   expect(r.status).toBe(0);
 });
 
@@ -311,7 +304,9 @@ test("caddy.reload manual: init writes the files, does not reload, and prints th
   );
   expect(r.stdout).toContain(`\n  caddy reload --config ${m.caddyfile} --adapter caddyfile\n`);
   expect(r.ran.filter((c) => c.startsWith("caddy"))).toEqual([]);
-  expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(`${HOST} {`);
+  expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(
+    `${HOST}, web.test.localhost {`,
+  );
   expect(r.status).toBe(0);
 });
 

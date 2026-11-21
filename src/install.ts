@@ -1,6 +1,6 @@
 // The install seam: where this Mac's Caddy lives and how it runs, so init and doctor never assume one install. This file knows the Homebrew kind; another kind stops init with a message that names the caddy.config setting.
 import { realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { CliContext } from "./context";
 import { exec } from "./io";
 import { type CaddyUser, type Settings, settingsPath } from "./settings";
@@ -11,16 +11,21 @@ export type CaddyProcess = {
   user: string;
   binary: string;
   config: string | null;
+  adapter: string | null;
 };
+
+// "json": a config file of another format, which Caddy loads as JSON; "api": no config file, the config came through the admin API. init can load neither, because a reload of a Caddyfile would replace that config.
+type ConfigFile =
+  | { configKind: "caddyfile" | "json"; config: string }
+  | { configKind: "api"; config: null };
 
 export type CaddyInstall =
   | { kind: "unknown"; why: string }
-  | {
+  | (ConfigFile & {
       // "other": a kind devsite does not know, with the paths from the caddy.config setting.
       kind: "homebrew" | "other";
       prefix: string | null;
       installed: boolean;
-      config: string;
       configSource: string;
       devsiteDir: string;
       log: string | null;
@@ -28,7 +33,7 @@ export type CaddyInstall =
       manager: string | null;
       user: CaddyUser;
       userSource: string;
-    };
+    });
 
 export type KnownInstall = Exclude<CaddyInstall, { kind: "unknown" }>;
 
@@ -43,7 +48,8 @@ function findCaddyProcess(ctx: CliContext): CaddyProcess | null {
     const [binary = "", sub] = args.split(/\s+/);
     if (!/(?:^|\/)caddy$/.test(binary) || sub !== "run") continue;
     const config = args.match(/\s--config[= ](.+?)(?=\s--|$)/)?.[1]?.trim() ?? null;
-    return { pid: Number(m[1]), ppid: Number(m[2]), user: m[3] as string, binary, config };
+    const adapter = args.match(/\s--adapter[= ](\S+)/)?.[1] ?? null;
+    return { pid: Number(m[1]), ppid: Number(m[2]), user: m[3] as string, binary, config, adapter };
   }
   return null;
 }
@@ -87,27 +93,29 @@ export function findCaddy(settings: Settings, ctx: CliContext): CaddyInstall {
   const homebrew = prefix !== null && (proc === null || fromBrew(proc.binary));
   const set = settings.caddy;
 
-  if (set.config === undefined) {
-    let why: string | null = null;
-    if (!homebrew) {
-      why =
-        proc !== null
-          ? `Caddy runs from ${proc.binary}, which is not Homebrew's Caddy`
-          : "Homebrew is not on this Mac";
-    } else if (proc !== null && proc.config === null) {
-      // A Caddy run with no --config holds a config devsite cannot see; a reload of Homebrew's default Caddyfile would replace it.
-      why = `Caddy runs (pid ${proc.pid}) with no --config`;
-    }
-    if (why !== null) return { kind: "unknown", why };
+  if (set.config === undefined && !homebrew) {
+    const why =
+      proc !== null
+        ? `Caddy runs from ${proc.binary}, which is not Homebrew's Caddy`
+        : "Homebrew is not on this Mac";
+    return { kind: "unknown", why };
   }
 
-  const config = set.config ?? proc?.config ?? join(prefix as string, "etc", "Caddyfile");
+  const apiOnly = set.config === undefined && proc !== null && proc.config === null;
+  let file: ConfigFile = { configKind: "api", config: null };
+  if (!apiOnly) {
+    const config = set.config ?? proc?.config ?? join(prefix as string, "etc", "Caddyfile");
+    const adapter = set.config === undefined ? (proc?.adapter ?? null) : null;
+    file = { configKind: isCaddyfile(config, adapter) ? "caddyfile" : "json", config };
+  }
   const configSource =
     set.config !== undefined
       ? "the caddy.config setting"
-      : proc !== null
-        ? "the running Caddy's --config"
-        : "Homebrew's default";
+      : proc === null
+        ? "Homebrew's default"
+        : apiOnly
+          ? `Caddy runs (pid ${proc.pid}) with no --config, so its config came through the admin API`
+          : "the running Caddy's --config";
 
   const service = homebrew && proc !== null ? brewService(ctx) : null;
   let manager: string | null = null;
@@ -132,15 +140,26 @@ export function findCaddy(settings: Settings, ctx: CliContext): CaddyInstall {
     kind: homebrew ? "homebrew" : "other",
     prefix: homebrew ? prefix : null,
     installed: proc !== null || formula !== null || !homebrew,
-    config,
+    ...file,
     configSource,
-    devsiteDir: join(dirname(config), "devsite.d"),
+    devsiteDir: join(
+      file.config === null ? join(prefix as string, "etc") : dirname(file.config),
+      "devsite.d",
+    ),
     log,
     running: proc,
     manager,
     user,
     userSource,
   };
+}
+
+// Caddy's own rule (cmd/main.go, isCaddyfile): the caddyfile adapter by flag, or with no adapter a file named Caddyfile* or *.caddyfile; any other file loads as JSON.
+function isCaddyfile(config: string, adapter: string | null): boolean {
+  if (adapter !== null) return adapter === "caddyfile";
+  const base = basename(config).toLowerCase();
+  if (base.endsWith(".json")) return false;
+  return base.startsWith("caddyfile") || base.endsWith(".caddyfile");
 }
 
 export function unknownFix(ctx: CliContext): string {

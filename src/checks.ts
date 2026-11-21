@@ -1,13 +1,14 @@
 // The checks of this Mac's Caddy that init and doctor share: doctor prints them, init plans a fix for each red one that carries a repair.
 import { X509Certificate } from "node:crypto";
-import { existsSync, globSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, globSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CliContext } from "./context";
 import { startsWithGuard } from "./guard.mjs";
 import { describeKind, type KnownInstall } from "./install";
 import { BOLD, DIM, exec, GREEN, type Paint, RED } from "./io";
 import { HOSTNAME_RE } from "./names.mjs";
+import { caRootFile, type Storage } from "./storage";
 import { adminBase, caddy, findHostRoute } from "./vite.mjs";
 
 export const INIT = "bunx devsite init";
@@ -22,25 +23,6 @@ export type Result =
 
 type CaddyRoute = { match?: { host?: string[] }[]; handle?: unknown[] };
 type Servers = Record<string, { routes?: CaddyRoute[] }>;
-
-// root is null for a storage kind other than file_system, whose CA devsite cannot read yet (#72).
-export type Storage = { root: string | null; source: string };
-
-// The storage Caddy uses: the Caddyfile's `storage` line, else Caddy's default data dir on macOS.
-export function storageOf(caddyfile: string): Storage {
-  const text = existsSync(caddyfile) ? readFileSync(caddyfile, "utf8") : "";
-  const source = "the Caddyfile's storage line";
-  const block = text.match(/^\s*storage\s+file_system\s*\{[^}]*?^\s*root\s+"?([^"\n]+?)"?\s*$/m);
-  const line = text.match(/^\s*storage\s+file_system\s+"?([^"{\s][^"\n]*?)"?\s*$/m);
-  const root = block?.[1] ?? line?.[1];
-  if (root !== undefined) return { root, source };
-  const kind = text.match(/^\s*storage\s+(\S+)/m)?.[1];
-  if (kind !== undefined) return { root: null, source: `${source}, storage ${kind}` };
-  return {
-    root: join(homedir(), "Library", "Application Support", "Caddy"),
-    source: "Caddy's default",
-  };
-}
 
 // devsite's hosts on this Mac: one `<host>.caddy` file each in devsite.d. A file whose name is not a `.internal` hostname is a snippet, not a host.
 export function machineHosts(devsiteDir: string): string[] {
@@ -140,9 +122,14 @@ function chainsTo(served: X509Certificate[], root: X509Certificate): boolean {
   return last.fingerprint256 === root.fingerprint256 || last.verify(root.publicKey);
 }
 
-function certChecks(host: string | undefined, storage: Storage, ctx: CliContext): Result[] {
-  const chainLabel = "the served certificate chains to the CA in Caddy's storage";
-  const trustLabel = "that CA is trusted in the keychain";
+const chainLabel = "the served certificate chains to the CA in Caddy's storage";
+const trustLabel = "that CA is trusted in the keychain";
+
+async function certChecks(
+  host: string | undefined,
+  storage: Storage,
+  ctx: CliContext,
+): Promise<Result[]> {
   // Caddy makes its CA when it first serves a devsite host, so a Mac with no host or no CA yet still needs the trust step.
   if (host === undefined) {
     const detail = "no devsite host on this Mac yet";
@@ -151,14 +138,28 @@ function certChecks(host: string | undefined, storage: Storage, ctx: CliContext)
       { state: "skipped", label: trustLabel, detail, repair: "trust" },
     ];
   }
-  if (storage.root === null) {
-    const detail = "devsite reads only file_system storage yet";
+  // doctor writes nothing that outlives the run, so the admin API's root goes to a temp file the check deletes.
+  const temp = join(tmpdir(), `devsite-caddy-root-${process.pid}.crt`);
+  try {
+    return await certChecksOf(host, await caRootFile(storage, temp), storage, ctx);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+async function certChecksOf(
+  host: string,
+  rootCrt: string | null,
+  storage: Storage,
+  ctx: CliContext,
+): Promise<Result[]> {
+  if (rootCrt === null) {
+    const detail = `devsite cannot read ${storage.source}, and Caddy's admin API gives no CA`;
     return [
       { state: "skipped", label: chainLabel, detail },
       { state: "skipped", label: trustLabel, detail },
     ];
   }
-  const rootCrt = join(storage.root, "pki", "authorities", "local", "root.crt");
   if (!existsSync(rootCrt)) {
     return [
       { state: "red", label: chainLabel, detail: `no CA at ${rootCrt}`, fix: INIT, repair: "load" },
@@ -200,10 +201,11 @@ function certChecks(host: string | undefined, storage: Storage, ctx: CliContext)
   }
   // verify-cert reads the keychain's trust settings and needs no sudo: exit 0 means trusted.
   const trusted = exec("security", ["verify-cert", "-c", rootCrt, "-p", "ssl"], ctx, true);
+  const where = storage.root === null ? "the CA Caddy's admin API gives" : rootCrt;
   results.push(
     trusted.status === 0
-      ? { state: "green", label: trustLabel, detail: rootCrt }
-      : { state: "red", label: trustLabel, detail: rootCrt, fix: INIT, repair: "trust" },
+      ? { state: "green", label: trustLabel, detail: where }
+      : { state: "red", label: trustLabel, detail: where, fix: INIT, repair: "trust" },
   );
   return results;
 }
@@ -216,7 +218,7 @@ function adminDown(install: KnownInstall, why: string): Result {
       state: "red",
       label,
       detail: `${why} at ${adminBase()}, but Caddy runs (pid ${install.running.pid})`,
-      fix: `make Caddy's admin API listen on ${adminBase()}: the admin option in ${install.config}`,
+      fix: `make Caddy's admin API listen on ${adminBase()}: the admin option in ${install.config ?? "Caddy's config"}`,
     };
   }
   if (install.kind !== "homebrew") {
@@ -261,7 +263,7 @@ export async function caddyChecks(
       });
     }
   }
-  results.push(...certChecks(hosts[0], storage, ctx));
+  results.push(...(await certChecks(hosts[0], storage, ctx)));
   return results;
 }
 
