@@ -49,6 +49,7 @@ function runner(a: Answers = {}) {
     }
     if (c.cmd === "openssl") return { stdout: pki.served };
     if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
+    if (c.cmd === "caddy" && c.args[0] === "adapt") return { stdout: "{}" };
     return {};
   });
 }
@@ -186,7 +187,7 @@ test("a root Caddy: write, reload, and trust run in exactly one sudo call", asyn
   );
   // The files go into place only through sudo.
   expect(readFileSync(hostFile, "utf8")).toBe("# web\nold {\n}\n");
-  expect(r.ran.filter((c) => c.startsWith("caddy "))).toEqual([]);
+  expect(r.ran.filter((c) => c.startsWith("caddy ") && !c.startsWith("caddy adapt "))).toEqual([]);
   expect(r.status).toBe(0);
 });
 
@@ -290,7 +291,8 @@ test("caddy.user root over a Caddy that runs as the user: init writes and reload
 });
 
 test("caddy.reload manual: init writes the files, does not reload, and prints the reload command", async () => {
-  await mockAdmin([placeholder()]);
+  const runtime = { match: [{ host: ["api.example.internal"] }], handle: [], terminal: true };
+  await mockAdmin([placeholder(), runtime]);
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, hostFile: "# web\nold {\n}\n" });
   const r = await devsite(["init"], {
     caddyfile: m.caddyfile,
@@ -302,8 +304,11 @@ test("caddy.reload manual: init writes the files, does not reload, and prints th
   expect(r.stdout).toContain(
     "caddy.reload is manual in your devsite settings, so init does not reload it",
   );
+  expect(r.stdout).toContain(
+    "drops the route for api.example.internal, added at runtime by another tool",
+  );
   expect(r.stdout).toContain(`\n  caddy reload --config ${m.caddyfile} --adapter caddyfile\n`);
-  expect(r.ran.filter((c) => c.startsWith("caddy"))).toEqual([]);
+  expect(r.ran.filter((c) => c.startsWith("caddy ") && !c.startsWith("caddy adapt "))).toEqual([]);
   expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(
     `${HOST}, web.test.localhost {`,
   );
