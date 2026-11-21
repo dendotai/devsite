@@ -28,9 +28,11 @@ import { basename, dirname, join, relative } from "node:path";
 import { caddyChecks, printSection, type Result, storageOf } from "../checks";
 import { type CliContext, processContext } from "../context";
 import { guardCaddyfileLines } from "../guard.mjs";
+import { findCaddy, type KnownInstall, unknownFix } from "../install";
 import { BOLD, CYAN, DIM, exec, GREEN, type Paint, painter, RED, YELLOW } from "../io";
 import { devSiteName, hostsOf } from "../names.mjs";
-import { caddy } from "../vite.mjs";
+import { readSettings, type Settings } from "../settings";
+import { adminBase, caddy } from "../vite.mjs";
 
 // Shorter than the 7-day intermediate, as Caddy's docs require (168h made each leaf end at the same second as its intermediate); 120h still outlasts a weekend with the Mac asleep.
 const LEAF_LIFETIME = "120h";
@@ -42,17 +44,12 @@ const IMPORT_RE = /^import devsite\.d\/\*\.caddy(?:[ \t]+#.*)?$/m;
 // Where the pinned PKI storage lives; derived from the *human's* home once per run.
 type Pki = { storageRoot: string; caRootCert: string };
 
-// DEVSITE_CADDYFILE points tests at a scratch file.
-export function caddyfileOf(ctx: CliContext): string {
-  return ctx.env.DEVSITE_CADDYFILE ?? "/opt/homebrew/etc/Caddyfile";
-}
-
 const SUDO_NOTE = {
   init: "it calls sudo itself for the steps that need it",
   doctor: "it never needs sudo",
 };
 
-// init: Caddy runs as the user who runs init (ADR 0002): as root, `brew services` would install a root service and every write would be root-owned.
+// init: as root, `brew services` would install a root service for a Caddy that runs as the user by default (ADR 0002), and every write would be root-owned; a root Caddy the user chose gets sudo for its own steps.
 // doctor writes nothing, but as root it checks the wrong user: `security verify-cert` reads the trust settings of the user who runs it, and with no `storage` line the storage path comes from root's home. A script that runs doctor under sudo gets exit 1, not a gate on the wrong keychain.
 export function refuseRoot(command: keyof typeof SUDO_NOTE, ctx: CliContext): boolean {
   // Overridable so tests can exercise the root path without actually being root.
@@ -60,7 +57,7 @@ export function refuseRoot(command: keyof typeof SUDO_NOTE, ctx: CliContext): bo
   const uid = ctx.env.DEVSITE_UID ? Number(ctx.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
   if (uid !== 0) return false;
   ctx.stderr.write(
-    `devsite ${command} is running as root, but Caddy must run as you.\n` +
+    `devsite ${command} is running as root.\n` +
       `Run it as yourself, without sudo — ${SUDO_NOTE[command]}:\n` +
       `  bunx devsite ${command}\n`,
   );
@@ -219,65 +216,127 @@ function paintDiff(diff: string, paint: Paint): string {
     .join("\n");
 }
 
-// A root step's command joins the run's one sudo call.
+// A root step's commands join the run's one sudo call. A step handed to the user is a command init prints after the run instead of running it, because a setting handed that change to the user.
 type Step = { text: string; details?: string[] } & (
-  | { run: () => Promise<void>; root?: never }
-  | { root: string[]; run?: never }
+  | { run: () => Promise<void>; root?: never; handedToUser?: never }
+  | { root: string[][]; run?: never; handedToUser?: never }
+  | { handedToUser: string[]; run?: never; root?: never }
 );
 
 type StepPlan = {
   changes: Change[];
-  caddyfilePath: string;
-  devsiteDir: string;
+  install: KnownInstall;
+  settings: Settings;
   removedBinds: string[];
   checks: Result[];
 };
 
-// The steps in the order they run: the user's steps, then the root steps (one sudo call, so it runs back to back after the plan's y).
+// Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
+function rootWriteCommands(changes: Change[], caddyfilePath: string, devsiteDir: string) {
+  const commands: string[][] = [];
+  if (changes.some((c) => c.abs === caddyfilePath) && existsSync(caddyfilePath)) {
+    if (!existsSync(`${caddyfilePath}.pre-devsite`)) {
+      commands.push(["cp", caddyfilePath, `${caddyfilePath}.pre-devsite`]);
+    }
+    commands.push(["cp", caddyfilePath, `${caddyfilePath}.bak`]);
+  }
+  if (changes.some((c) => c.next !== null && c.abs !== caddyfilePath)) {
+    commands.push(["mkdir", "-p", devsiteDir]);
+  }
+  for (const c of changes) {
+    commands.push(c.next === null ? ["rm", "-f", c.abs] : ["cp", writeTmp(c.next), c.abs]);
+  }
+  return commands;
+}
+
+// Inside the one sudo call init cannot wait in-process, so the shell waits for the admin API the way waitForCaddyAdmin does: any HTTP answer means the listener is up.
+function waitForAdminCommand(): string[] {
+  const tries = ADMIN_WAIT_MS / 100;
+  return [
+    "sh",
+    "-c",
+    `i=0; until curl -so /dev/null ${adminBase()}/config/; do i=$((i+1)); [ $i -ge ${tries} ] && exit 1; sleep 0.1; done`,
+  ];
+}
+
+// The steps in the order they run: the user's steps, then the root steps (one sudo call, so it runs back to back after the plan's y), then the steps a setting hands to the user.
 function planSteps(p: StepPlan, ctx: CliContext): Step[] {
+  const { install } = p;
+  const caddyfilePath = install.config;
+  const asRoot = install.user === "root";
   const repairs = new Set(
     p.checks.flatMap((r) => (r.state !== "green" && r.repair ? [r.repair] : [])),
   );
   const steps: Step[] = [];
-  if (p.changes.length > 0) {
+  if (repairs.has("install")) {
     steps.push({
-      text: `write ${p.changes.length} file(s) in ${dirname(p.caddyfilePath)}, as the diff below shows`,
-      details: p.removedBinds.map(
-        (b) =>
-          `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out`,
-      ),
-      run: async () => applyChanges(p.changes, p.caddyfilePath, p.devsiteDir),
+      text: "install Caddy with Homebrew",
+      run: async () => runInTerminal("brew", ["install", "caddy"], ctx),
     });
   }
+  if (p.changes.length > 0) {
+    const text = `write ${p.changes.length} file(s) in ${dirname(caddyfilePath)}, as the diff below shows`;
+    const details = p.removedBinds.map(
+      (b) =>
+        `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out`,
+    );
+    steps.push(
+      asRoot
+        ? { text, details, root: rootWriteCommands(p.changes, caddyfilePath, install.devsiteDir) }
+        : {
+            text,
+            details,
+            run: async () => applyChanges(p.changes, caddyfilePath, install.devsiteDir),
+          },
+    );
+  }
+  const reload = ["caddy", "reload", "--config", caddyfilePath, "--adapter", "caddyfile"];
   if (repairs.has("start")) {
-    // Caddy serves nothing while its admin API is down, so the restart drops no live route; the new process reads the files written above.
-    steps.push({
-      text: "start Caddy as you",
-      run: async () => {
-        runInTerminal("brew", ["services", "restart", "caddy"], ctx);
-        if (!(await waitForCaddyAdmin())) {
-          throw new Error(
-            `the Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s — see ${CADDY_LOG}`,
-          );
-        }
-      },
-    });
+    // Caddy serves nothing while its admin API is down, so the start drops no live route; the new process reads the files written above.
+    steps.push(
+      asRoot
+        ? {
+            text: "start Caddy as root",
+            root: [["brew", "services", "start", "caddy"], waitForAdminCommand()],
+          }
+        : {
+            text: "start Caddy as you",
+            run: async () => {
+              runInTerminal("brew", ["services", "start", "caddy"], ctx);
+              if (!(await waitForCaddyAdmin())) {
+                // `brew services start` does nothing for a service launchd still has loaded after Caddy crashed.
+                throw new Error(
+                  `the Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s — see ${install.log ?? "Caddy's log"}.\n` +
+                    "If `brew services start caddy` said the service is already started, Caddy crashed while loaded; run `brew services restart caddy`, then `bunx devsite init` again",
+                );
+              }
+            },
+          },
+    );
   } else if (p.changes.length > 0 || repairs.has("load")) {
     // `caddy reload` adapts the Caddyfile and posts it to the running Caddy's admin API, whatever service manager runs Caddy.
-    steps.push({
-      text: "load the Caddy config through Caddy's admin API",
-      run: async () =>
-        runInTerminal(
-          "caddy",
-          ["reload", "--config", p.caddyfilePath, "--adapter", "caddyfile"],
-          ctx,
-        ),
-    });
+    const text = "load the Caddy config through Caddy's admin API";
+    if (p.settings.caddy.reload === "manual") {
+      steps.push({
+        text: "reload Caddy yourself, so it reads the files written above",
+        details: ["caddy.reload is manual in your devsite settings, so init does not reload it"],
+        handedToUser: reload,
+      });
+    } else if (asRoot) {
+      steps.push({ text, root: [reload] });
+    } else {
+      steps.push({
+        text,
+        run: async () => runInTerminal("caddy", reload.slice(1), ctx),
+      });
+    }
   }
   // Caddy's own auto-trust needs an interactive prompt it cannot get as a background service, so init runs `caddy trust`; it reads the CA from the admin API, which the steps above leave answering.
-  if (repairs.has("trust"))
-    steps.push({ text: "trust Caddy's local CA", root: ["caddy", "trust"] });
-  return steps;
+  if (repairs.has("trust")) {
+    steps.push({ text: "trust Caddy's local CA", root: [["caddy", "trust"]] });
+  }
+  const rank = (s: Step) => (s.run ? 0 : s.root ? 1 : 2);
+  return steps.sort((a, b) => rank(a) - rank(b));
 }
 
 function stepLine(step: Step, i: number, total: number, paint: Paint): string {
@@ -300,14 +359,23 @@ async function runSteps(steps: Step[], paint: Paint, ctx: CliContext) {
     await s.run();
   }
   const root = steps.flatMap((s, i) => (s.root ? [{ s, i, root: s.root }] : []));
-  if (root.length === 0) return;
-  ctx.stdout.write("\n");
-  for (const r of root)
-    ctx.stdout.write(`${stepLine(r.s, r.i, steps.length, paint)}\n  sudo ${r.root.join(" ")}\n`);
-  sudoAll(
-    root.map((r) => r.root),
-    ctx,
-  );
+  if (root.length > 0) {
+    ctx.stdout.write("\n");
+    for (const r of root) {
+      ctx.stdout.write(`${stepLine(r.s, r.i, steps.length, paint)}\n`);
+      for (const c of r.root) ctx.stdout.write(`  sudo ${c.map(shellQuote).join(" ")}\n`);
+    }
+    sudoAll(
+      root.flatMap((r) => r.root),
+      ctx,
+    );
+  }
+  for (const [i, s] of steps.entries()) {
+    if (s.handedToUser === undefined) continue;
+    ctx.stdout.write(
+      `\n${stepLine(s, i, steps.length, paint)}\n  ${s.handedToUser.map(shellQuote).join(" ")}\n`,
+    );
+  }
 }
 
 function applyChanges(changes: Change[], caddyfilePath: string, devsiteDir: string) {
@@ -328,7 +396,6 @@ function applyChanges(changes: Change[], caddyfilePath: string, devsiteDir: stri
 }
 
 const ADMIN_WAIT_MS = 5000;
-const CADDY_LOG = "/opt/homebrew/var/log/caddy.log";
 
 // Starting the service returns before the new Caddy listens; `caddy trust` and the checks after the run both need its admin API. Any HTTP answer means the listener is up.
 export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<boolean> {
@@ -439,6 +506,12 @@ function planCaddyfile(existing: string, pki: Pki): CaddyfilePlan {
   return { next: `${trimmed}\n`, globalWarning, removedBinds };
 }
 
+// The run can install and start Caddy, so the checks after it read the install again.
+function installAfter(settings: Settings, before: KnownInstall, ctx: CliContext): KnownInstall {
+  const after = findCaddy(settings, ctx);
+  return after.kind === "unknown" ? before : after;
+}
+
 // No argv knowledge here — run.ts parses flags and passes options plus the io context. Fatal conditions return 1 (after explaining themselves); unexpected errors throw and run.ts turns them into an exit code.
 export async function init(
   { dryRun }: { dryRun: boolean },
@@ -446,9 +519,6 @@ export async function init(
 ): Promise<number> {
   // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the repo root.
   const cwd = ctx.cwd;
-  const caddyfilePath = caddyfileOf(ctx);
-  const caddyDir = dirname(caddyfilePath);
-  const devsiteDir = join(caddyDir, "devsite.d");
   if (refuseRoot("init", ctx)) return 1;
   const storageRoot = join(homedir(), "Library", "Application Support", "Caddy");
   const pki: Pki = {
@@ -466,6 +536,24 @@ export async function init(
     return 1;
   }
   const ownProjects = new Set(routes.map((r) => r.project));
+
+  const read = readSettings(ctx);
+  if (!read.ok) {
+    ctx.stderr.write(`${read.error}\n`);
+    return 1;
+  }
+  const settings = read.settings;
+  const install = findCaddy(settings, ctx);
+  if (install.kind === "unknown") {
+    ctx.stderr.write(
+      `devsite does not know this Mac's Caddy install: ${install.why}.\n` +
+        `To use it anyway, ${unknownFix(ctx)}.\n`,
+    );
+    return 1;
+  }
+  const caddyfilePath = install.config;
+  const caddyDir = dirname(caddyfilePath);
+  const devsiteDir = install.devsiteDir;
 
   const existing = existsSync(caddyfilePath) ? readFileSync(caddyfilePath, "utf8") : "";
   const plan = planCaddyfile(existing, pki);
@@ -515,10 +603,10 @@ export async function init(
     );
   }
 
-  const checks = await caddyChecks(caddyfilePath, storageOf(caddyfilePath), ctx);
+  const checks = await caddyChecks(install, storageOf(caddyfilePath), ctx);
   printSection("Checks", checks, paint, ctx);
   const steps = planSteps(
-    { changes, caddyfilePath, devsiteDir, removedBinds: plan.removedBinds, checks },
+    { changes, install, settings, removedBinds: plan.removedBinds, checks },
     ctx,
   );
 
@@ -563,7 +651,7 @@ export async function init(
   await runSteps(steps, paint, ctx);
   printSection(
     "Checks after this run",
-    await caddyChecks(caddyfilePath, storageOf(caddyfilePath), ctx),
+    await caddyChecks(installAfter(settings, install, ctx), storageOf(caddyfilePath), ctx),
     paint,
     ctx,
   );

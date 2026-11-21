@@ -18,7 +18,10 @@ export type CliContext = {
   // The named keys are the full set of env vars the CLI reads; the index signature is what lets process.env (and test env objects) assign.
   env: {
     DEVSITE_UID?: string;
-    DEVSITE_CADDYFILE?: string;
+    DEVSITE_CADDY_PREFIX?: string;
+    DEVSITE_STATE_DIR?: string;
+    XDG_CONFIG_HOME?: string;
+    XDG_STATE_HOME?: string;
     [key: string]: string | undefined;
   };
   // Every external command the CLI runs goes through here, so a test scripts each answer and reads which commands ran.
