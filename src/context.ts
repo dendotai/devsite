@@ -21,6 +21,7 @@ export type CliContext = {
     DEVSITE_BREW_PREFIX?: string;
     DEVSITE_STATE_DIR?: string;
     DEVSITE_SYSTEM_ROOT?: string;
+    DEVSITE_SPLIT_DNS_WAIT_MS?: string;
     XDG_CONFIG_HOME?: string;
     XDG_STATE_HOME?: string;
     [key: string]: string | undefined;

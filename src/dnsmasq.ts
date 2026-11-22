@@ -6,14 +6,11 @@ import type { CliContext } from "./context";
 import { brewPrefix } from "./install";
 import { exec } from "./io";
 import { type Settings, settingsPath } from "./settings";
+import { type TailscaleIp, tailscaleIp } from "./tailscale";
 
 const LABEL = "ai.den.devsite.dnsmasq";
-const TAILSCALE_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 // Any name answers: devsite's config answers every `.internal` name.
 const PROBE_NAME = "devsite-check.internal";
-const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
-
-export type TailscaleIp = { state: "absent" } | { state: "no-ip" } | { state: "ip"; ip: string };
 
 type DnsFile = { abs: string; current: string | null; next: string };
 
@@ -29,21 +26,6 @@ export type Dnsmasq = {
   // The listen address of devsite's config on disk, when it names another IP.
   staleIp: string | null;
 };
-
-// The Mac App Store and standalone Tailscale apps put no `tailscale` on PATH; their CLI sits inside the app.
-function tailscaleIp(ctx: CliContext): TailscaleIp {
-  let r = exec("tailscale", ["ip", "-4"], ctx, true);
-  if (r.error) r = exec(TAILSCALE_APP_CLI, ["ip", "-4"], ctx, true);
-  if (r.error) return { state: "absent" };
-  const ip =
-    r.status === 0
-      ? r.out
-          .split("\n")
-          .map((l) => l.trim())
-          .find((l) => IPV4.test(l))
-      : undefined;
-  return ip === undefined ? { state: "no-ip" } : { state: "ip", ip };
-}
 
 // DEVSITE_SYSTEM_ROOT points the root-owned paths at a scratch dir in tests.
 function systemPath(ctx: CliContext, ...parts: string[]): string {

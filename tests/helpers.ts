@@ -21,9 +21,11 @@ export function sink() {
   };
 }
 
-// A stdin pre-loaded with `input`, posing as a TTY (or not) — what the interactive confirm flow reads.
-export function fakeStdin(input: string, isTTY: boolean) {
-  const s = Readable.from([input]) as Readable & { isTTY?: boolean };
+// A stdin pre-loaded with `input`, posing as a TTY (or not) — what the interactive confirm flow reads. Each string of an array is one key press, read by one prompt.
+export function fakeStdin(input: string | string[], isTTY: boolean) {
+  const s = Readable.from(typeof input === "string" ? [input] : input) as Readable & {
+    isTTY?: boolean;
+  };
   s.isTTY = isTTY;
   return s;
 }

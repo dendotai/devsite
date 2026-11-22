@@ -25,6 +25,10 @@ type Net = {
   digAfter?: string | null;
   mac?: string | null;
   loaded?: boolean;
+  // The nameservers of the split DNS route for internal (default: this Mac's IP), or null when `tailscale dns status` fails; routeAfterOpen: the nameservers once init has run `open` for the admin console. devices: what `tailscale status` lists.
+  route?: string[] | null;
+  routeAfterOpen?: string[];
+  devices?: string;
 };
 
 type Mac = {
@@ -73,8 +77,24 @@ async function setUp(
   };
 }
 
+// `tailscale dns status` with one `internal` line per nameserver.
+function dnsStatus(...nameservers: string[]): string {
+  return [
+    "=== MagicDNS configuration ===",
+    "",
+    "Split DNS Routes:",
+    ...nameservers.map((n) => `  - internal                       -> ${n}`),
+    "  - ts.net.                        -> 199.247.155.53",
+    "",
+    "Search Domains:",
+    "  - example.ts.net",
+    "",
+  ].join("\n");
+}
+
 function runner(net: Net) {
   let sudoRan = false;
+  let opened = false;
   return scriptedRunner((c: CommandCall) => {
     if (c.cmd === "diff") return processRunner(c.cmd, c.args, { capture: c.capture });
     if (c.cmd === "openssl") return { stdout: pki.served };
@@ -83,6 +103,12 @@ function runner(net: Net) {
     if (c.cmd === "tailscale" || c.cmd === "/Applications/Tailscale.app/Contents/MacOS/Tailscale") {
       if (net.tailscale === "absent") return MISSING;
       if (net.tailscale === "no-ip") return { status: 1 };
+      if (c.args[0] === "status") return { stdout: net.devices ?? "" };
+      if (c.args[0] === "dns") {
+        const route = opened && net.routeAfterOpen ? net.routeAfterOpen : net.route;
+        if (route === null) return { status: 1 };
+        return { stdout: dnsStatus(...(route ?? [net.tailscale])) };
+      }
       return { stdout: `${net.tailscale}\n` };
     }
     if (c.cmd === "dig") {
@@ -105,6 +131,7 @@ function runner(net: Net) {
     }
     if (c.cmd === "launchctl") return { status: net.loaded ? 0 : 113 };
     if (c.cmd === "sudo") sudoRan = true;
+    if (c.cmd === "open") opened = true;
     return {};
   });
 }
@@ -114,7 +141,7 @@ async function devsite(
   argv: string[],
   m: Mac,
   net: Net,
-  opts: { noBrew?: boolean; settings?: object } = {},
+  opts: { noBrew?: boolean; settings?: object; keys?: string[]; tty?: boolean } = {},
 ) {
   const { runCommand, calls } = runner(net);
   const configHome = mkdtempSync(join(tmpdir(), "devsite-config-"));
@@ -127,9 +154,10 @@ async function devsite(
     cwd: makeRepo(),
     caddyfile: m.caddyfile,
     runCommand,
-    stdin: fakeStdin("y", true),
+    stdin: fakeStdin(opts.keys ?? "y", opts.tty ?? true),
     env: {
       DEVSITE_SYSTEM_ROOT: m.systemRoot,
+      DEVSITE_SPLIT_DNS_WAIT_MS: "0",
       ...(opts.noBrew ? { DEVSITE_BREW_PREFIX: "" } : {}),
     },
   });
@@ -170,7 +198,14 @@ test("Tailscale gives no IP: the dnsmasq check is skipped, and init installs not
   expect(d.stdout).toContain(
     "– dnsmasq answers .internal on the Tailscale IP — Tailscale gives no IP: it is stopped or logged out",
   );
-  expect(d.status).toBe(0);
+  expect(d.stdout).toContain(
+    "✗ Tailscale is up — Tailscale gives no IP: it is stopped or logged out",
+  );
+  expect(d.stdout).toContain("fix: start Tailscale and log in");
+  expect(d.stdout).toContain(
+    "– the Tailscale split DNS route for internal points to this Mac — Tailscale is down",
+  );
+  expect(d.status).toBe(1);
   const i = await devsite(["init"], m, { tailscale: "no-ip" });
   expect(i.stdout).toContain("Nothing to do: init changed nothing.");
   expect(i.sudo).toEqual([]);
@@ -259,6 +294,11 @@ test("a set-up Mac: doctor is green, and init asks nothing and runs no sudo", as
   expect(d.stdout).toContain(`dnsmasq: devsite's config ${m.conf}, listens on ${IP}`);
   expect(d.stdout).toContain(`✓ dnsmasq answers .internal with ${IP} on ${IP}`);
   expect(d.stdout).toContain(`✓ this Mac resolves .internal to ${IP}`);
+  expect(d.stdout).toContain(`✓ Tailscale is up, with IP ${IP}`);
+  expect(d.stdout).toContain(
+    `✓ the Tailscale split DNS route for internal points to this Mac (${IP})`,
+  );
+  expect(d.ran).toContain("tailscale dns status");
   expect(d.stdout).toContain("Every check is green.");
   expect(d.status).toBe(0);
 
@@ -441,4 +481,139 @@ test("a settings file with a dnsmasq.run devsite cannot use, or an unknown secti
     'unknown section "dns" (known: caddy.config, caddy.user, caddy.reload, dnsmasq.run)',
   );
   expect(unknown.status).toBe(1);
+});
+
+// --- the split DNS route (#76) ---
+
+const OTHER_IP = "100.90.7.7";
+const ADMIN = "https://login.tailscale.com/admin/dns";
+const SET_UP: Net = { tailscale: IP, dig: IP, mac: IP, loaded: true };
+
+test("no split DNS route: the plan names the manual step with its values, and --dry-run asks nothing", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const r = await devsite(["init", "--dry-run"], m, { ...SET_UP, route: [] });
+  expect(r.stdout).toContain(
+    "✗ the Tailscale split DNS route for internal points to this Mac (100.90.1.2) — no route",
+  );
+  expect(r.stdout).toContain(
+    "Step 1 of 1: add the split DNS route for internal in the Tailscale admin console, so the phone finds .internal names  [manual]",
+  );
+  expect(r.stdout).toContain(`nameserver: ${IP}`);
+  expect(r.stdout).toContain("restrict to domain: internal");
+  expect(r.ran).not.toContain(`open ${ADMIN}`);
+  expect(r.status).toBe(0);
+});
+
+test("the route added after the prompt: init opens the admin console, checks the route, and goes green, with no Apply prompt", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const r = await devsite(
+    ["init"],
+    m,
+    { ...SET_UP, route: [], routeAfterOpen: [IP] },
+    {
+      keys: ["y", "y"],
+    },
+  );
+  expect(r.stdout).not.toContain("Apply these changes?");
+  expect(r.stdout).toContain(`Open ${ADMIN} in your browser? (y/n) y`);
+  expect(r.ran).toContain(`open ${ADMIN}`);
+  expect(r.stdout).toContain("Done? Press y to check, n to skip y");
+  expect(r.stdout).toContain("The split DNS route for internal points to this Mac.");
+  expect(r.stdout).toContain(
+    `✓ the Tailscale split DNS route for internal points to this Mac (${IP})`,
+  );
+  expect(r.sudo).toEqual([]);
+  expect(r.status).toBe(0);
+});
+
+test("a failed check asks again, and a skip leaves init exit 0 and doctor exit 1", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const net: Net = { ...SET_UP, route: [] };
+  const r = await devsite(["init"], m, net, { keys: ["n", "y", "n"] });
+  expect(r.ran).not.toContain(`open ${ADMIN}`);
+  expect(r.stdout).toContain("Not yet: `tailscale dns status` shows no route.");
+  expect(r.stdout.match(/Done\? Press y to check, n to skip/g)).toHaveLength(2);
+  expect(r.stdout).toContain(
+    `Skipped: \`bunx devsite doctor\` stays red until the route for internal points to ${IP}.`,
+  );
+  expect(r.status).toBe(0);
+
+  const d = await devsite(["doctor"], m, net);
+  expect(d.stdout).toContain(
+    `fix: in the Tailscale admin console (${ADMIN}), add a split DNS nameserver: domain internal, nameserver ${IP}`,
+  );
+  expect(d.status).toBe(1);
+});
+
+test("Ctrl-C at the open prompt skips the step", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const r = await devsite(["init"], m, { ...SET_UP, route: [] }, { keys: ["\x03"] });
+  expect(r.stdout).toContain("(y/n) ^C");
+  expect(r.stdout).not.toContain("Done? Press y");
+  expect(r.stdout).toContain("Skipped:");
+  expect(r.status).toBe(0);
+});
+
+test("the route points to another Mac: doctor and init name that Mac, and init offers to change the route", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const net: Net = {
+    ...SET_UP,
+    route: [OTHER_IP],
+    devices: `${IP}  this-mac  dev@  macOS  -\n${OTHER_IP}  other-mac  dev@  macOS  -\n`,
+  };
+  const d = await devsite(["doctor"], m, net);
+  expect(d.stdout).toContain(
+    `✗ the Tailscale split DNS route for internal points to this Mac (${IP}) — it points to ${OTHER_IP}, the Tailscale IP of other-mac`,
+  );
+  expect(d.stdout).toContain(
+    `fix: the phone opens one Mac's projects per tailnet (https://github.com/dendotai/devsite/issues/66): to use this Mac's, change the nameserver for internal to ${IP}`,
+  );
+  expect(d.status).toBe(1);
+
+  const i = await devsite(["init"], m, net, { keys: ["n", "y", "n"] });
+  expect(i.stdout).toContain(
+    "Step 1 of 1: change the split DNS route for internal in the Tailscale admin console",
+  );
+  expect(i.stdout).toContain(
+    `the route now points to ${OTHER_IP}, the Tailscale IP of other-mac: change it to ${IP}, and that device's projects stop opening on the phone`,
+  );
+  expect(i.stdout).toContain(
+    `Not yet: \`tailscale dns status\` shows it points to ${OTHER_IP}, the Tailscale IP of other-mac.`,
+  );
+  expect(i.status).toBe(0);
+});
+
+test("no TTY and only the manual step: init prints the step and exits 0", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const r = await devsite(["init"], m, { ...SET_UP, route: [] }, { tty: false });
+  expect(r.stdout).toContain(`nameserver: ${IP}`);
+  expect(r.stdout).toContain("Run `bunx devsite init` in a terminal to be guided through it.");
+  expect(r.ran).not.toContain(`open ${ADMIN}`);
+  expect(r.status).toBe(0);
+});
+
+test("a fresh install with no route: the manual step runs after the one sudo call", async () => {
+  const m = await setUp();
+  const r = await devsite(
+    ["init"],
+    m,
+    { tailscale: IP, digAfter: IP, route: [] },
+    {
+      keys: ["y", "n", "n"],
+    },
+  );
+  expect(r.stdout).toContain("Step 3 of 3: add the split DNS route for internal");
+  expect(r.sudo).toHaveLength(1);
+  expect(r.stdout.indexOf(`sudo install -d`)).toBeLessThan(r.stdout.indexOf(`Open ${ADMIN}`));
+  expect(r.status).toBe(0);
+});
+
+test("`tailscale dns status` gives no answer: doctor names the Tailscale update", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const d = await devsite(["doctor"], m, { ...SET_UP, route: null });
+  expect(d.stdout).toContain("— `tailscale dns status` gave no answer");
+  expect(d.stdout).toContain(
+    "fix: update Tailscale, so `tailscale dns status` lists the split DNS routes",
+  );
+  expect(d.status).toBe(1);
 });

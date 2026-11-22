@@ -11,6 +11,7 @@ import { BOLD, GREEN, type Paint, painter, RED } from "../io";
 import { readSettings } from "../settings";
 import { portFilePath, resolveStateDir } from "../state.mjs";
 import { findStorage, type Storage } from "../storage";
+import { probeTailscale } from "../tailscale";
 import {
   discoverRoutes,
   OFFLINE_FRAGMENT,
@@ -176,6 +177,11 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   printSection("Caddy", caddyResults, paint, ctx);
 
   const results = [...caddyResults];
+  const tailscale = probeTailscale(dns.tailscale, ctx);
+  if (tailscale.checks.length > 0) {
+    printSection("Tailscale", tailscale.checks, paint, ctx);
+    results.push(...tailscale.checks);
+  }
   if (dns.checks.length > 0) {
     printSection("dnsmasq", dns.checks, paint, ctx);
     results.push(...dns.checks);
