@@ -82,6 +82,7 @@ test("a set-up Mac: every check is green, exit 0, nothing written, no sudo", asy
   );
   expect(r.stdout).toContain(`✓ ${HOST} is used by web only`);
   expect(r.stdout).toContain(`✓ ${HOST}'s host file matches what init writes`);
+  expect(r.stdout).toContain("✓ the offline page file matches what init writes");
   expect(r.stdout).toContain("Every check is green.");
   expect(r.stdout).not.toContain("✗");
   expect(r.status).toBe(0);
@@ -233,6 +234,25 @@ test("the repo's host has no host file: red", async () => {
   await mockAdmin([]);
   const r = await doctor(setUpMachine({ hostFile: null }));
   expect(r.stdout).toContain(`✗ ${HOST}'s host file matches what init writes — no `);
+  expect(r.status).toBe(1);
+});
+
+test("no offline page file: red, because every Caddy reload fails", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ offlineFragment: false });
+  const r = await doctor(m);
+  expect(r.stdout).toContain(
+    `✗ the offline page file matches what init writes — no ${join(m.dir, "devsite.d", "fragments", "offline.caddy")}, so \`caddy reload\` fails`,
+  );
+  expect(r.status).toBe(1);
+});
+
+test("an offline page file that differs from what init writes: red", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine();
+  writeFileSync(join(m.dir, "devsite.d", "fragments", "offline.caddy"), "old\n");
+  const r = await doctor(m);
+  expect(r.stdout).toContain("✗ the offline page file matches what init writes — it differs");
   expect(r.status).toBe(1);
 });
 

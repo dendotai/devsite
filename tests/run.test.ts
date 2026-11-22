@@ -115,6 +115,7 @@ test("init --dry-run runs only ps and tailscale, for the install seams, and one 
     ["ps", "-axo", true],
     ["tailscale", "ip", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/fragments/offline.caddy", "/dev/null", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/guard.caddy", "/dev/null", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/web.test.internal.caddy", "/dev/null", true],
   ]);
