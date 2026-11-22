@@ -190,8 +190,7 @@ export function renderOfflineFragment(page: string = offlinePage as unknown as s
       : `\t\t${line}`
           .replaceAll("__HOST__", "{http.request.host}")
           .replaceAll("__STATUS_CODE__", "{http.error.status_code}")
-          .replaceAll("__PROJECT__", OFFLINE_PROJECT)
-          .replaceAll("__CMD__", "bun dev"),
+          .replaceAll("__PROJECT__", OFFLINE_PROJECT),
   );
   return [
     "# devsite: the offline page every host file imports. init renders it from its assets/offline.html, so an edit here is overwritten.",
@@ -220,7 +219,7 @@ export function renderHostFile(r: Route, portFile: string | null): string {
     portFile === null
       ? [
           "\thandle_errors 502 503 {",
-          `\t\trespond "devsite: dev server for ${r.host} is not running (start it with bun dev)" 503`,
+          `\t\trespond "devsite: dev server for ${r.host} is not running" 503`,
           "\t}",
         ]
       : [`\timport ${OFFLINE_FRAGMENT} "${htmlText(r.project)}"`];

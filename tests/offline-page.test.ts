@@ -15,7 +15,7 @@ import { writeOfflineFragment } from "./machine";
 const PAGE = [
   "<title>__HOST__</title>",
   '<body data-status="__STATUS_CODE__">',
-  "<b>__PROJECT__</b> <code>__CMD__</code>",
+  "<b>__PROJECT__</b>",
   "<style> a { color: red; } </style>",
   "",
   "</body>",
@@ -64,7 +64,7 @@ test("both offline states answer the page as HTML, with the visited host and the
     body: [
       "<title>{http.request.host}</title>",
       '<body data-status="{http.error.status_code}">',
-      "<b>web</b> <code>bun dev</code>",
+      "<b>web</b>",
       "<style> a { color: red; } </style>",
       "",
       "</body>",
@@ -98,7 +98,7 @@ test("the shipped page passes the render checks", () => {
 test("the JSON printed for a Caddy with no Caddyfile answers in one line of text, not the page", () => {
   const file = renderHostFile({ host: "web.test.internal", project: "web" }, null);
   expect(file).toContain(
-    '\t\trespond "devsite: dev server for web.test.internal is not running (start it with bun dev)" 503',
+    '\t\trespond "devsite: dev server for web.test.internal is not running" 503',
   );
   expect(file).not.toContain(OFFLINE_FRAGMENT);
   expect(file).not.toContain("<html");

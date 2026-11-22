@@ -6,7 +6,6 @@
   every run. Substitution tokens (replaced by init, never by Caddy syntax):
     __HOST__         the site host, e.g. myapp.localhost
     __PROJECT__      the project name
-    __CMD__          the command that starts the dev server
     __STATUS_CODE__  502 (connection lost) or 503 (server never started)
 
   Constraint from the renderer: no tight brace pattern that Caddy could read
@@ -114,27 +113,6 @@
     color: var(--dim);
   }
 
-  .cmd {
-    display: flex;
-    gap: 1ch;
-    align-items: baseline;
-    margin: 1.4rem 0 0;
-    padding: 0.85rem 1.1rem;
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--accent);
-    background: rgba(255, 255, 255, 0.02);
-    overflow-x: auto;
-  }
-
-  .cmd .prompt {
-    color: var(--accent);
-    user-select: none;
-  }
-
-  .cmd code {
-    white-space: pre;
-  }
-
   /* variant switch: default shows 502; a 503 status flips both blocks */
   .v503 {
     display: none;
@@ -226,8 +204,6 @@
 
   <section class="v503">
     <h1>dev server for <em>__HOST__</em> is not running</h1>
-    <p>Start it with:</p>
-    <div class="cmd"><span class="prompt">$</span><code>__CMD__</code></div>
   </section>
 
   <section class="v502">
