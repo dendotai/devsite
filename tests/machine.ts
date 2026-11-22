@@ -13,7 +13,12 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { renderGuardFile, renderHostFile } from "../src/commands/init";
+import {
+  OFFLINE_FRAGMENT,
+  renderGuardFile,
+  renderHostFile,
+  renderOfflineFragment,
+} from "../src/commands/init";
 import { guardedRoute } from "../src/guard.mjs";
 import { PORT_PLACEHOLDER, portFilePath, writePortFile } from "../src/state.mjs";
 import { scratchCaddyfile } from "./helpers";
@@ -146,7 +151,7 @@ export type Machine = {
   stateDir: string;
 };
 
-// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web" beside devsite's guard snippet. A fresh state dir holds the host's port file (unless `portFile` is false).
+// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web" beside devsite's guard snippet and offline page file (unless `offlineFragment` is false). A fresh state dir holds the host's port file (unless `portFile` is false).
 export function setUpMachine(
   opts: {
     root?: string | null;
@@ -154,6 +159,7 @@ export function setUpMachine(
     caddyfile?: string;
     installed?: boolean;
     portFile?: boolean;
+    offlineFragment?: boolean;
   } = {},
 ): Machine {
   const caddyfile = scratchCaddyfile();
@@ -185,8 +191,15 @@ export function setUpMachine(
     mkdirSync(join(dir, "devsite.d"));
     writeFileSync(join(dir, "devsite.d", `${HOST}.caddy`), hostFile);
     writeFileSync(join(dir, "devsite.d", "guard.caddy"), renderGuardFile());
+    if (opts.offlineFragment !== false) writeOfflineFragment(join(dir, "devsite.d"));
   }
   return { caddyfile, dir, storage, prefix, stateDir };
+}
+
+// The offline page file in a devsite dir, where init writes it; page stands in for assets/offline.html.
+export function writeOfflineFragment(devsiteDir: string, page?: string) {
+  mkdirSync(join(devsiteDir, dirname(OFFLINE_FRAGMENT)), { recursive: true });
+  writeFileSync(join(devsiteDir, OFFLINE_FRAGMENT), renderOfflineFragment(page));
 }
 
 // The host file init writes for HOST, for the state dir the latest setUpMachine set.

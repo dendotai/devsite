@@ -256,7 +256,7 @@
     }
     function bump() {
       tries += 1;
-      // biome-ignore lint/style/useTemplate: Caddy serves this page through its placeholder replacer, which reads {name} as a placeholder
+      // biome-ignore lint/style/useTemplate: Caddy serves this page through its placeholder replacer, which reads a brace followed by a name as a placeholder
       label.textContent = " · attempt " + tries;
     }
     setInterval(check, 2000);

@@ -100,7 +100,7 @@ test("a fresh Mac with no Caddy: install, write, start Caddy, then the one sudo 
   const r = await init(m.caddyfile, { answers: { onBrew: () => void mockAdmin([placeholder()]) } });
   expect(r.stdout).toContain(`✗ Caddy is installed — Homebrew has no caddy formula at ${m.prefix}`);
   expect(r.stdout).toContain("Step 1 of 4: install Caddy with Homebrew");
-  expect(r.stdout).toContain("Step 2 of 4: write 3 file(s)");
+  expect(r.stdout).toContain("Step 2 of 4: write 4 file(s)");
   expect(r.stdout).toContain("Step 3 of 4: start Caddy as you");
   expect(r.stdout).toContain("Step 4 of 4: trust Caddy's local CA  [sudo]");
   expect(r.acted).toEqual([
@@ -125,7 +125,7 @@ test("init --dry-run prints the numbered plan and the diff, and changes nothing"
   const before = snapshot(m.dir);
   const r = await init(m.caddyfile, { argv: ["init", "--dry-run"] });
   expect(r.stdout).toContain("Plan:");
-  expect(r.stdout).toContain("Step 1 of 3: write 3 file(s)");
+  expect(r.stdout).toContain("Step 1 of 3: write 4 file(s)");
   expect(r.stdout).toContain("Step 3 of 3: trust Caddy's local CA  [sudo]");
   expect(r.stdout).toContain(`+++ devsite.d/${HOST}.caddy`);
   expect(r.stdout).toContain("+\t\t\tlifetime 120h");
@@ -173,6 +173,18 @@ test("a host with no port file: init writes the placeholder as you, before the h
   );
   expect(readFileSync(portFile, "utf8")).toBe("error 503\n");
   expect(r.acted).toEqual([]);
+  expect(r.status).toBe(0);
+});
+
+test("no offline page file: init writes it under devsite.d/fragments and loads the config", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, offlineFragment: false });
+  const r = await init(m.caddyfile);
+  expect(r.stdout).toContain("+++ devsite.d/fragments/offline.caddy");
+  expect(r.ran).toContain(`caddy reload --config ${m.caddyfile} --adapter caddyfile`);
+  expect(readFileSync(join(m.dir, "devsite.d", "fragments", "offline.caddy"), "utf8")).toContain(
+    "handle_errors 502 503 {",
+  );
   expect(r.status).toBe(0);
 });
 

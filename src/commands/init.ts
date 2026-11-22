@@ -26,6 +26,8 @@ import {
 import { BlockList, isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
+// bun-types types every .html import as an HTMLBundle for Bun.serve; the text attribute gives the file's text, which `bun build` inlines into dist, so the package ships no asset file.
+import offlinePage from "../../assets/offline.html" with { type: "text" };
 import {
   type CaddyRoute,
   caddyChecks,
@@ -152,7 +154,61 @@ export function renderGuardFile(): string {
   ].join("\n");
 }
 
-// The handler comes from the host's port file, which the devsite Vite plugin keeps on the live port, so a `caddy reload` keeps a running dev server's route. portFile null inlines the placeholder, for the JSON printed to a Caddy with no Caddyfile. handle_errors answers the placeholder's 503 and a dead dev server's 502. The first line (`# <project>`) is the file's ownership record, read by rename cleanup. Each host file carries its own `issuer internal`, so no global local_certs moves the user's other sites off their real certificates.
+// Outside the `devsite.d/*.caddy` glob (`*` does not cross `/`), so Caddy loads it only through each host file's import, which passes the project as its argument. A named snippet would have to come before every host file in parse order.
+export const OFFLINE_FRAGMENT = "fragments/offline.caddy";
+const OFFLINE_HEREDOC_END = "HTML";
+const OFFLINE_PROJECT = "{args[0]}";
+
+// The page shows these as text, and a `{` in them would be a Caddy placeholder (`{env.X}` prints an env var): every other character becomes an HTML character reference, which also keeps quotes and spaces out of the import argument.
+function htmlText(s: string): string {
+  return s.replace(/[^A-Za-z0-9@/._-]/g, (c) => `&#${c.codePointAt(0)};`);
+}
+
+// handle_errors answers the 503 of the port file's placeholder (a server never started) and the 502 of a dead dev server's route; the page picks its text from {http.error.status_code}. Caddy fills the visited host per request, so one fragment serves both of a host file's names.
+export function renderOfflineFragment(page: string = offlinePage as unknown as string): string {
+  page.split("\n").forEach((line, i) => {
+    const brace = line.match(/\{\S/)?.[0];
+    if (brace !== undefined) {
+      throw new Error(
+        `assets/offline.html line ${i + 1} holds \`${brace}\`, which Caddy reads as a placeholder`,
+      );
+    }
+    if (line.trim() === OFFLINE_HEREDOC_END) {
+      throw new Error(
+        `assets/offline.html line ${i + 1} is \`${OFFLINE_HEREDOC_END}\`, which ends the page early`,
+      );
+    }
+  });
+  // The page's comments are notes for its editor (the token list), not for a visitor.
+  const lines = page
+    .replace(/<!--[\s\S]*?-->\n?/g, "")
+    .replace(/\n$/, "")
+    .split("\n");
+  const body = lines.map((line) =>
+    line === ""
+      ? ""
+      : `\t\t${line}`
+          .replaceAll("__HOST__", "{http.request.host}")
+          .replaceAll("__STATUS_CODE__", "{http.error.status_code}")
+          .replaceAll("__PROJECT__", OFFLINE_PROJECT)
+          .replaceAll("__CMD__", "bun dev"),
+  );
+  return [
+    "# devsite: the offline page every host file imports. init renders it from its assets/offline.html, so an edit here is overwritten.",
+    "handle_errors 502 503 {",
+    "\theader {",
+    '\t\tContent-Type "text/html; charset=utf-8"',
+    "\t\tCache-Control no-store",
+    "\t}",
+    `\trespond <<${OFFLINE_HEREDOC_END}`,
+    ...body,
+    `\t\t${OFFLINE_HEREDOC_END} 503`,
+    "}",
+    "",
+  ].join("\n");
+}
+
+// The handler comes from the host's port file, which the devsite Vite plugin keeps on the live port, so a `caddy reload` keeps a running dev server's route. portFile null inlines the placeholder, for the JSON printed to a Caddy with no Caddyfile; that JSON answers in one line of text, because the page inline makes that printout long (#86 loads the routes with no printout). The first line (`# <project>`) is the file's ownership record, read by rename cleanup. Each host file carries its own `issuer internal`, so no global local_certs moves the user's other sites off their real certificates.
 export function renderHostFile(r: Route, portFile: string | null): string {
   const localhost = r.host.replace(/\.internal$/, ".localhost");
   if (portFile !== null && /["\\\n]/.test(portFile)) {
@@ -160,6 +216,14 @@ export function renderHostFile(r: Route, portFile: string | null): string {
       `devsite's state dir cannot hold a quote, a backslash, or a newline: ${portFile}`,
     );
   }
+  const offline =
+    portFile === null
+      ? [
+          "\thandle_errors 502 503 {",
+          `\t\trespond "devsite: dev server for ${r.host} is not running (start it with bun dev)" 503`,
+          "\t}",
+        ]
+      : [`\timport ${OFFLINE_FRAGMENT} "${htmlText(r.project)}"`];
   return [
     `# ${r.project}`,
     `${r.host}, ${localhost} {`,
@@ -170,9 +234,7 @@ export function renderHostFile(r: Route, portFile: string | null): string {
     "\t}",
     ...guardCaddyfileLines(),
     portFile === null ? `\t${PORT_PLACEHOLDER}` : `\timport "${portFile}"`,
-    "\thandle_errors 502 503 {",
-    `\t\trespond "devsite: dev server for ${r.host} is not running (start it with bun dev)" 503`,
-    "\t}",
+    ...offline,
     "}",
     "",
   ].join("\n");
@@ -180,6 +242,14 @@ export function renderHostFile(r: Route, portFile: string | null): string {
 
 // One planned file operation; next === null deletes the file. rel is the diff's label: the path relative to the Caddyfile's directory, or the absolute path of a file outside it.
 type Change = { rel: string; abs: string; next: string | null };
+
+function dirsToMake(changes: Change[], caddyfilePath: string | null): string[] {
+  return [
+    ...new Set(
+      changes.filter((c) => c.next !== null && c.abs !== caddyfilePath).map((c) => dirname(c.abs)),
+    ),
+  ].sort();
+}
 
 let tmpSeq = 0;
 function writeTmp(content: string): string {
@@ -271,7 +341,7 @@ type StepPlan = {
 };
 
 // Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
-function rootWriteCommands(changes: Change[], caddyfilePath: string | null, devsiteDir: string) {
+function rootWriteCommands(changes: Change[], caddyfilePath: string | null) {
   const commands: string[][] = [];
   if (
     caddyfilePath !== null &&
@@ -283,9 +353,7 @@ function rootWriteCommands(changes: Change[], caddyfilePath: string | null, devs
     }
     commands.push(["cp", caddyfilePath, `${caddyfilePath}.bak`]);
   }
-  if (changes.some((c) => c.next !== null && c.abs !== caddyfilePath)) {
-    commands.push(["mkdir", "-p", devsiteDir]);
-  }
+  for (const dir of dirsToMake(changes, caddyfilePath)) commands.push(["mkdir", "-p", dir]);
   for (const c of changes) {
     commands.push(c.next === null ? ["rm", "-f", c.abs] : ["cp", writeTmp(c.next), c.abs]);
   }
@@ -419,11 +487,11 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
     ];
     steps.push(
       asRoot
-        ? { text, details, root: rootWriteCommands(p.changes, caddyfilePath, install.devsiteDir) }
+        ? { text, details, root: rootWriteCommands(p.changes, caddyfilePath) }
         : {
             text,
             details,
-            run: async () => applyChanges(p.changes, caddyfilePath, install.devsiteDir),
+            run: async () => applyChanges(p.changes, caddyfilePath),
           },
     );
   }
@@ -532,7 +600,7 @@ async function runSteps(steps: Step[], paint: Paint, ctx: CliContext) {
   }
 }
 
-function applyChanges(changes: Change[], caddyfilePath: string | null, devsiteDir: string) {
+function applyChanges(changes: Change[], caddyfilePath: string | null) {
   if (
     caddyfilePath !== null &&
     changes.some((c) => c.abs === caddyfilePath) &&
@@ -544,9 +612,7 @@ function applyChanges(changes: Change[], caddyfilePath: string | null, devsiteDi
     }
     copyFileSync(caddyfilePath, `${caddyfilePath}.bak`);
   }
-  if (changes.some((c) => c.next !== null && c.abs !== caddyfilePath)) {
-    mkdirSync(devsiteDir, { recursive: true });
-  }
+  for (const dir of dirsToMake(changes, caddyfilePath)) mkdirSync(dir, { recursive: true });
   for (const c of changes) {
     if (c.next === null) rmSync(c.abs);
     else writeFileSync(c.abs, c.next);
@@ -845,7 +911,10 @@ export async function init(
   }
 
   const stateDir = resolveStateDir(ctx.env);
-  const desired = new Map<string, string>([[GUARD_FILE, renderGuardFile()]]);
+  const desired = new Map<string, string>([
+    [GUARD_FILE, renderGuardFile()],
+    [OFFLINE_FRAGMENT, renderOfflineFragment()],
+  ]);
   for (const r of routes) {
     desired.set(`${r.host}.caddy`, renderHostFile(r, portFilePath(r.host, stateDir)));
   }

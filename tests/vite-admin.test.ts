@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { renderGuardFile, renderHostFile } from "../src/commands/init";
 import { portFilePath } from "../src/state.mjs";
 import { caddy, devsite } from "../src/vite.mjs";
@@ -15,6 +15,7 @@ import {
   viteConfigHook,
   viteConfigureServerHook,
 } from "./helpers";
+import { writeOfflineFragment } from "./machine";
 
 const HOST = "web.test.internal";
 
@@ -408,6 +409,7 @@ test("Ctrl-C writes the placeholder back, and a stop leaves no signal listener b
 // `caddy reload` adapts the Caddyfile and loads the result, so the route a reload gives the host is the route `caddy adapt` makes of devsite's files.
 function reloadedUpstream(stateDir: string): unknown {
   const caddyfile = join(makeStateDir(), "Caddyfile");
+  writeOfflineFragment(dirname(caddyfile));
   writeFileSync(
     caddyfile,
     renderGuardFile() +

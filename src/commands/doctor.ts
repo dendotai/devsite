@@ -11,7 +11,14 @@ import { BOLD, GREEN, type Paint, painter, RED } from "../io";
 import { readSettings } from "../settings";
 import { portFilePath, resolveStateDir } from "../state.mjs";
 import { findStorage, type Storage } from "../storage";
-import { discoverRoutes, type Route, refuseRoot, renderHostFile } from "./init";
+import {
+  discoverRoutes,
+  OFFLINE_FRAGMENT,
+  type Route,
+  refuseRoot,
+  renderHostFile,
+  renderOfflineFragment,
+} from "./init";
 
 const UNUSED_DAYS = 30;
 
@@ -68,6 +75,21 @@ function portFileChecks(devsiteDir: string, stateDir: string): Result[] {
       fix: project === undefined ? INIT : `${INIT}, in the repo of ${project}`,
     };
   });
+}
+
+// Every host file imports the offline page file, so a missing one makes every `caddy reload` fail. With no host file, nothing imports it.
+function offlinePageChecks(devsiteDir: string): Result[] {
+  if (machineHosts(devsiteDir).length === 0) return [];
+  const label = "the offline page file matches what init writes";
+  const path = join(devsiteDir, OFFLINE_FRAGMENT);
+  if (!existsSync(path)) {
+    return [{ state: "red", label, detail: `no ${path}, so \`caddy reload\` fails`, fix: INIT }];
+  }
+  return [
+    readFileSync(path, "utf8") === renderOfflineFragment()
+      ? { state: "green", label }
+      : { state: "red", label, detail: "it differs", fix: INIT },
+  ];
 }
 
 // The Vite plugin stamps each host's last-used date on every dev-server start (#48). A host with no stamp is left out: its file may predate the stamps.
@@ -149,6 +171,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
       : [
           ...(await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx)),
           ...portFileChecks(install.devsiteDir, stateDir),
+          ...offlinePageChecks(install.devsiteDir),
         ];
   printSection("Caddy", caddyResults, paint, ctx);
 

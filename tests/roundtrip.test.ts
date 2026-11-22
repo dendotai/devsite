@@ -71,9 +71,7 @@ function devsiteBlock(host: string, project: string) {
     "\t@outside not remote_ip 127.0.0.1 ::1 100.64.0.0/10",
     "\tabort @outside",
     `\timport "${join(process.env.DEVSITE_STATE_DIR ?? "", "ports", `${host}.caddy`)}"`,
-    "\thandle_errors 502 503 {",
-    `\t\trespond "devsite: dev server for ${host} is not running (start it with bun dev)" 503`,
-    "\t}",
+    `\timport fragments/offline.caddy "${project}"`,
     "}",
   ].join("\n");
 }
