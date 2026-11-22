@@ -14,7 +14,7 @@ import { adminBase, caddy, findHostRoute } from "./vite.mjs";
 export const INIT = "bunx devsite init";
 
 // What init does about a check that is not green: install Caddy, start it, load its config through the admin API, trust its CA, or run devsite's dnsmasq. A check with no repair is one init only reports.
-export type Repair = "install" | "start" | "load" | "trust" | "run-dnsmasq";
+export type Repair = "install" | "start" | "load" | "trust" | "run-dnsmasq" | "split-dns";
 
 export type Result =
   | { state: "green"; label: string; detail?: string }

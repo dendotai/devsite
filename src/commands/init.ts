@@ -47,6 +47,17 @@ import { devSiteName, hostsOf } from "../names.mjs";
 import { readSettings, type Settings, settingsPath } from "../settings";
 import { PORT_PLACEHOLDER, portFilePath, resolveStateDir, writePortFile } from "../state.mjs";
 import { caRootFile, findStorage, rootCrtIn } from "../storage";
+import {
+  ADMIN_DNS_URL,
+  probeTailscale,
+  readSplitDns,
+  SPLIT_DNS_DOMAIN,
+  type SplitDns,
+  type SplitDnsRoute,
+  splitDnsDetail,
+  splitDnsValues,
+  TWO_MACS_ISSUE,
+} from "../tailscale";
 import { adminBase, caddy } from "../vite.mjs";
 
 // Shorter than the 7-day intermediate, as Caddy's docs require (168h made each leaf end at the same second as its intermediate); 120h still outlasts a weekend with the Mac asleep.
@@ -270,19 +281,41 @@ function unifiedDiff(c: Change, ctx: CliContext): string {
   return r.outRaw;
 }
 
-// One key answers, with no Enter: raw mode hands over each key press as it comes. Ctrl-C arrives as a plain byte in raw mode, and reads as "stop".
-async function confirm(question: string, ctx: CliContext): Promise<boolean> {
+const CTRL_C = "\x03";
+
+// One key answers, with no Enter: raw mode hands over each key press as it comes. Ctrl-C arrives as a plain byte in raw mode.
+async function readKey(question: string, ctx: CliContext): Promise<string> {
   ctx.stdout.write(question);
   const stdin = ctx.stdin as CliContext["stdin"] & { setRawMode?: (on: boolean) => unknown };
   stdin.setRawMode?.(true);
   stdin.resume();
+  // Paused inside the listener: a key typed ahead stays buffered for the next prompt instead of flowing out unheard.
   const key = await new Promise<string>((resolve) => {
-    stdin.once("data", (d) => resolve(String(d)));
+    stdin.once("data", (d) => {
+      stdin.pause();
+      resolve(String(d));
+    });
   });
   stdin.setRawMode?.(false);
-  stdin.pause();
+  return key;
+}
+
+// Ctrl-C reads as "stop".
+async function confirm(question: string, ctx: CliContext): Promise<boolean> {
   // Y is the default, as in apt: Enter applies too.
-  const yes = /^(y|\r|\n)/i.test(key);
+  const yes = /^(y|\r|\n)/i.test(await readKey(question, ctx));
+  ctx.stdout.write(`${yes ? "y" : "n"}\n`);
+  return yes;
+}
+
+// A (y/n) prompt has no default: only y is a yes. null for Ctrl-C.
+async function yesNo(question: string, ctx: CliContext): Promise<boolean | null> {
+  const key = await readKey(question, ctx);
+  if (key.startsWith(CTRL_C)) {
+    ctx.stdout.write("^C\n");
+    return null;
+  }
+  const yes = /^y/i.test(key);
   ctx.stdout.write(`${yes ? "y" : "n"}\n`);
   return yes;
 }
@@ -317,10 +350,12 @@ function paintDiff(diff: string, paint: Paint): string {
 }
 
 // A root step's commands join the run's one sudo call. A step handed to the user is a command init prints after the run instead of running it, because a setting handed that change to the user.
+// A manual step is one only the user can do, in a web page; init guides it after the root steps.
 type Step = { text: string; details?: string[] } & (
-  | { run: () => Promise<void>; root?: never; handedToUser?: never }
-  | { root: string[][]; run?: never; handedToUser?: never }
-  | { handedToUser: string[]; run?: never; root?: never }
+  | { run: () => Promise<void>; root?: never; handedToUser?: never; manual?: never }
+  | { root: string[][]; run?: never; handedToUser?: never; manual?: never }
+  | { handedToUser: string[]; run?: never; root?: never; manual?: never }
+  | { manual: () => Promise<void>; run?: never; root?: never; handedToUser?: never }
 );
 
 type StepPlan = {
@@ -337,6 +372,8 @@ type StepPlan = {
   dropped: string[];
   // null when no check calls for devsite's dnsmasq.
   dnsmasq: DnsmasqPlan | null;
+  // null with no Tailscale IP.
+  splitDns: SplitDnsRoute | null;
 };
 
 // Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
@@ -544,7 +581,8 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
     steps.push({ text: "trust Caddy's local CA", root: [["caddy", "trust"]] });
   }
   if (p.dnsmasq !== null) steps.push(...dnsmasqSteps(p.dnsmasq, ctx));
-  const rank = (s: Step) => (s.run ? 0 : s.root ? 1 : 2);
+  if (repairs.has("split-dns") && p.splitDns !== null) steps.push(splitDnsStep(p.splitDns, ctx));
+  const rank = (s: Step) => (s.run ? 0 : s.root ? 1 : s.manual ? 2 : 3);
   return steps.sort((a, b) => rank(a) - rank(b));
 }
 
@@ -560,8 +598,63 @@ function dnsmasqSteps(plan: DnsmasqPlan, ctx: CliContext): Step[] {
   return steps;
 }
 
+const SPLIT_DNS_WAIT_MS = 10_000;
+
+// Tailscale hands a new route to each device within seconds of the save in the admin console.
+async function waitForSplitDns(ip: string, ctx: CliContext): Promise<SplitDns> {
+  const set = Number(ctx.env.DEVSITE_SPLIT_DNS_WAIT_MS);
+  const waitMs =
+    ctx.env.DEVSITE_SPLIT_DNS_WAIT_MS && Number.isFinite(set) ? set : SPLIT_DNS_WAIT_MS;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const split = readSplitDns(ip, ctx);
+    if (split.state === "this-mac" || Date.now() >= deadline) return split;
+    await new Promise((r) => setTimeout(r, Math.min(1000, waitMs)));
+  }
+}
+
+function splitDnsStep({ ip, split }: SplitDnsRoute, ctx: CliContext): Step {
+  const elsewhere =
+    split.state === "elsewhere"
+      ? [
+          `the route now points to ${split.others.join("; ")}: change it to ${ip}, and that device's projects stop opening on the phone (${TWO_MACS_ISSUE})`,
+        ]
+      : [];
+  return {
+    text: `${split.state === "elsewhere" ? "change" : "add"} the split DNS route for ${SPLIT_DNS_DOMAIN} in the Tailscale admin console, so the phone finds .internal names`,
+    details: [...splitDnsValues(ip), ...elsewhere],
+    manual: async () => {
+      const open = await yesNo(`Open ${ADMIN_DNS_URL} in your browser? (y/n) `, ctx);
+      if (open === null) return skipSplitDns(ip, ctx);
+      if (open && exec("open", [ADMIN_DNS_URL], ctx, true).status !== 0) {
+        ctx.stdout.write(`  Could not open it: open ${ADMIN_DNS_URL} yourself.\n`);
+      }
+      for (;;) {
+        const done = await yesNo("Done? Press y to check, n to skip ", ctx);
+        if (!done) return skipSplitDns(ip, ctx);
+        const now = await waitForSplitDns(ip, ctx);
+        if (now.state === "this-mac") {
+          ctx.stdout.write(`  The split DNS route for ${SPLIT_DNS_DOMAIN} points to this Mac.\n`);
+          return;
+        }
+        ctx.stdout.write(`  Not yet: \`tailscale dns status\` shows ${splitDnsDetail(now)}.\n`);
+      }
+    },
+  };
+}
+
+function skipSplitDns(ip: string, ctx: CliContext) {
+  ctx.stdout.write(
+    `  Skipped: \`bunx devsite doctor\` stays red until the route for ${SPLIT_DNS_DOMAIN} points to ${ip}.\n`,
+  );
+}
+
 function stepLine(step: Step, i: number, total: number, paint: Paint): string {
-  const tag = step.root ? `  ${paint(YELLOW, "[sudo]")}` : "";
+  const tag = step.root
+    ? `  ${paint(YELLOW, "[sudo]")}`
+    : step.manual
+      ? `  ${paint(CYAN, "[manual]")}`
+      : "";
   return `${paint(BOLD, `Step ${i + 1} of ${total}:`)} ${step.text}${tag}`;
 }
 
@@ -573,7 +666,13 @@ function printSteps(heading: string, steps: Step[], paint: Paint, ctx: CliContex
   });
 }
 
-async function runSteps(steps: Step[], paint: Paint, ctx: CliContext) {
+// afterRoot runs between the sudo call and the manual steps.
+async function runSteps(
+  steps: Step[],
+  paint: Paint,
+  ctx: CliContext,
+  afterRoot: () => Promise<void>,
+) {
   for (const [i, s] of steps.entries()) {
     if (s.run === undefined) continue;
     ctx.stdout.write(`\n${stepLine(s, i, steps.length, paint)}\n`);
@@ -590,6 +689,13 @@ async function runSteps(steps: Step[], paint: Paint, ctx: CliContext) {
       root.flatMap((r) => r.root),
       ctx,
     );
+  }
+  await afterRoot();
+  for (const [i, s] of steps.entries()) {
+    if (s.manual === undefined) continue;
+    ctx.stdout.write(`\n${stepLine(s, i, steps.length, paint)}\n`);
+    for (const d of s.details ?? []) ctx.stdout.write(`  ${d}\n`);
+    await s.manual();
   }
   for (const [i, s] of steps.entries()) {
     if (s.handedToUser === undefined) continue;
@@ -649,7 +755,6 @@ function printChecklist(routes: Route[], caRoot: string | null, ctx: CliContext)
     [
       "",
       "Manual, per-device (one-time — can't be automated from here):",
-      `  • Tailscale admin → DNS → split-DNS: domain 'internal' → this Mac's Tailscale IP.`,
       `  • On each phone: install AND trust the CA root, then reload https://${routes[0]?.host}`,
       `      ${caRoot ?? `the root_certificate that ${adminBase()}/pki/ca/local answers`}`,
       `      (iOS: install the profile, THEN Settings → General → About →`,
@@ -950,7 +1055,12 @@ export async function init(
   }
 
   const dns = probeDnsmasq(settings, ctx);
-  const checks = [...(await caddyChecks(install, storage, ctx)), ...dns.checks];
+  const tailscale = probeTailscale(dns.tailscale, ctx);
+  const checks = [
+    ...(await caddyChecks(install, storage, ctx)),
+    ...tailscale.checks,
+    ...dns.checks,
+  ];
   printSection("Checks", checks, paint, ctx);
   const ownHosts = new Set(
     [...machineHosts(devsiteDir), ...routes.map((r) => r.host)].flatMap((h) => {
@@ -976,6 +1086,7 @@ export async function init(
       stateDir,
       dropped,
       dnsmasq: dnsPlan,
+      splitDns: tailscale.route,
     },
     ctx,
   );
@@ -1022,24 +1133,34 @@ export async function init(
     ctx.stdout.write(`\n${paint(BOLD, `The diff (relative paths are in ${caddyDir}):`)}\n\n`);
     ctx.stdout.write(`${paintDiff(diff, paint)}\n`);
   }
+  // A plan of manual steps only changes nothing on this Mac, so it needs no y: each manual step asks its own questions.
+  const manualOnly = steps.every((s) => s.manual !== undefined);
   if (!ctx.stdin.isTTY) {
+    if (manualOnly) {
+      ctx.stdout.write("\nRun `bunx devsite init` in a terminal to be guided through it.\n");
+      return 0;
+    }
     ctx.stderr.write(
       "stdin is not a TTY — cannot ask for confirmation; nothing changed. " +
         "Run interactively, or use --dry-run to inspect the plan.\n",
     );
     return 1;
   }
-  if (!(await confirm(`\n${paint(BOLD, "Apply these changes? [Y/n]")} `, ctx))) {
+  if (!manualOnly && !(await confirm(`\n${paint(BOLD, "Apply these changes? [Y/n]")} `, ctx))) {
     ctx.stderr.write("Stopped — nothing changed.\n");
     return 1;
   }
-  await runSteps(steps, paint, ctx);
-  if (dnsPlan !== null && dns.dnsmasq !== null) await waitForDnsmasq(dns.dnsmasq.ip, ctx);
+  // The split DNS step sends the phone to devsite's dnsmasq, so it waits until dnsmasq answers.
+  await runSteps(steps, paint, ctx, async () => {
+    if (dnsPlan !== null && dns.dnsmasq !== null) await waitForDnsmasq(dns.dnsmasq.ip, ctx);
+  });
   const after = installAfter(settings, install, ctx);
   const storageAfter = await findStorage(after, ctx);
+  const dnsAfter = probeDnsmasq(settings, ctx);
   const checksAfter = [
     ...(await caddyChecks(after, storageAfter, ctx)),
-    ...probeDnsmasq(settings, ctx).checks,
+    ...probeTailscale(dnsAfter.tailscale, ctx).checks,
+    ...dnsAfter.checks,
   ];
   printSection("Checks after this run", checksAfter, paint, ctx);
   ctx.stdout.write(jsonHelp);
