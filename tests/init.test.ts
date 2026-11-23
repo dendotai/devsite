@@ -59,8 +59,8 @@ test("a set-up Mac: no prompt, no sudo, no reload, nothing written, exit 0", asy
   expect(r.stdout).not.toContain("Apply these changes?");
   expect(r.ran).toEqual([
     "ps -axo pid=,ppid=,user=,args=",
-    "tailscale ip -4",
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4",
+    "tailscale status --json",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale status --json",
     `openssl s_client -connect 127.0.0.1:443 -servername ${HOST} -showcerts`,
     `security verify-cert -c ${join(m.storage, "pki", "authorities", "local", "root.crt")} -p ssl`,
   ]);
@@ -72,7 +72,7 @@ test("a changed host file with Caddy running: write it and load the config, no s
   await mockAdmin([placeholder()]);
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, hostFile: "# web\nold {\n}\n" });
   const r = await init(m.caddyfile);
-  expect(r.stdout).toContain(`Step 1 of 2: write 1 file(s) in ${m.dir}, as the diff below shows`);
+  expect(r.stdout).toContain(`Step 1 of 2: write 1 file in ${m.dir}, as the diff below shows`);
   expect(r.stdout).toContain("Step 2 of 2: load the Caddy config through Caddy's admin API");
   expect(r.ran).toContain(`caddy reload --config ${m.caddyfile} --adapter caddyfile`);
   expect(r.ran.filter((c) => c.startsWith("sudo") || c.startsWith("brew"))).toEqual([]);
@@ -94,15 +94,90 @@ test("an untrusted CA: one step, one sudo call, no write and no reload", async (
   expect(r.status).toBe(0);
 });
 
+test("a check still red after the step that fixes it ran: its fix names that step, not init", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const r = await init(m.caddyfile, { answers: { trusted: false } });
+  const after = r.stdout.slice(r.stdout.indexOf("Checks after this run"));
+  expect(after).toContain(
+    '      fix: read the output of the step "trust Caddy\'s local CA" above: it ran and this is still red',
+  );
+  expect(after).not.toContain("fix: run `bunx devsite init`");
+});
+
+test("a run that trusts the CA shows the phone steps; a red check left keeps the bun dev line out", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const r = await init(m.caddyfile, { answers: { trusted: false } });
+  expect(r.stdout).toContain("install and trust the CA root");
+  expect(r.stdout).toContain("(iOS: install the profile, then turn it on in Settings");
+  expect(r.stdout).not.toContain("bun dev");
+});
+
+test("a run that does not touch the CA: no phone steps, and all green gives the bun dev line", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, hostFile: "# web\nold\n" });
+  const r = await init(m.caddyfile);
+  expect(r.stdout).not.toContain("Manual, per-device");
+  expect(r.stdout).toContain("From now on, run `bun dev`; it needs no sudo.");
+  expect(r.status).toBe(0);
+});
+
+test("the write step points at the diff in the plan only, not while it runs", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, hostFile: "# web\nold\n" });
+  const r = await init(m.caddyfile);
+  const plan = r.stdout.slice(
+    r.stdout.indexOf("\nPlan\n"),
+    r.stdout.indexOf("Apply these changes"),
+  );
+  const run = r.stdout.slice(r.stdout.indexOf("Apply these changes"));
+  expect(plan).toContain(", as the diff below shows");
+  expect(run).toContain("write 1 file in ");
+  expect(run).not.toContain("as the diff below shows");
+});
+
+test("init checks the port files and the offline page file, as doctor does", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, hostFile: "# web\nold\n" });
+  const r = await init(m.caddyfile);
+  const checks = r.stdout.slice(r.stdout.indexOf("Checks"), r.stdout.indexOf("\nPlan\n"));
+  expect(checks).toContain("web.test.internal's port file exists");
+  expect(checks).toContain("the offline page file");
+  const after = r.stdout.slice(r.stdout.indexOf("Checks after this run"));
+  expect(after).toContain("✓ web.test.internal's port file exists");
+  expect(after).toContain("✓ the offline page file matches what init writes");
+});
+
+test("counts read as plain plurals", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, hostFile: "# web\nold\n" });
+  const r = await init(m.caddyfile, { argv: ["init", "--dry-run"] });
+  expect(r.stdout).toContain("write 1 file in ");
+  expect(r.stdout).toContain("--dry-run: would change 1 file.");
+  expect(r.stdout).not.toContain("(s)");
+});
+
+test("a file devsite generates whole shows as one line in init, and in full with --dry-run", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, offlineFragment: false });
+  const r = await init(m.caddyfile, { stdin: fakeStdin("n", true) });
+  expect(r.stdout).toContain("devsite.d/fragments/offline.caddy — devsite's offline page, new");
+  expect(r.stdout).not.toContain("+handle_errors 502 503 {");
+  const dry = await init(m.caddyfile, { argv: ["init", "--dry-run"] });
+  expect(dry.stdout).toContain("+handle_errors 502 503 {");
+});
+
 test("a fresh Mac with no Caddy: install, write, start Caddy, then the one sudo call", async () => {
   const m = setUpMachine({ caddyfile: "", root: null, hostFile: null, installed: false });
   // `brew services start` brings up the admin API, as the real service does.
   const r = await init(m.caddyfile, { answers: { onBrew: () => void mockAdmin([placeholder()]) } });
   expect(r.stdout).toContain(`✗ Caddy is installed — Homebrew has no caddy formula at ${m.prefix}`);
   expect(r.stdout).toContain("Step 1 of 4: install Caddy with Homebrew");
-  expect(r.stdout).toContain("Step 2 of 4: write 4 file(s)");
+  expect(r.stdout).toContain("Step 2 of 4: write 4 files");
   expect(r.stdout).toContain("Step 3 of 4: start Caddy as you");
   expect(r.stdout).toContain("Step 4 of 4: trust Caddy's local CA  [sudo]");
+  expect(r.stdout).toContain(`– that CA is trusted in the keychain — ${HOST} has no host file yet`);
   expect(r.acted).toEqual([
     "brew install caddy",
     "brew services start caddy",
@@ -124,8 +199,8 @@ test("init --dry-run prints the numbered plan and the diff, and changes nothing"
   const m = setUpMachine({ caddyfile: "", root: null, hostFile: null });
   const before = snapshot(m.dir);
   const r = await init(m.caddyfile, { argv: ["init", "--dry-run"] });
-  expect(r.stdout).toContain("Plan:");
-  expect(r.stdout).toContain("Step 1 of 3: write 4 file(s)");
+  expect(r.stdout).toContain("\nPlan\n");
+  expect(r.stdout).toContain("Step 1 of 3: write 4 files");
   expect(r.stdout).toContain("Step 3 of 3: trust Caddy's local CA  [sudo]");
   expect(r.stdout).toContain(`+++ devsite.d/${HOST}.caddy`);
   expect(r.stdout).toContain("+\t\t\tlifetime 120h");
@@ -180,7 +255,7 @@ test("no offline page file: init writes it under devsite.d/fragments and loads t
   await mockAdmin([placeholder()]);
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, offlineFragment: false });
   const r = await init(m.caddyfile);
-  expect(r.stdout).toContain("+++ devsite.d/fragments/offline.caddy");
+  expect(r.stdout).toContain("devsite.d/fragments/offline.caddy — devsite's offline page, new");
   expect(r.ran).toContain(`caddy reload --config ${m.caddyfile} --adapter caddyfile`);
   expect(readFileSync(join(m.dir, "devsite.d", "fragments", "offline.caddy"), "utf8")).toContain(
     "handle_errors 502 503 {",

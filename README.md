@@ -18,73 +18,46 @@ A `devSite` field in `package.json` declares the project's name, and devsite ser
 }
 ```
 
-devsite has two parts:
+devsite has three parts:
 
-- **`devsite init`** — a one-time, per-machine bootstrap. It collects every `devSite` name in the repo, writes one file per host into `devsite.d/` next to the machine-global Caddyfile (each a TLS-enabled block that takes its handler from the host's port file in devsite's state dir, which answers `503` as a placeholder), and (re)starts Caddy as an always-on service that runs as you. Every devsite route answers only this machine and your tailnet: a request from the LAN gets no response. Your Caddyfile itself is set up once — a single `import devsite.d/*.caddy # devsite` line plus devsite's two global directives — and never rewritten after that: the import glob covers every future host file, so your own Caddyfile content and devsite's writes can never conflict, and each repo's `init` only ever touches its own files. This is the only step that asks for `sudo` (for `caddy trust`).
+- **`devsite init`** — the onboarding, run once per machine and once per repo. It checks each part of the setup, fixes only what is red, and on a set-up Mac asks nothing, runs no `sudo`, and changes nothing. See [The onboarding](#the-onboarding).
+- **`devsite doctor`** — the same checks with the fixes turned off. It prints how this Mac is set up, marks each check green or red, and names the fix for each red one. See [`devsite doctor`](#devsite-doctor).
 - **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, writes a live `reverse_proxy` to the host's port file, and swaps the host's placeholder route for it through Caddy's admin API on localhost. When the dev server stops, the plugin writes the placeholder back. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
-  - It only updates a route that `devsite init` wrote. For a name `init` has not seen yet (a new project, a renamed one), `bun dev` warns that Caddy has no route for `<name>.internal`, names `bunx devsite init`, and serves on the raw local URL.
+  - It only updates a route that `devsite init` wrote. For a name `init` has not seen yet (a new project, a renamed one), `bun dev` warns that Caddy has no route for `<name>.internal`, names `bunx devsite doctor`, and serves on the raw local URL.
   - It also routes `<name>.localhost` to the same port. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
 ```text
 Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA)
                                         │  ▲
-                          reverse_proxy │  ├── devsite init: writes the Caddyfile (one-time)
+                          reverse_proxy │  ├── devsite init: writes devsite.d/ (once per repo)
                                         ▼  └── Vite plugin: swaps the route (admin API, localhost)
                                       Vite dev server (ephemeral port)
 ```
 
-The host's port file holds the live route too, so a Caddy reload or restart mid-session keeps it. `bunx devsite doctor` reports a missing port file, which makes every `caddy reload` fail.
+Each host file in `devsite.d/` takes its handler from the host's port file in devsite's state directory, so a Caddy reload or restart mid-session keeps a running dev server's route. While the dev server is down, the URL answers devsite's offline page. Every devsite route answers only this machine and your tailnet: a request from the LAN gets no response.
 
 ## Quick start
 
-Setup has two tiers. The first is complete on its own: after it, the URL works on this machine. The second extends the same URL to your other devices.
+Setup has two tiers. The first is complete on its own: after it, `https://<name>.localhost` works on this Mac. The second adds `https://<name>.internal` on this Mac and on your other devices.
 
-> Current limitation: the paths assume Caddy from Homebrew on Apple Silicon macOS (`/opt/homebrew/etc/Caddyfile`, `brew services`). See [Requirements](#requirements).
+### Step 1 — this Mac (~5 minutes)
 
-### Step 1 — local only (~5 minutes)
-
-1. **Install Caddy:**
-
-   ```sh
-   brew install caddy
-   ```
-
-2. **Declare a name** in your project's `package.json`:
+1. **Declare a name** in your project's `package.json`:
 
    ```jsonc
    "devSite": { "name": "myapp" }
    ```
 
-3. **Make `.internal` names resolve to your machine.** `devsite init` verifies this but does not yet configure it for you. Two options:
-
-   Option A — one hosts entry per project:
-
-   ```sh
-   echo "127.0.0.1 myapp.internal" | sudo tee -a /etc/hosts
-   ```
-
-   Option B — a wildcard, so every current and future `*.internal` host resolves without further changes. dnsmasq plus a resolver stub:
-
-   ```sh
-   brew install dnsmasq
-   echo "address=/internal/127.0.0.1" >> /opt/homebrew/etc/dnsmasq.conf
-   sudo brew services restart dnsmasq
-   sudo mkdir -p /etc/resolver
-   echo "nameserver 127.0.0.1" | sudo tee /etc/resolver/internal
-   ```
-
-   *What this changed:* macOS now sends `*.internal` DNS queries to your local dnsmasq (via `/etc/resolver/internal`), which answers with `127.0.0.1`.
-
-4. **Add devsite to the project and run the bootstrap** from the repo root:
+2. **Add devsite to the project and run the onboarding** from the repo root:
 
    ```sh
    bun add -d @den-ai/devsite
    bunx devsite init       # or: bunx devsite init --dry-run to preview
    ```
 
-   *What this changed:* wrote your host's file into `/opt/homebrew/etc/devsite.d/`, and set up `/opt/homebrew/etc/Caddyfile` once — one `import devsite.d/*.caddy` line, plus a global options block pinning certificate storage and enabling `local_certs` (added into your own block if you had one; an existing Caddyfile is backed up to `Caddyfile.bak` first; the very first run also saves `Caddyfile.pre-devsite`, which is never touched again), restarted Caddy as a `brew services` background service that runs as you and starts at login, pinned Caddy's certificate storage to `~/Library/Application Support/Caddy`, and ran `sudo caddy trust` to add Caddy's local CA root to your system trust store — that's the whole certificate-trust step for this machine. It ends with a verification report (TLS answering, cert chain, DNS) so you can see what works before opening a browser. Every write shows a full diff and asks for confirmation first; `--dry-run` prints the same diff and writes nothing.
+   On a new Mac, `init` installs Caddy with Homebrew, writes its config, starts Caddy as you, and adds Caddy's local CA to your keychain. It shows the plan and the diff of your Caddyfile first, and asks once.
 
-5. **Add the plugin** to your Vite config:
+3. **Add the plugin** to your Vite config:
 
    ```ts
    // vite.config.ts
@@ -95,47 +68,114 @@ Setup has two tiers. The first is complete on its own: after it, the URL works o
    });
    ```
 
-6. **Run dev and open the URL:**
+4. **Run dev and open the URL:**
 
    ```sh
    bun dev
    ```
 
-   Open `https://myapp.internal`. The certificate is trusted, and HMR runs over `wss`.
+   Open `https://myapp.localhost`. The certificate is trusted, and HMR runs over `wss`.
 
-Each additional project needs only steps 2, 4, and 5. Because no project declares a port, projects never coordinate with each other and any number can run at once.
+Each additional project needs only steps 1 to 3. Because no project declares a port, projects never coordinate with each other and any number can run at once.
 
-### Step 2 — your other devices (optional)
+### Step 2 — `.internal` and your other devices (optional)
 
-This is the most manual part of the tool: two steps that cannot be automated, each done once per device.
+1. **Install [Tailscale](https://tailscale.com)** on this Mac and on each device, and sign in to the same tailnet.
 
-1. **Install [Tailscale](https://tailscale.com)** on this machine and on the device.
+2. **Run `bunx devsite init` again.** With Tailscale on the Mac, it installs dnsmasq and runs devsite's own dnsmasq on this Mac's Tailscale IP (one `sudo` prompt). Then it guides you through the split DNS route, the one step only the Tailscale admin console can do:
 
-2. **Point the tailnet's DNS for `internal` at this machine.** In the Tailscale admin console → DNS → add a split-DNS nameserver: domain `internal` → this machine's Tailscale IP (`tailscale ip -4`). Your local dnsmasq must answer on that IP with that IP, so replace the loopback config from step 1.3 with:
-
-   ```
-   # /opt/homebrew/etc/dnsmasq.conf
-   address=/internal/<your-tailscale-ip>
-   listen-address=127.0.0.1,<your-tailscale-ip>
-   ```
-
-   and `sudo brew services restart dnsmasq`. (Your own machine keeps working — it now resolves `*.internal` to its Tailscale IP, where the same Caddy answers.)
-
-3. **Trust the CA root on the device.** The root certificate is at:
-
-   ```
-   ~/Library/Application Support/Caddy/pki/authorities/local/root.crt
+   ```text
+   Step 3 of 3: add the split DNS route for .internal in the Tailscale admin console, so the phone finds .internal names  [manual]
+     nameserver: 100.90.1.2
+     restrict to domain: internal
+   Open https://login.tailscale.com/admin/dns in your browser? (y/n)
+   Done? Press y to check, n to skip
    ```
 
-   Get it onto the phone (AirDrop works) and install it. On iOS, installing is not trusting: install the profile, then Settings → General → About → Certificate Trust Settings → toggle it on.
+   `y` at "Done?" checks the route with `tailscale dns status` and asks again until it is there.
 
-The same URL now works on the phone, including HMR. `devsite init` re-checks this path on every run (Tailscale up, DNS answering on the Tailscale IP) and prints the per-device checklist.
+3. **Trust the CA root on each device.** The `init` run that trusted the CA on this Mac printed the path of the root certificate at its end; `bunx devsite doctor` shows its path on the line "that CA is trusted in the keychain" when devsite can read Caddy's storage. Get it onto the phone (AirDrop works) and install it. On iOS, installing is not trusting: install the profile, then turn it on in Settings → General → About → Certificate Trust Settings.
+
+`https://myapp.internal` now opens on this Mac and on the phone, including HMR.
+
+## The onboarding
+
+`bunx devsite init` runs in this order:
+
+- **Checks.** It runs every check `doctor` runs and prints each one green (`✓`), red (`✗`), or skipped (`–`).
+- **Plan.** For the red checks it can fix, it prints a numbered plan and the diff of each file it would change, except the files devsite writes whole (the offline page and the dnsmasq files), which show as one line; `--dry-run` prints their diff too. A step that needs root is tagged `[sudo]`; a step only you can do is tagged `[manual]`.
+- **One prompt.** `Apply these changes? [Y/n]`. `--dry-run` stops before this prompt and writes nothing.
+- **One `sudo` call.** Every root step runs back to back in one `sudo` call, right after your `y`, so you type your password at most once per run. Your password goes only to `sudo`, never through devsite.
+- **Manual steps.** Each asks `Open <url> in your browser? (y/n)`, then `Done? Press y to check, n to skip`. Each prompt takes one key, with no Enter. A skipped step leaves `doctor` red; `init` still finishes.
+- **Checks after this run.** The same checks again, with the fix for each one still red.
+
+On a set-up Mac `init` prints the checks, then `Nothing to do: init changed nothing.` It leaves Caddy alone, so your running dev servers keep their routes.
+
+`init` works with the Caddy you already have:
+
+- A running Caddy keeps its service manager (`brew services`, your own launchd file, a terminal) and gets only devsite's config, loaded through the admin API.
+- An installed Caddy that does not run is started with `brew services start`. A missing Caddy is installed with `brew install caddy`.
+- A Caddy that runs as root stays root: `init` writes its files and reloads it with `sudo`, tagged `[sudo]` in the plan.
+- Your own `storage` line stays, and devsite uses that storage, so your CA stays the one your devices trust.
+- Your own site blocks keep their `default_bind`: `init` stops and names the ways past (`import devsite-guard` in each site, or the `caddy.user` setting).
+- A Caddy with no Caddyfile (JSON config or admin API only): `init` writes `devsite.d/`, prints the adapted JSON with where it goes in your config, and stops.
+
+A message that stops `init` names the setting that gets you past it.
+
+## `devsite doctor`
+
+`bunx devsite doctor` writes nothing and runs no `sudo`, so you can run it any time. It exits 1 on any red check, so a script can use it as a gate. Outside a repo it runs the machine checks and skips the repo checks.
+
+It prints a Setup section first. The Setup section is information only and never changes the exit code:
+
+```text
+Setup
+  Caddy: Homebrew at /opt/homebrew
+  Caddy config: /opt/homebrew/etc/Caddyfile (Homebrew's default)
+  devsite's Caddy config: /opt/homebrew/etc/devsite.d
+  Caddy log: /opt/homebrew/var/log/caddy.log
+  Service manager: brew services
+  Runs as: you (devsite's default)
+  Caddy storage: /opt/homebrew/var/lib/caddy (the Caddyfile's storage line)
+  dnsmasq: devsite's config /Library/Application Support/devsite/dnsmasq.conf, listens on 100.90.1.2
+  Hosts unused for 30+ days: none
+```
+
+Then the checks. They check outcomes, not how they came about, so a setup you built another way passes:
+
+- **Caddy** — installed; the admin API answers; each devsite host's route starts with the LAN guard; no route before a devsite host also matches it; the served certificate chains to the CA in Caddy's storage; that CA is trusted in the keychain; each host has its port file; the offline page file matches what `init` writes.
+- **Tailscale** (when it is on the Mac) — up; the split DNS route for `internal` points to this Mac.
+- **dnsmasq** (when Tailscale is on the Mac) — something answers `.internal` with the Tailscale IP on the Tailscale IP; this Mac resolves `.internal` to the Tailscale IP.
+- **This repo** — every `devSite` name is valid and used by one project only, and its host file matches what `init` would write.
+
+Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
+
+## Settings
+
+`~/.config/devsite/config.json` holds the machine settings. Each one hands a change devsite would make to a shared thing over to you; with the setting on, `init` skips the change and prints what must be true instead. The file is optional, and a setting devsite cannot read stops `init` and `doctor` with the reason.
+
+```jsonc
+{
+  "caddy": {
+    "config": "/etc/caddy/Caddyfile",           // the main Caddy config, for a Caddy not installed with Homebrew
+    "user": "root",                             // "user" or "root": the user Caddy runs as, over what devsite found
+    "reload": "manual"                          // init writes devsite's files; you reload Caddy
+  },
+  "dnsmasq": {
+    "run": "manual" // init runs no dnsmasq; you make a DNS server answer .internal on the Tailscale IP
+  }
+}
+```
 
 ## DNS and certificates
 
-**How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Resolution is provided locally — via `/etc/hosts` or dnsmasq for this machine (step 1.3), and via Tailscale split DNS pointing at that dnsmasq for other devices (step 2.2).
+**How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Tailscale split DNS sends every `.internal` lookup on the tailnet to devsite's dnsmasq on this Mac's Tailscale IP, which answers with that IP. The Mac itself resolves `.internal` the same way, through Tailscale's DNS server. With Tailscale off, `.internal` lookups on the Mac fail at once, with no wait for a timeout; `.localhost` always works.
 
-**Why does the browser trust the certificate?** Caddy generates a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` trusts that CA's root on your machine (`sudo caddy trust`) and pins the CA's storage to one fixed path, so the CA stays identical no matter how Caddy is run — a device that trusted the root once keeps trusting every certificate it issues. Other devices trust the same root file manually (step 2.3).
+**Why does the browser trust the certificate?** Caddy runs a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` adds that CA's root to your keychain and keeps the storage Caddy already uses, so a device that trusted the root once keeps trusting every certificate it issues. Other devices trust the same root file by hand (Step 2.3).
+
+## FAQ
+
+**Why does devsite need `sudo` for dnsmasq?** The phone sends its `.internal` lookups to port 53 on the Mac's Tailscale IP, and on macOS only root can bind an address below port 1024. devsite therefore runs one dnsmasq of its own as root, under its own LaunchDaemon, listening on the Tailscale IP only; after the bind it runs as `nobody`. `sudo` runs on the first setup and when the Tailscale IP changes, because dnsmasq rereads its addresses only on a restart. devsite never changes a dnsmasq you run yourself. See [ADR 0003](docs/adr/0003-dnsmasq-runs-as-root.md).
 
 ## Why not X
 
@@ -145,37 +185,40 @@ The same URL now works on the phone, including HMR. `devsite init` re-checks thi
 
 ## What devsite changes on your machine, and how to undo it
 
-devsite modifies machine-global state. This section lists every change and how to remove it.
+devsite modifies machine-global state. This section lists every change and how to remove it. Paths are for Homebrew on Apple Silicon; on Intel Homebrew `/opt/homebrew` is `/usr/local`.
 
-What `devsite init` changes (it prints every service and `sudo` command as it runs it):
+What `devsite init` changes (each changed file shows its diff first, except the files devsite writes whole, which show as one line, and every service and `sudo` command is printed as it runs):
 
-- `/opt/homebrew/etc/Caddyfile` — set up once, then never rewritten: one `import devsite.d/*.caddy # devsite` line, and Caddy's global options block gets devsite's two directives (`storage` pin, `local_certs`) — added into your block if you have one, or as a new block if you don't. Later runs only check the directives are present; a block you own is never rewritten. Before any Caddyfile write, the previous file is copied to `Caddyfile.bak`; the very first write also saves `Caddyfile.pre-devsite`, which no later run touches.
-- `/opt/homebrew/etc/devsite.d/` — devsite's own directory: one `<host>.caddy` file per host (first line `# <project>`, recording which project owns it). Registering, changing, or renaming hosts only writes files here.
-- The Caddy Homebrew service — restarted as you, and left running in the background. A `default_bind` line in the global options block is deleted: Caddy as you cannot start with one, and the guard in every devsite route keeps the LAN out (see `docs/adr/0002-caddy-runs-as-the-user-behind-a-lan-guard.md`).
-- `~/Library/Application Support/Caddy` — Caddy's certificate storage, pinned here.
-- Your system trust store — Caddy's local CA root is added via `sudo caddy trust`.
+- `/opt/homebrew/etc/Caddyfile` — set up once: one `import devsite.d/*.caddy # devsite` line, and a `storage` pin only when the file has no `storage` line. Before any Caddyfile write, the previous file is copied to `Caddyfile.bak`; the very first write also saves `Caddyfile.pre-devsite`, which no later run touches. A `default_bind` line is deleted only when the file has no site blocks of your own.
+- `/opt/homebrew/etc/devsite.d/` — devsite's own directory: one `<host>.caddy` file per host (first line `# <project>`, recording which project owns it), `guard.caddy` (the LAN guard snippet), and `fragments/offline.caddy` (the offline page).
+- `~/Library/Application Support/devsite/ports/` — one port file per host, written as you.
+- The Caddy service — installed and started with Homebrew only when Caddy is missing or stopped.
+- Your keychain — Caddy's local CA root is added with `sudo caddy trust`.
+- With Tailscale on the Mac: dnsmasq from Homebrew, plus devsite's own `/Library/Application Support/devsite/` (`dnsmasq.conf` and `dnsmasq-watcher.zsh`) and `/Library/LaunchDaemons/ai.den.devsite.dnsmasq.plist`.
 
-What the Vite plugin changes: it edits Caddy's in-memory running config over the localhost admin API, and it records the host's last-used date in `~/Library/Application Support/devsite/last-used.json` on every dev-server start (advisory data for a future `clean`/`doctor`; `DEVSITE_STATE_DIR` overrides the directory).
+What the Vite plugin changes: it edits Caddy's in-memory running config over the localhost admin API, writes the live port to the host's port file, and records the host's last-used date in `~/Library/Application Support/devsite/last-used.json` (`DEVSITE_STATE_DIR` overrides the directory).
 
 **Undoing it** — there is no `devsite uninstall` command yet, so removal is manual:
 
 ```sh
-sudo caddy untrust                      # remove the CA root from the trust store
-brew services stop caddy                # stop the background service
-rm -rf /opt/homebrew/etc/devsite.d      # devsite's own directory
-rm /opt/homebrew/etc/Caddyfile          # or remove the import line + devsite's global directives / restore Caddyfile.pre-devsite
-rm -rf ~/Library/Application\ Support/Caddy
-rm -rf ~/Library/Application\ Support/devsite # last-used dates (Vite plugin)
-sudo rm /etc/resolver/internal          # plus the dnsmasq config, if you set them up
+sudo launchctl bootout system/ai.den.devsite.dnsmasq   # stop devsite's dnsmasq
+sudo rm /Library/LaunchDaemons/ai.den.devsite.dnsmasq.plist
+sudo rm -rf "/Library/Application Support/devsite"
+sudo caddy untrust                      # remove the CA root from the keychain
+rm -rf /opt/homebrew/etc/devsite.d      # devsite's own Caddy directory
+# then remove the import line from /opt/homebrew/etc/Caddyfile, or restore Caddyfile.pre-devsite
+rm -rf ~/Library/Application\ Support/devsite   # port files and last-used dates
 ```
 
-Note: **renaming** a project (changing its `devSite.name`) cleans up after itself — the next `devsite init` in that project deletes the old host's file. **Deleting a whole project** does not: its host file lingers in `devsite.d/` (serving a `503`) until you remove it by hand — `devsite init` cannot tell an abandoned project from one that simply is not this repo.
+Also delete the `internal` split DNS nameserver in the [Tailscale admin console](https://login.tailscale.com/admin/dns).
+
+Note: **renaming** a project (changing its `devSite.name`) cleans up after itself — the next `devsite init` in that project deletes the old host's file. **Deleting a whole project** does not: its host file lingers in `devsite.d/` (serving the offline page) until you remove it by hand. `devsite doctor` lists hosts unused for 30+ days.
 
 ## Requirements
 
 - **Node.js ≥ 22** — the published CLI runs under plain Node (`npx @den-ai/devsite init` works without bun). Developing the repo itself still uses bun.
-- **Caddy ≥ 2**, installed through Homebrew (`devsite init` manages it with `brew services`).
+- **Caddy ≥ 2.** `init` installs it with Homebrew when it is missing. A Caddy installed another way works with the `caddy.config` setting.
 - **Vite** — the plugin is developed against Vite 8.
-- **macOS on Apple Silicon**, currently. The Homebrew prefix `/opt/homebrew` and macOS paths are hardcoded; supporting Linux or Intel Macs requires making them configurable, which has not been done yet. Windows is out of scope.
+- **macOS**, with Homebrew on Apple Silicon or Intel (found with `brew --prefix`). Linux and Windows are not supported yet.
 - **Project layout**: `devsite init` reads `devSite` fields from the repo root `package.json` and, in a monorepo, from `apps/*/package.json` and `packages/*/package.json`. Other workspace folders (e.g. `services/*`) are not scanned yet.
-- **Tailscale** — optional, only for the other-devices tier.
+- **Tailscale** — optional, only for `.internal` and the other-devices tier.

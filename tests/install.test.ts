@@ -4,13 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processRunner } from "../src/context";
-import { run } from "../src/run";
 import {
   type CommandCall,
   fakeStdin,
   makeIo,
   makeRepo,
   makeStateDir,
+  runAndRecordScenario,
   scriptedRunner,
 } from "./helpers";
 import { HOST, mockAdmin, pki, placeholder, setUpMachine, useMachine } from "./machine";
@@ -79,7 +79,7 @@ async function devsite(
   });
   if (opts.noPrefixOverride) delete io.ctx.env.DEVSITE_BREW_PREFIX;
   if (opts.stateDir !== undefined) io.ctx.env.DEVSITE_STATE_DIR = opts.stateDir;
-  const status = await run(argv, io.ctx);
+  const status = await runAndRecordScenario(argv, io.ctx);
   const ran = calls.filter((c) => c.cmd !== "diff").map((c) => [c.cmd, ...c.args].join(" "));
   return {
     status,
@@ -173,7 +173,7 @@ test("a root Caddy: write, reload, and trust run in exactly one sudo call", asyn
   const hostFile = join(m.dir, "devsite.d", `${HOST}.caddy`);
   const r = await devsite(["init"], { caddyfile: m.caddyfile, answers: { caddy, trusted: false } });
   expect(r.stdout).toContain(
-    `Step 1 of 3: write 1 file(s) in ${m.dir}, as the diff below shows  [sudo]`,
+    `Step 1 of 3: write 1 file in ${m.dir}, as the diff below shows  [sudo]`,
   );
   expect(r.stdout).toContain(
     "Step 2 of 3: load the Caddy config through Caddy's admin API  [sudo]",
@@ -201,6 +201,9 @@ test("caddy.user root with Caddy stopped: start, wait for the admin API, and tru
   expect(r.sudo).toHaveLength(1);
   expect(r.sudo[0]).toContain("sh -c brew services start caddy && sh -c 'i=0; until curl");
   expect(r.sudo[0]).toContain("&& caddy trust");
+  // The shell loop runs inside the sudo call; the step list names what it waits for.
+  expect(r.stdout).toContain("  wait up to 5 s for Caddy's admin API\n");
+  expect(r.stdout).not.toContain("sudo sh -c 'i=0");
   expect(r.status).toBe(0);
 });
 
@@ -211,7 +214,7 @@ test("Caddy from outside Homebrew: init stops and names caddy.config, doctor rep
   const caddy = { user: "den", args: "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile" };
   const r = await devsite(["init"], { caddyfile: m.caddyfile, answers: { caddy } });
   expect(r.stderr).toContain(
-    "devsite does not know this Mac's Caddy install: Caddy runs from /usr/local/bin/caddy, which is not Homebrew's Caddy.",
+    "This Mac's Caddy is an install devsite does not know: Caddy runs from /usr/local/bin/caddy, which is not Homebrew's Caddy.",
   );
   expect(r.stderr).toContain(
     `set caddy.config to the path of your main Caddy config in ${join(r.configHome, "devsite", "config.json")}`,
@@ -242,7 +245,7 @@ test("a caddy put under the Homebrew prefix by hand: not Homebrew's, so init sto
 test("no Homebrew: init stops and names caddy.config", async () => {
   const r = await devsite(["init"], { noPrefixOverride: true, answers: { brewPrefix: null } });
   expect(r.stderr).toContain(
-    "devsite does not know this Mac's Caddy install: Homebrew is not on this Mac.",
+    "This Mac's Caddy is an install devsite does not know: Homebrew is not on this Mac.",
   );
   expect(r.stderr).toContain("set caddy.config");
   expect(r.status).toBe(1);
@@ -259,7 +262,7 @@ test("caddy.config gets an unknown install past the stop: init writes beside tha
     answers: { caddy },
     settings: { caddy: { config: m.caddyfile } },
   });
-  expect(r.stdout).toContain(`✓ Caddy is installed — a kind devsite does not know`);
+  expect(r.stdout).toContain(`✓ Caddy is installed — an install devsite does not know`);
   expect(r.ran).toContain(`caddy reload --config ${m.caddyfile} --adapter caddyfile`);
   expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(
     `${HOST}, web.test.localhost {`,
@@ -350,8 +353,10 @@ test(
     const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
     const r = await devsite(["init"], { caddyfile: m.caddyfile });
     expect(r.ran).toContain("brew services start caddy");
-    expect(r.stderr).toContain("the Caddy service did not start within 5 s");
-    expect(r.stderr).toContain("run `brew services restart caddy`, then `bunx devsite init` again");
+    expect(r.stderr).toContain("the Caddy service did not start within 5 s. See ");
+    expect(r.stderr).toContain(
+      "run `brew services restart caddy`, then `bunx devsite init` again.\n",
+    );
     expect(r.status).toBe(1);
   },
   { timeout: 10_000 },

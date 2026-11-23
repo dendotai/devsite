@@ -73,7 +73,7 @@ export async function findStorage(install: KnownInstall, ctx: CliContext): Promi
     return root === null
       ? {
           root: null,
-          source: `${source}, which devsite cannot read: Caddy runs as ${install.running.user}`,
+          source: `${source}: Caddy runs as ${install.running.user}`,
           fromConfig: false,
         }
       : { root, source, fromConfig: false };

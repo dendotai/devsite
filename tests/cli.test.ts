@@ -176,7 +176,7 @@ test("init names the default_bind line it deletes", async () => {
   const r = await dryRun({ cwd: makeRepo(), caddyfile });
   expect(r.status).toBe(0);
   expect(r.stdout).toContain(
-    'deletes "default_bind 127.0.0.1 100.64.0.9" from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out',
+    'deletes "default_bind 127.0.0.1 100.64.0.9" from the Caddyfile: Caddy cannot run as you with it, and the guard keeps the LAN out',
   );
   expect(r.stdout).toContain("-\tdefault_bind 127.0.0.1 100.64.0.9");
 });

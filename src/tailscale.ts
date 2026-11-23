@@ -8,7 +8,7 @@ const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 export const ADMIN_DNS_URL = "https://login.tailscale.com/admin/dns";
 export const SPLIT_DNS_DOMAIN = "internal";
 export const TWO_MACS_ISSUE = "https://github.com/dendotai/devsite/issues/66";
-const SPLIT_DNS_LABEL = `the Tailscale split DNS route for ${SPLIT_DNS_DOMAIN} points to this Mac`;
+const SPLIT_DNS_LABEL = "the Tailscale split DNS route for .internal points to this Mac";
 
 export type TailscaleIp = { state: "absent" } | { state: "no-ip" } | { state: "ip"; ip: string };
 
@@ -18,17 +18,21 @@ function tailscale(args: string[], ctx: CliContext) {
   return r.error ? exec(TAILSCALE_APP_CLI, args, ctx, true) : r;
 }
 
+// A Tailscale switched off with `tailscale down` still reports its IP (`tailscale ip -4` too), so only BackendState "Running" counts as an IP in use.
 export function tailscaleIp(ctx: CliContext): TailscaleIp {
-  const r = tailscale(["ip", "-4"], ctx);
+  const r = tailscale(["status", "--json"], ctx);
   if (r.error) return { state: "absent" };
-  const ip =
-    r.status === 0
-      ? r.out
-          .split("\n")
-          .map((l) => l.trim())
-          .find((l) => IPV4.test(l))
-      : undefined;
-  return ip === undefined ? { state: "no-ip" } : { state: "ip", ip };
+  let status: { BackendState?: unknown; Self?: { TailscaleIPs?: unknown } };
+  try {
+    status = JSON.parse(r.out);
+  } catch {
+    return { state: "no-ip" };
+  }
+  const ips = Array.isArray(status.Self?.TailscaleIPs) ? status.Self.TailscaleIPs : [];
+  const ip = ips.find((a): a is string => typeof a === "string" && IPV4.test(a));
+  return status.BackendState !== "Running" || ip === undefined
+    ? { state: "no-ip" }
+    : { state: "ip", ip };
 }
 
 // The nameservers of the `internal` route, or null when `tailscale dns status` gives no answer. Its section reads `Split DNS Routes:`, then one `  - <domain> -> <nameserver>` line per nameserver; Tailscale marks the format as preliminary.
@@ -107,7 +111,7 @@ export function splitDnsCheck(ip: string, split: SplitDns): Result {
   const label = `${SPLIT_DNS_LABEL} (${ip})`;
   if (split.state === "this-mac") return { state: "green", label };
   const detail = splitDnsDetail(split);
-  const add = `in the Tailscale admin console (${ADMIN_DNS_URL}), add a split DNS nameserver: domain ${SPLIT_DNS_DOMAIN}, nameserver ${ip}`;
+  const add = `add a split DNS nameserver in the Tailscale admin console (${ADMIN_DNS_URL}): domain ${SPLIT_DNS_DOMAIN}, nameserver ${ip}`;
   switch (split.state) {
     case "none":
       return { state: "red", label, detail, fix: add, repair: "split-dns" };
@@ -123,7 +127,7 @@ export function splitDnsCheck(ip: string, split: SplitDns): Result {
         state: "red",
         label,
         detail,
-        fix: `the phone opens one Mac's projects per tailnet (${TWO_MACS_ISSUE}): to use this Mac's, change the nameserver for ${SPLIT_DNS_DOMAIN} to ${ip} in the Tailscale admin console (${ADMIN_DNS_URL})`,
+        fix: `change the nameserver of the domain ${SPLIT_DNS_DOMAIN} to ${ip} in the Tailscale admin console (${ADMIN_DNS_URL}), so the phone opens this Mac's projects: it opens one Mac's projects per tailnet (${TWO_MACS_ISSUE})`,
         repair: "split-dns",
       };
   }
@@ -146,13 +150,13 @@ export function probeTailscale(t: TailscaleIp, ctx: CliContext): TailscaleProbe 
         {
           state: "red",
           label: upLabel,
-          detail: "Tailscale gives no IP: it is stopped or logged out",
+          detail: "Tailscale is down (no IP)",
           fix: "start Tailscale and log in",
         },
         {
           state: "skipped",
           label: SPLIT_DNS_LABEL,
-          detail: "Tailscale is down",
+          detail: "Tailscale is down (no IP)",
         },
       ],
     };

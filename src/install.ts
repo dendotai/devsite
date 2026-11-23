@@ -169,5 +169,5 @@ export function unknownFix(ctx: CliContext): string {
 export function describeKind(install: KnownInstall): string {
   return install.kind === "homebrew"
     ? `Homebrew at ${install.prefix}`
-    : "a kind devsite does not know";
+    : "an install devsite does not know";
 }

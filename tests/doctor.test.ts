@@ -2,7 +2,6 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { run } from "../src/run";
 import { portFilePath } from "../src/state.mjs";
 import {
   type CommandCall,
@@ -11,6 +10,7 @@ import {
   makeEmptyRepo,
   makeIo,
   makeRepo,
+  runAndRecordScenario,
   scriptedRunner,
 } from "./helpers";
 import {
@@ -128,9 +128,9 @@ test("the admin API does not answer: red with its fix, and the route checks are 
   // The suites' default admin address (tests/setup.ts) has no listener.
   const r = await doctor(setUpMachine());
   expect(r.stdout).toContain("✗ Caddy's admin API answers — no answer");
-  expect(r.stdout).toContain("fix: bunx devsite init");
+  expect(r.stdout).toContain("fix: run `bunx devsite init`");
   expect(r.stdout).toContain("– the routes of devsite's hosts — they need the admin API");
-  expect(r.stdout).toContain("1 check(s) red.");
+  expect(r.stdout).toContain("1 check red.");
   expect(r.status).toBe(1);
 });
 
@@ -304,7 +304,7 @@ test("doctor as root refuses, with init's reason", async () => {
   const { runCommand, calls } = runner();
   const io = makeIo({ runCommand });
   io.ctx.env.DEVSITE_UID = "0";
-  expect(await run(["doctor"], io.ctx)).toBe(1);
+  expect(await runAndRecordScenario(["doctor"], io.ctx)).toBe(1);
   expect(io.stderr.text()).toContain("devsite doctor is running as root.");
   expect(io.stderr.text()).toContain("bunx devsite doctor");
   expect(calls).toEqual([]);
@@ -407,6 +407,6 @@ test("a host with no port file: red, because every Caddy reload fails, with init
   expect(r.stdout).toContain(
     `✗ ${HOST}'s port file exists — no ${portFilePath(HOST, m.stateDir)}, so \`caddy reload\` fails`,
   );
-  expect(r.stdout).toContain("fix: bunx devsite init, in the repo of web");
+  expect(r.stdout).toContain("fix: run `bunx devsite init` in the repo of web");
   expect(r.status).toBe(1);
 });

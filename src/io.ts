@@ -1,8 +1,14 @@
 // The output and command helpers that init, doctor, and their shared checks all use.
 import type { CliContext } from "./context";
 
-export function exec(cmd: string, args: string[], ctx: CliContext, capture = false) {
-  const r = ctx.runCommand(cmd, args, { capture });
+export function exec(
+  cmd: string,
+  args: string[],
+  ctx: CliContext,
+  capture = false,
+  timeoutMs?: number,
+) {
+  const r = ctx.runCommand(cmd, args, { capture, timeoutMs });
   // outRaw exists for diff output, where trimming could eat a meaningful trailing context line (a lone space) and corrupt the patch.
   return { status: r.status, out: r.stdout.trim(), outRaw: r.stdout, error: r.error };
 }
@@ -19,3 +25,10 @@ export const RED = 31;
 export const GREEN = 32;
 export const YELLOW = 33;
 export const CYAN = 36;
+
+// A command init runs inside its one sudo call; shown, when set, prints in place of `sudo …`, for a command whose shell text tells the user nothing.
+export type RootCommand = string[] & { shown?: string };
+
+export function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}

@@ -2,9 +2,9 @@
 // The setup import is a belt-and-braces double of the bunfig.toml preload: the DEVSITE_STATE_DIR guard holds even when bun test runs from a cwd where bunfig.toml is not picked up.
 import "./setup";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import type { Plugin } from "vite";
 import { type CliContext, type CommandResult, processRunner } from "../src/context";
@@ -27,6 +27,7 @@ export function fakeStdin(input: string | string[], isTTY: boolean) {
     isTTY?: boolean;
   };
   s.isTTY = isTTY;
+  Object.assign(s, { keys: typeof input === "string" ? [input] : input });
   return s;
 }
 
@@ -61,7 +62,7 @@ export function makeIo(opts: IoOpts = {}) {
   return { ctx, stdout, stderr };
 }
 
-export type CommandCall = { cmd: string; args: string[]; capture: boolean };
+export type CommandCall = { cmd: string; args: string[]; capture: boolean; timeoutMs?: number };
 
 // What spawnSync gives for a command that is not on PATH.
 export const MISSING: Partial<CommandResult> = {
@@ -84,8 +85,8 @@ export function quietRunner(
 // Runs nothing and records each call; a field the answer leaves out reads as exit 0 with empty stdout.
 export function scriptedRunner(answer: (call: CommandCall) => Partial<CommandResult>) {
   const calls: CommandCall[] = [];
-  const runCommand: CliContext["runCommand"] = (cmd, args, { capture }) => {
-    const call = { cmd, args, capture };
+  const runCommand: CliContext["runCommand"] = (cmd, args, { capture, timeoutMs }) => {
+    const call = { cmd, args, capture, timeoutMs };
     calls.push(call);
     return { status: 0, stdout: "", ...answer(call) };
   };
@@ -95,8 +96,69 @@ export function scriptedRunner(answer: (call: CommandCall) => Partial<CommandRes
 // One in-process CLI invocation: argv in, exit code + captured output out.
 export async function cli(argv: string[], opts: IoOpts = {}) {
   const { ctx, stdout, stderr } = makeIo(opts);
-  const status = await run(argv, ctx);
+  const status = await runAndRecordScenario(argv, ctx);
   return { status, stdout: stdout.text(), stderr: stderr.text() };
+}
+
+// run(), plus a record of the run in the file DEVSITE_SCENARIOS_FILE names (`bun run scenarios`), so every flow's words can be read as one transcript.
+export async function runAndRecordScenario(argv: string[], ctx: CliContext): Promise<number> {
+  const scenario = process.env.DEVSITE_SCENARIOS_FILE ? currentTest() : undefined;
+  const status = await run(argv, ctx);
+  const out = process.env.DEVSITE_SCENARIOS_FILE;
+  if (out && scenario) {
+    const keys = (ctx.stdin as { keys?: string[] }).keys?.filter((k) => k !== "");
+    const text = [
+      `## ${scenario}`,
+      "",
+      "```text",
+      `$ devsite ${argv.join(" ")}${keys?.length ? `   (keys: ${keys.map((k) => JSON.stringify(k)).join(" ")})` : ""}`,
+      (ctx.stdout as ReturnType<typeof sink>).text?.() ?? "",
+      (ctx.stderr as ReturnType<typeof sink>).text?.() ?? "",
+      `(exit ${status})`,
+      "```",
+      "",
+    ].join("\n");
+    appendFileSync(out, readablePaths(text));
+  }
+  return status;
+}
+
+// The title of the test that is running, read from its source: bun:test exposes no test name. The outermost frame in a test file is the test's own callback; the nearest `test(` above that line holds the title.
+function currentTest(): string | undefined {
+  const frames = [
+    ...(new Error().stack ?? "").matchAll(/(\/[^\s()]+\/tests\/[^/]+\.test\.ts):(\d+)/g),
+  ];
+  const last = frames.at(-1);
+  if (last === undefined) return undefined;
+  const [, file, line] = last as unknown as [string, string, string];
+  const lines = readFileSync(file, "utf8").split("\n");
+  for (let i = Number(line) - 1; i >= 0; i--) {
+    const m = /^\s*test\(\s*(?:["'`](.*)["'`],)?\s*$|^\s*test\(\s*["'`](.*?)["'`],/.exec(
+      lines[i] ?? "",
+    );
+    if (m === null) continue;
+    const title = m[2] ?? m[1] ?? lines[i + 1]?.trim().replace(/^["'`]|["'`],$/g, "");
+    return `${basename(file)}: ${title}`;
+  }
+  return undefined;
+}
+
+// Scratch dirs read as the Mac paths they stand for.
+function readablePaths(text: string): string {
+  const names: Record<string, string> = {
+    prefix: "/opt/homebrew",
+    state: "~/Library/Application Support/devsite",
+    config: "~/.config",
+    repo: "~/Projects/web",
+    empty: "~/Projects/empty",
+    system: "",
+  };
+  return text
+    .replace(
+      /(?:\/private)?\/(?:var\/folders\/[^/\s]+\/[^/\s]+\/T|tmp)\/devsite-([a-z]+)(?:-default)?-[A-Za-z0-9]+/g,
+      (_, kind: string) => names[kind] ?? `<${kind}>`,
+    )
+    .replace(/(?:\/private)?\/var\/folders\/[^/\s]+\/[^/\s]+\/T\//g, "$TMPDIR/");
 }
 
 // A throwaway repo whose apps/web/package.json declares a devSite host. The project name matters to rename cleanup: same project + new host = rename; a different project name = an unrelated repo.
