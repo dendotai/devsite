@@ -1,6 +1,8 @@
 // `devsite doctor` scenarios, one per check, green and red: run(["doctor"]) over a scratch Caddy dir, a scripted runner (openssl s_client, security), a local mock of Caddy's admin API, and a real node.
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import pkg from "../package.json";
 import {
@@ -24,18 +26,22 @@ import {
   useMachine,
   useNodeWith,
 } from "./machine";
+import { register, startTestNode, useNodes } from "./node-helpers";
 
 useMachine();
+useNodes();
 
 const TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 
-type Answers = { served?: string; trusted?: boolean };
+// lsof: the `-F pc` lines lsof prints for the program holding a port.
+type Answers = { served?: string; trusted?: boolean; lsof?: string };
 
 function runner(a: Answers = {}) {
   return scriptedRunner((c: CommandCall) => {
     if (c.cmd === "openssl" && c.args[0] === "s_client") return { stdout: a.served ?? pki.served };
     if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
     if (/(?:^|\/)tailscale$/i.test(c.cmd)) return MISSING;
+    if (c.cmd === "lsof" && a.lsof !== undefined) return { stdout: a.lsof };
     return { status: 1 };
   });
 }
@@ -416,4 +422,126 @@ test("the node's projects unused for 30+ days are listed in the Setup section", 
   );
   const r = await doctor(m, { cwd: makeEmptyRepo(), node: {} });
   expect(r.stdout).toContain("Projects unused for 30+ days: old (last used 2020-01-01)");
+});
+
+// --- the other Macs' nodes ---
+
+// This Mac's node on a fake tailnet with one other Mac, Mac mini at ::1. On the shared peer port there, a node answers with protocol `theirs`, or `answer` replies for another program.
+async function doctorWithOtherMac(
+  m: Machine,
+  theirs: number | ((res: import("node:http").ServerResponse) => void),
+) {
+  const otherMac = createServer();
+  await new Promise<void>((r) => otherMac.listen(0, "::1", r));
+  const peerPort = (otherMac.address() as AddressInfo).port;
+  otherMac.removeAllListeners("request");
+  otherMac.on("request", (_req, res) => {
+    if (typeof theirs === "function") return theirs(res);
+    res.writeHead(theirs === 1 ? 200 : 400, { "devsite-protocol": String(theirs) });
+    res.end("{}");
+  });
+  const cwd = makeRepo();
+  const node = await startTestNode(undefined, {
+    peerPort,
+    tailnet: {
+      status: {
+        BackendState: "Running",
+        Self: { HostName: "MacBook Pro", OS: "macOS", UserID: 1, TailscaleIPs: ["127.0.0.1"] },
+        Peer: {
+          a: { HostName: "Mac mini", OS: "macOS", UserID: 1, TailscaleIPs: ["::1"], Online: true },
+        },
+      },
+    },
+  });
+  await register(node, "web", { port: 1, folder: join(cwd, "apps", "web") });
+  process.env.DEVSITE_NODE = node.url;
+  const r = await doctor(m, { cwd, node: false });
+  await new Promise((done) => otherMac.close(done));
+  return r;
+}
+
+test("a Mac whose node runs an older protocol is red, with update devsite on that Mac", async () => {
+  await mockAdmin([nodeRoute()]);
+  const r = await doctorWithOtherMac(setUpMachine(), 0);
+  expect(r.stdout).toContain(
+    "✗ the node on Mac mini speaks this node's protocol — it speaks protocol 0, this node 1",
+  );
+  expect(r.stdout).toContain("fix: update devsite on Mac mini");
+  expect(r.status).toBe(1);
+});
+
+test("a Mac whose node runs a newer protocol is red, with update devsite on this Mac", async () => {
+  await mockAdmin([nodeRoute()]);
+  const r = await doctorWithOtherMac(setUpMachine(), 2);
+  expect(r.stdout).toContain(
+    "✗ the node on Mac mini speaks this node's protocol — it speaks protocol 2, this node 1",
+  );
+  expect(r.stdout).toContain("fix: update devsite on this Mac: run `bunx devsite init`");
+});
+
+test("a Mac whose node speaks this node's protocol is green", async () => {
+  await mockAdmin([nodeRoute()]);
+  const r = await doctorWithOtherMac(setUpMachine(), 1);
+  expect(r.stdout).toContain("Other Macs");
+  expect(r.stdout).toContain("✓ the node on Mac mini speaks this node's protocol");
+  expect(r.status).toBe(0);
+});
+
+test("a Mac where another program holds the peer port is red, with the doctor run there", async () => {
+  await mockAdmin([nodeRoute()]);
+  const r = await doctorWithOtherMac(setUpMachine(), (res) => res.end("hello"));
+  expect(r.stdout).toMatch(
+    /✗ the node on Mac mini answers on port \d+ — another program answers there/,
+  );
+  expect(r.stdout).toContain("fix: run `bunx devsite doctor` on Mac mini: it names the program");
+});
+
+test("a Mac whose node refuses this Mac's calls is red, with one Tailscale user as the fix", async () => {
+  await mockAdmin([nodeRoute()]);
+  const r = await doctorWithOtherMac(setUpMachine(), (res) => {
+    res.writeHead(403, { "devsite-protocol": "1" });
+    res.end("{}");
+  });
+  expect(r.stdout).toContain(
+    "✗ the node on Mac mini accepts this Mac's calls — its Tailscale names another user for this Mac",
+  );
+  expect(r.stdout).toContain("fix: log in both Macs to one Tailscale user");
+});
+
+test("a peer port another program holds on this Mac is red, naming that program", async () => {
+  await mockAdmin([nodeRoute()]);
+  const holder = createServer();
+  await new Promise<void>((r) => holder.listen(0, "::1", r));
+  const peerPort = (holder.address() as AddressInfo).port;
+  const cwd = makeRepo();
+  const node = await startTestNode(undefined, {
+    peerPort,
+    tailnet: {
+      status: {
+        BackendState: "Running",
+        Self: { HostName: "MacBook Pro", OS: "macOS", UserID: 1, TailscaleIPs: ["::1"] },
+      },
+    },
+  });
+  await register(node, "web", { port: 1, folder: join(cwd, "apps", "web") });
+  process.env.DEVSITE_NODE = node.url;
+  const r = await doctor(setUpMachine(), {
+    cwd,
+    node: false,
+    answers: { lsof: "p4242\ncsyncthing\n" },
+  });
+  await new Promise((done) => holder.close(done));
+  expect(r.stdout).toContain(
+    `✗ the node listens for other Macs on [::1]:${peerPort} — syncthing (pid 4242) holds the port`,
+  );
+  expect(r.stdout).toContain("fix: stop syncthing; the node takes the port within 10 s");
+  const lsof = r.calls.find((c) => c.cmd === "lsof");
+  expect(lsof?.args).toEqual(["-nP", `-iTCP:${peerPort}`, "-sTCP:LISTEN", "-Fpc"]);
+  expect(r.status).toBe(1);
+});
+
+test("a peer port this Mac's node holds is green", async () => {
+  await mockAdmin([nodeRoute()]);
+  const r = await doctorWithOtherMac(setUpMachine(), 1);
+  expect(r.stdout).toMatch(/✓ the node listens for other Macs on 127\.0\.0\.1:\d+/);
 });

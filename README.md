@@ -24,6 +24,7 @@ devsite is a client-server app ([ADR 0005](docs/adr/0005-devsite-is-a-client-ser
 - **`devsite init`** — the onboarding, run once per Mac, from any folder. It installs the node, writes Caddy's one route to it, and checks each part of the setup, fixing only what is red; on a set-up Mac it asks nothing, runs no `sudo`, and changes nothing. See [The onboarding](#the-onboarding).
 - **`devsite doctor`** — the same checks with the fixes turned off, the node first. It prints how this Mac is set up, marks each check green or red, and names the fix for each red one. See [`devsite doctor`](#devsite-doctor).
 - **The Vite plugin** — runs on every `bun dev`. Vite binds a free port the OS assigns, and the plugin tells the node the project's name, port and folder. That is all: no sudo, no Caddy change, and no `init` in the project's repo. With no node, `bun dev` prints `devsite: the node does not answer — run bunx devsite doctor` and serves on the raw local URL.
+  - A name live on another Mac of your tailnet stops `bun dev` with an error such as `devsite: web.internal runs on Mac mini from ~/Projects/acme-web`, because one name has one URL. A Mac that gives no answer, or serves only the offline page, does not block the start; a Mac online in Tailscale that does not reply delays it by up to 1.5 s.
   - It also routes `<name>.localhost` to the same port. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
 ```text
@@ -36,6 +37,8 @@ Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA, L
                                         ▼
                                       Vite dev server (OS-assigned port)
 ```
+
+The nodes on the Macs of one tailnet find each other through `tailscale status`, and each listens for the others on port **47380** of its Tailscale IPs, the port it uses on `127.0.0.1`. A node answers another node only when `tailscale whois` names your own Tailscale user; a device shared into your tailnet still reaches your dev servers through Caddy.
 
 A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not answer, Caddy shows a short "node not running" page.
 
@@ -150,6 +153,8 @@ Then the checks. They check outcomes, not how they came about, so a setup you bu
 - **Caddy** — installed; the admin API answers; devsite's route for `*.internal` and `*.localhost` exists and starts with the LAN guard; no route before it takes its names; the served certificate chains to the CA in Caddy's storage; that CA is trusted in the keychain.
 - **Tailscale** (when it is on the Mac) — up; the split DNS route for `internal` points to this Mac.
 - **dnsmasq** (when Tailscale is on the Mac) — something answers `.internal` with the Tailscale IP on the Tailscale IP; this Mac resolves `.internal` to the Tailscale IP.
+- **Node on the tailnet** (with Tailscale up) — the node listens on port 47380 of each Tailscale IP. When another program holds the port, the red check names it, and the node takes the port within 10 s once it is free.
+- **Other Macs** (when another Mac of your Tailscale user answers on port 47380) — its node speaks this node's protocol number (a red check names the Mac to update: `update devsite on Mac mini`), it accepts this Mac's calls, and no other program holds the port there. A Mac with no devsite, a stopped node, or a Mac that sleeps gets no check.
 - **This repo** — every `devSite` name is valid and used by one project only, and the node holds no name of this repo for a folder outside it.
 
 Each red check names its fix: `bunx devsite init`, a setting, or a manual step.

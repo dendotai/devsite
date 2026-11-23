@@ -3,8 +3,8 @@ import type { Result } from "./checks";
 import type { CliContext } from "./context";
 import { exec } from "./io";
 
-const TAILSCALE_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
-const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+export const TAILSCALE_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+export const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 export const ADMIN_DNS_URL = "https://login.tailscale.com/admin/dns";
 export const SPLIT_DNS_DOMAIN = "internal";
 export const TWO_MACS_ISSUE = "https://github.com/dendotai/devsite/issues/66";

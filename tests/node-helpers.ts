@@ -1,7 +1,7 @@
 // A real node in its own process, on a scratch home and a free loopback port, plus small local HTTP servers that stand in for dev servers.
 import { afterEach } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -39,9 +39,29 @@ function stopChild(child: ChildProcess): Promise<void> {
   });
 }
 
-export async function startTestNode(home = mkdtempSync(join(tmpdir(), "devsite-home-"))) {
+// The answers the fake tailscale (tests/bin/tailscale) gives this node: `status --json`, and `whois --json <ip>` per IP.
+export type FakeTailnet = { status: object; whois?: Record<string, object> };
+
+export type TestNodeOptions = { tailnet?: FakeTailnet; peerPort?: number };
+
+export async function startTestNode(
+  home = mkdtempSync(join(tmpdir(), "devsite-home-")),
+  { tailnet, peerPort }: TestNodeOptions = {},
+) {
+  const answers = mkdtempSync(join(tmpdir(), "devsite-tailnet-"));
+  if (tailnet !== undefined) {
+    writeFileSync(join(answers, "status.json"), JSON.stringify(tailnet.status));
+    for (const [ip, who] of Object.entries(tailnet.whois ?? {})) {
+      writeFileSync(join(answers, `whois-${ip}.json`), JSON.stringify(who));
+    }
+  }
   const child = spawn(process.execPath, [CLI, "node", "--port", "0"], {
-    env: { ...process.env, DEVSITE_USER_HOME: home },
+    env: {
+      ...process.env,
+      DEVSITE_USER_HOME: home,
+      DEVSITE_FAKE_TAILSCALE: answers,
+      ...(peerPort === undefined ? {} : { DEVSITE_PEER_PORT: String(peerPort) }),
+    },
     stdio: ["ignore", "pipe", "inherit"],
   });
   children.push(child);

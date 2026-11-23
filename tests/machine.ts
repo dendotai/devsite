@@ -178,7 +178,10 @@ export async function useNodeWith(
   projects: Record<string, { folder?: string; devsiteVersion?: string }> = {},
 ) {
   const home = process.env.DEVSITE_USER_HOME ?? "";
-  const node = await startNode({ port: 0, env: { DEVSITE_USER_HOME: home } });
+  const node = await startNode({
+    port: 0,
+    env: { DEVSITE_USER_HOME: home, DEVSITE_TAILSCALE: process.env.DEVSITE_TAILSCALE },
+  });
   nodes.push(node);
   process.env.DEVSITE_NODE = `http://127.0.0.1:${node.port}`;
   let port = 1;

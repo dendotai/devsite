@@ -28,6 +28,9 @@ export type CliContext = {
     DEVSITE_SYSTEM_ROOT?: string;
     DEVSITE_SPLIT_DNS_WAIT_MS?: string;
     DEVSITE_NODE_WAIT_MS?: string;
+    DEVSITE_PEER_PORT?: string;
+    DEVSITE_TAILNET_REFRESH_MS?: string;
+    DEVSITE_TAILSCALE?: string;
     [key: string]: string | undefined;
   };
   // Every external command the CLI runs goes through here, so a test scripts each answer and reads which commands ran.
