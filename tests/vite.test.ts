@@ -35,7 +35,7 @@ test("package.json without a devSite name: no-op", () => {
   expect(result).toBeUndefined();
 });
 
-test("devSite.name present: Vite binds an OS-assigned port on loopback, and HMR comes back over wss on 443", async () => {
+test("devSite.name present: Vite binds an OS-assigned port on loopback, and the HMR client uses the page's own protocol and port", async () => {
   const plugin = devsite();
   const result = await viteConfigHook(plugin)(
     { root: makeViteRoot({ name: "web", devSite: { name: "web" } }) },
@@ -46,7 +46,7 @@ test("devSite.name present: Vite binds an OS-assigned port on loopback, and HMR 
   expect(result?.server?.strictPort).toBeUndefined();
   // Only the node, on this Mac, connects to Vite; any other address puts the dev server on the local network.
   expect(result?.server?.host).toBe("127.0.0.1");
-  expect(result?.server?.ws).toEqual({ protocol: "wss", clientPort: 443 });
+  expect(result?.server?.ws).toBeUndefined();
 });
 
 // Runs the plugin's hooks for a Vite root as `bun dev` does, with the fake server bound to `port`.

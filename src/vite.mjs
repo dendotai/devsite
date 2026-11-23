@@ -67,11 +67,9 @@ export function devsite() {
         server: {
           // 0 = the OS assigns the port at bind time; there is no pre-picked number to race over. The real port is read when the server starts listening.
           port: 0,
-          // The node, on this Mac, is the only client: other devices reach the dev server through Caddy and the node, never on this port.
+          // Loopback only: other devices reach the dev server through Caddy and the node, never on this port.
           host: "127.0.0.1",
           allowedHosts: [hostsOf(name).internal],
-          // Caddy terminates TLS on :443 and the node passes the WebSocket on, so the HMR client must connect back over wss on 443, not the raw port. No `host`: the client then uses the page's own host, `.internal` or `.localhost`.
-          ws: { protocol: "wss", clientPort: 443 },
         },
       };
     },
