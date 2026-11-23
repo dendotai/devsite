@@ -32,3 +32,7 @@ export type RootCommand = string[] & { shown?: string };
 export function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
+
+// Text inside a plist's <string>.
+export const xml = (s: string) =>
+  s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");

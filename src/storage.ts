@@ -2,10 +2,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { caddy } from "./caddy-admin";
 import type { CliContext } from "./context";
 import type { KnownInstall } from "./install";
 import { exec } from "./io";
-import { caddy } from "./vite.mjs";
 
 // root is null when devsite cannot read the storage: a kind other than file_system, or a running Caddy whose environment ps does not show (one of another user). fromConfig is true when the config names the storage, so init writes no pin.
 export type Storage = { root: string | null; source: string; fromConfig: boolean };

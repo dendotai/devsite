@@ -1,5 +1,5 @@
 // Shared fixtures for the CLI and Vite-plugin test suites.
-// The setup import is a belt-and-braces double of the bunfig.toml preload: the DEVSITE_STATE_DIR guard holds even when bun test runs from a cwd where bunfig.toml is not picked up.
+// The setup import is a belt-and-braces double of the bunfig.toml preload: its scratch home holds even when bun test runs from a cwd where bunfig.toml is not picked up.
 import "./setup";
 import { EventEmitter } from "node:events";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -35,14 +35,14 @@ export type IoOpts = {
   cwd?: string;
   // A Caddyfile at <prefix>/etc/Caddyfile: the run sees <prefix> as the Homebrew prefix.
   caddyfile?: string;
-  // The dir that holds devsite/config.json.
-  configHome?: string;
+  // The home devsite's files hang from: ~/Library/Application Support/devsite/config.json and the rest.
+  home?: string;
   stdin?: CliContext["stdin"];
   runCommand?: CliContext["runCommand"];
   env?: CliContext["env"];
 };
 
-// A CliContext over in-memory io. The env holds only the scratch prefix, the settings dir, and the state dir tests/setup.ts points at, so an ambient DEVSITE_UID can never leak in.
+// A CliContext over in-memory io. The env holds only the scratch prefix and the home tests/setup.ts points at, so an ambient DEVSITE_UID can never leak in.
 export function makeIo(opts: IoOpts = {}) {
   const stdout = sink();
   const stderr = sink();
@@ -53,8 +53,7 @@ export function makeIo(opts: IoOpts = {}) {
     cwd: opts.cwd ?? makeEmptyRepo(),
     env: {
       DEVSITE_BREW_PREFIX: dirname(dirname(opts.caddyfile ?? scratchCaddyfile())),
-      XDG_CONFIG_HOME: opts.configHome ?? mkdtempSync(join(tmpdir(), "devsite-config-")),
-      DEVSITE_STATE_DIR: process.env.DEVSITE_STATE_DIR,
+      DEVSITE_USER_HOME: opts.home ?? process.env.DEVSITE_USER_HOME,
       ...opts.env,
     },
     runCommand: opts.runCommand ?? quietRunner().runCommand,
@@ -147,8 +146,7 @@ function currentTest(): string | undefined {
 function readablePaths(text: string): string {
   const names: Record<string, string> = {
     prefix: "/opt/homebrew",
-    state: "~/Library/Application Support/devsite",
-    config: "~/.config",
+    home: "~",
     repo: "~/Projects/web",
     empty: "~/Projects/empty",
     system: "",
@@ -161,13 +159,13 @@ function readablePaths(text: string): string {
     .replace(/(?:\/private)?\/var\/folders\/[^/\s]+\/[^/\s]+\/T\//g, "$TMPDIR/");
 }
 
-// A throwaway repo whose apps/web/package.json declares a devSite host. The project name matters to rename cleanup: same project + new host = rename; a different project name = an unrelated repo.
-export function makeRepo(host = "web.test.internal", project = "web") {
+// A throwaway repo whose apps/web/package.json declares a devSite name.
+export function makeRepo(name = "web", project = "web") {
   const repo = mkdtempSync(join(tmpdir(), "devsite-repo-"));
   mkdirSync(join(repo, "apps", "web"), { recursive: true });
   writeFileSync(
     join(repo, "apps", "web", "package.json"),
-    JSON.stringify({ name: project, devSite: { name: host.replace(/\.internal$/, "") } }),
+    JSON.stringify({ name: project, devSite: { name } }),
   );
   return repo;
 }
@@ -177,9 +175,16 @@ export function makeEmptyRepo() {
   return mkdtempSync(join(tmpdir(), "devsite-empty-"));
 }
 
-// A fresh scratch dir for suites that point DEVSITE_STATE_DIR per test.
-export function makeStateDir() {
-  return mkdtempSync(join(tmpdir(), "devsite-state-"));
+// A fresh scratch home for a test that reads what devsite wrote there.
+export function makeHome() {
+  return mkdtempSync(join(tmpdir(), "devsite-home-"));
+}
+
+// A settings file in a home, as ~/Library/Application Support/devsite/config.json.
+export function writeSettings(home: string, settings: object) {
+  const dir = join(home, "Library", "Application Support", "devsite");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify(settings));
 }
 
 // A Caddyfile path at etc/Caddyfile of a fresh scratch Homebrew prefix. Starts nonexistent; suites that only dry-run share one, the round-trip suite writes and patches it.

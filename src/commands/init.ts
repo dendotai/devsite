@@ -1,46 +1,37 @@
 /**
- * devsite init — machine bootstrap for *.internal dev URLs over Tailscale.
+ * devsite init — sets up this Mac once for every project's dev URLs (ADR 0005): installs the node, writes Caddy's one route to it, trusts Caddy's CA, and runs devsite's dnsmasq for the phone.
  *
  * Design notes:
- *   - No ports. `package.json#devSite` declares only a host; each host's site block imports a port file in devsite's state dir, which holds a placeholder until the devsite Vite plugin (vite.mjs) writes a live `reverse_proxy` to a free ephemeral port at `bun dev` time and swaps the same route in through Caddy's admin API. Any number of projects can run at once.
- *   - devsite owns the `devsite.d/` directory next to the Caddyfile — one `<host>.caddy` file per host, first line `# <project>`. The user's Caddyfile is edited exactly once, ever: a single `import devsite.d/*.caddy # devsite` line (the glob covers future files). Registering or renaming hosts only writes `devsite.d/` files; nothing in the user's file is ever re-parsed or regenerated. devsite keeps the storage Caddy already uses: with no `storage` line it pins that storage in the Caddyfile's global options block, creating the block (once) when the user has none, or adding the pin into the user's block (once). A block the user has touched is never rewritten — later runs only presence-check; a block that is purely devsite's own rendering re-renders fresh.
- *   - State-driven: init runs doctor's Caddy checks first and plans a fix only for each red one, so on a set-up Mac it asks nothing, runs no sudo, and leaves Caddy's live routes alone. Every plan shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
+ *   - devsite owns the `devsite.d/` directory next to the Caddyfile: the route for every devsite name (`node.caddy`) and the guard snippet a site of the user's own can import (`guard.caddy`). The user's Caddyfile gets a single `import devsite.d/*.caddy # devsite` line, once. devsite keeps the storage Caddy already uses: with no `storage` line it pins that storage in the Caddyfile's global options block, beside the `on_demand_tls` ask that lets Caddy sign a certificate only for a name the node knows. It creates the block (once) when the user has none, or adds its lines into the user's block (once). A block the user has touched is never rewritten — later runs only presence-check; a block that is purely devsite's own rendering re-renders fresh.
+ *   - State-driven: init runs doctor's checks first and plans a fix only for each red one, so on a set-up Mac it asks nothing, runs no sudo, and leaves Caddy's live routes alone. Every plan shows one multi-file diff and asks first. The first Caddyfile write ever saves `Caddyfile.pre-devsite` and no code path touches it again; `.bak` holds the Caddyfile before the latest run.
  *   - Every step that needs root runs in one sudo call, so one password prompt covers the run whatever sudo's `timestamp_timeout` is.
  *
- * Run it as yourself; a run as root is refused:
+ * Run it as yourself, from any folder; a run as root is refused:
  *   bunx devsite init            # apply
  *   bunx devsite init --dry-run  # print the plan and the diff it would apply; touch nothing
  *
- * `bun dev` never needs sudo: it only ever talks to Caddy's admin API on localhost.
+ * `bun dev` never needs sudo: it only tells the node which port the project runs on.
  */
-// Adding a version-sensitive node API here (fs.glob is the only one so far, Node 22+)? Check engines.node in package.json, and consider a node-version matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
-import {
-  copyFileSync,
-  existsSync,
-  globSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+// Adding a version-sensitive node API here? Check engines.node in package.json, and consider a node-version matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { BlockList, isIP } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join } from "node:path";
 // bun-types types every .html import as an HTMLBundle for Bun.serve; the text attribute gives the file's text, which `bun build` inlines into dist, so the package ships no asset file.
-import offlinePage from "../../assets/offline.html" with { type: "text" };
+import nodeDownPage from "../../assets/node-down.html" with { type: "text" };
+import { adminBase, caddy } from "../caddy-admin";
 import {
   type CaddyRoute,
   caddyChecks,
   JSON_FIX_IN_INIT,
-  machineHosts,
-  offlinePageChecks,
-  portFileChecks,
+  nodeChecks,
   printSection,
   type Repair,
   type Result,
   readServers,
   type Servers,
 } from "../checks";
+import { NODE_PORT } from "../client.mjs";
 import { type CliContext, processContext } from "../context";
 import { type DnsmasqPlan, digAnswer, planDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { ALLOWED_SOURCES, guardCaddyfileLines } from "../guard.mjs";
@@ -58,9 +49,9 @@ import {
   type RootCommand,
   YELLOW,
 } from "../io";
-import { devSiteName, hostsOf } from "../names.mjs";
+import { installNode, type NodeAnswer, readNode } from "../node/install";
+import { supportDir } from "../paths";
 import { readSettings, type Settings, settingsPath } from "../settings";
-import { PORT_PLACEHOLDER, portFilePath, resolveStateDir, writePortFile } from "../state.mjs";
 import { caRootFile, findStorage, rootCrtIn } from "../storage";
 import {
   ADMIN_DNS_URL,
@@ -72,7 +63,6 @@ import {
   splitDnsValues,
   TWO_MACS_ISSUE,
 } from "../tailscale";
-import { adminBase, caddy } from "../vite.mjs";
 
 // Shorter than the 7-day intermediate, as Caddy's docs require (168h made each leaf end at the same second as its intermediate); 120h still outlasts a weekend with the Mac asleep.
 const LEAF_LIFETIME = "120h";
@@ -101,43 +91,6 @@ export function refuseRoot(command: keyof typeof SUDO_NOTE, ctx: CliContext): bo
   return true;
 }
 
-export type Route = { host: string; project: string };
-
-export function discoverRoutes(repoRoot: string): Route[] {
-  const candidates = [join(repoRoot, "package.json")];
-  for (const dir of ["apps", "packages"]) {
-    const base = join(repoRoot, dir);
-    if (!existsSync(base)) continue;
-    for (const rel of globSync("*/package.json", { cwd: base })) {
-      candidates.push(join(base, rel));
-    }
-  }
-  const routes: Route[] = [];
-  // Keyed lowercase: DNS is case-insensitive, and Caddy refuses a config with two site blocks for one address — that refusal would land only after the write, as a dead always-on service.
-  const claimed = new Map<string, string>();
-  for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    const pkg = JSON.parse(readFileSync(path, "utf8")) as {
-      name?: string;
-      devSite?: { name?: unknown };
-    };
-    const name = devSiteName(pkg, path);
-    if (name) {
-      const host = hostsOf(name).internal;
-      const project = pkg.name ?? relative(repoRoot, path);
-      const owner = claimed.get(host.toLowerCase());
-      if (owner !== undefined) {
-        throw new Error(
-          `devSite.name ${JSON.stringify(name.toLowerCase())} is declared by both ${owner} and ${project} — every project needs its own name`,
-        );
-      }
-      claimed.set(host.toLowerCase(), project);
-      routes.push({ host, project });
-    }
-  }
-  return routes.sort((a, b) => a.host.localeCompare(b.host));
-}
-
 // A global options block is a bare `{` at column 0 (Caddy allows at most one, and it must precede every site block). Nested braces are indented in any conventionally formatted file, so the first column-0 `}` closes it.
 function findGlobalBlock(
   text: string,
@@ -149,8 +102,10 @@ function findGlobalBlock(
 
 // What survives of a global options block once devsite's own directives and comments are dropped — empty means the block was devsite's own rendering.
 function foreignGlobalDirectives(inner: string): string[] {
-  const withoutStorage = inner.replace(/^[ \t]*storage file_system \{[\s\S]*?^[ \t]*\}\n?/m, "");
-  return withoutStorage
+  const withoutOwn = inner
+    .replace(/^[ \t]*storage file_system \{[\s\S]*?^[ \t]*\}\n?/m, "")
+    .replace(ASK_BLOCK_RE, "");
+  return withoutOwn
     .split("\n")
     .map((l) => l.trimEnd())
     .filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
@@ -167,6 +122,19 @@ function storagePinLines(root: string): string[] {
   ];
 }
 
+// Caddy signs a certificate for a devsite name at its first TLS handshake (`on_demand` in the route); it asks the node first, so a LAN host cannot make it sign one per name it sends.
+const ASK_URL = `http://127.0.0.1:${NODE_PORT}/tls-allowed`;
+const ASK_BLOCK_RE = /^[ \t]*on_demand_tls \{[\s\S]*?^[ \t]*\}\n?/m;
+function askLines(): string[] {
+  return [
+    "\t# devsite: Caddy asks the devsite node before it signs a certificate for a name.",
+    "\ton_demand_tls {",
+    `\t\task ${ASK_URL}`,
+    "\t}",
+  ];
+}
+const hasAsk = (inner: string) => ASK_BLOCK_RE.test(inner);
+
 // The snippet a site block of the user's own imports to take devsite's LAN guard in place of a default_bind. Its matcher name is devsite's, so it cannot clash with one in the user's block.
 const GUARD_FILE = "guard.caddy";
 export function renderGuardFile(): string {
@@ -179,88 +147,61 @@ export function renderGuardFile(): string {
   ].join("\n");
 }
 
-// Outside the `devsite.d/*.caddy` glob (`*` does not cross `/`), so Caddy loads it only through each host file's import, which passes the project as its argument. A named snippet would have to come before every host file in parse order.
-export const OFFLINE_FRAGMENT = "fragments/offline.caddy";
+export const NODE_ROUTE_FILE = "node.caddy";
 
-// The files devsite writes whole, by file name, with what each one is: init names them in one line.
-const OFFLINE_HEREDOC_END = "HTML";
-const OFFLINE_PROJECT = "{args[0]}";
+const HEREDOC_END = "HTML";
 
-// The page shows these as text, and a `{` in them would be a Caddy placeholder (`{env.X}` prints an env var): every other character becomes an HTML character reference, which also keeps quotes and spaces out of the import argument.
-function htmlText(s: string): string {
-  return s.replace(/[^A-Za-z0-9@/._-]/g, (c) => `&#${c.codePointAt(0)};`);
-}
-
-// handle_errors answers the 503 of the port file's placeholder (a server never started) and the 502 of a dead dev server's route; the page picks its text from {http.error.status_code}. Caddy fills the visited host per request, so one fragment serves both of a host file's names.
-export function renderOfflineFragment(page: string = offlinePage as unknown as string): string {
+// The page goes into a Caddyfile heredoc that Caddy fills with placeholders, so a `{` followed by a name (`{env.X}` prints an env var) or a line equal to the heredoc's end must never reach it.
+function heredocLines(page: string, indent: string): string[] {
   page.split("\n").forEach((line, i) => {
     const brace = line.match(/\{\S/)?.[0];
     if (brace !== undefined) {
       throw new Error(
-        `assets/offline.html line ${i + 1} holds \`${brace}\`, which Caddy reads as a placeholder`,
+        `assets/node-down.html line ${i + 1} holds \`${brace}\`, which Caddy reads as a placeholder`,
       );
     }
-    if (line.trim() === OFFLINE_HEREDOC_END) {
+    if (line.trim() === HEREDOC_END) {
       throw new Error(
-        `assets/offline.html line ${i + 1} is \`${OFFLINE_HEREDOC_END}\`, which ends the page early`,
+        `assets/node-down.html line ${i + 1} is \`${HEREDOC_END}\`, which ends the page early`,
       );
     }
   });
-  // The page's comments are notes for its editor (the token list), not for a visitor.
-  const lines = page
+  // The page's comments are notes for its editor, not for a visitor.
+  return page
     .replace(/<!--[\s\S]*?-->\n?/g, "")
     .replace(/\n$/, "")
-    .split("\n");
-  const body = lines.map((line) =>
-    line === ""
-      ? ""
-      : `\t\t${line}`
-          .replaceAll("__HOST__", "{http.request.host}")
-          .replaceAll("__STATUS_CODE__", "{http.error.status_code}")
-          .replaceAll("__PROJECT__", OFFLINE_PROJECT),
-  );
-  return [
-    "# devsite: the offline page every host file imports. init renders it from its assets/offline.html, so an edit here is overwritten.",
-    "handle_errors 502 503 {",
-    "\theader {",
-    '\t\tContent-Type "text/html; charset=utf-8"',
-    "\t\tCache-Control no-store",
-    "\t}",
-    `\trespond <<${OFFLINE_HEREDOC_END}`,
-    ...body,
-    `\t\t${OFFLINE_HEREDOC_END} 503`,
-    "}",
-    "",
-  ].join("\n");
+    .split("\n")
+    .map((line) => (line === "" ? "" : `${indent}${line}`));
 }
 
-// The handler comes from the host's port file, which the devsite Vite plugin keeps on the live port, so a `caddy reload` keeps a running dev server's route. portFile null inlines the placeholder, for the JSON printed to a Caddy with no Caddyfile; that JSON answers in one line of text, because the page inline makes that printout long (#86 loads the routes with no printout). The first line (`# <project>`) is the file's ownership record, read by rename cleanup. Each host file carries its own `issuer internal`, so no global local_certs moves the user's other sites off their real certificates.
-export function renderHostFile(r: Route, portFile: string | null): string {
-  const localhost = r.host.replace(/\.internal$/, ".localhost");
-  if (portFile !== null && /["\\\n]/.test(portFile)) {
-    throw new Error(
-      `devsite's state dir cannot hold a quote, a backslash, or a newline: ${portFile}`,
-    );
-  }
-  const offline =
-    portFile === null
-      ? [
-          "\thandle_errors 502 503 {",
-          `\t\trespond "devsite: dev server for ${r.host} is not running" 503`,
-          "\t}",
-        ]
-      : [`\timport ${OFFLINE_FRAGMENT} "${htmlText(r.project)}"`];
+// Caddy's one route for every devsite name: the LAN guard, then the node; a 502 means the node does not answer, and Caddy answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile.
+export function renderNodeRoute(page: string | null = nodeDownPage as unknown as string): string {
+  const down =
+    page === null
+      ? ['\t\trespond "devsite: the node does not answer — run bunx devsite doctor" 502']
+      : [
+          "\t\theader {",
+          '\t\t\tContent-Type "text/html; charset=utf-8"',
+          "\t\t\tCache-Control no-store",
+          "\t\t}",
+          `\t\trespond <<${HEREDOC_END}`,
+          ...heredocLines(page, "\t\t\t"),
+          `\t\t\t${HEREDOC_END} 502`,
+        ];
   return [
-    `# ${r.project}`,
-    `${r.host}, ${localhost} {`,
+    "# devsite: the route for every devsite name, to the devsite node. init writes this file whole.",
+    "*.internal, *.localhost {",
     "\ttls {",
     "\t\tissuer internal {",
     `\t\t\tlifetime ${LEAF_LIFETIME}`,
     "\t\t}",
+    "\t\ton_demand",
     "\t}",
     ...guardCaddyfileLines(),
-    portFile === null ? `\t${PORT_PLACEHOLDER}` : `\timport "${portFile}"`,
-    ...offline,
+    `\treverse_proxy 127.0.0.1:${NODE_PORT}`,
+    "\thandle_errors 502 {",
+    ...down,
+    "\t}",
     "}",
     "",
   ].join("\n");
@@ -384,9 +325,6 @@ type StepPlan = {
   removedBinds: string[];
   guardedSites: string[];
   repairs: Set<Repair>;
-  // The hosts with no port file yet. An existing one is never written: it can hold a running dev server's live port.
-  missingPortFiles: string[];
-  stateDir: string;
   // Shown under the load step: one line per live route the load drops, or one line that says init cannot list them.
   dropped: string[];
   // null when no check calls for devsite's dnsmasq.
@@ -464,12 +402,8 @@ function allRoutes(servers: Servers): CaddyRoute[] {
   return Object.values(servers).flatMap((s) => s.routes ?? []);
 }
 
-// A load replaces the live config with the adapted Caddyfile, so it drops each route another tool added through the admin API at runtime. devsite's own hosts are left out: their port files bring their routes back.
-async function droppedRoutes(
-  config: string,
-  ownHosts: Set<string>,
-  ctx: CliContext,
-): Promise<string[]> {
+// A load replaces the live config with the adapted Caddyfile, so it drops each route another tool added through the admin API at runtime.
+async function droppedRoutes(config: string, ctx: CliContext): Promise<string[]> {
   const live = await readServers();
   if (!live.ok) return [];
   let adapted: CaddyRoute[] = [];
@@ -487,7 +421,7 @@ async function droppedRoutes(
     }
     adapted = allRoutes(parsed.apps?.http?.servers ?? {});
   }
-  const kept = new Set([...ownHosts, ...adapted.flatMap(routeHosts)]);
+  const kept = new Set(adapted.flatMap(routeHosts));
   const keptHostless = new Set(
     adapted.filter((r) => routeHosts(r).length === 0).map((r) => JSON.stringify(r)),
   );
@@ -513,14 +447,12 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
   const asRoot = install.user === "root";
   const { repairs } = p;
   const steps: Step[] = [];
-  // Before the host files that import them, so no reload ever reads a host file whose port file is missing. User space, so no sudo even for a root Caddy.
-  if (p.missingPortFiles.length > 0) {
+  // User space, so no sudo even for a root Caddy. It installs the devsite version init runs from.
+  if (repairs.has("node")) {
     steps.push({
-      text: `write the port file of ${p.missingPortFiles.join(", ")} in ${join(p.stateDir, "ports")}`,
-      repair: "port-file",
-      run: async () => {
-        for (const host of p.missingPortFiles) writePortFile(host, PORT_PLACEHOLDER, p.stateDir);
-      },
+      text: "install the node and start it at login, as you",
+      repair: "node",
+      run: async () => installNode(ctx),
     });
   }
   if (repairs.has("install")) {
@@ -795,15 +727,14 @@ export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<bool
 }
 
 // A phone trusts the CA once, so the steps show only on the run that set the CA up.
-function printPhoneSteps(routes: Route[], caRoot: string | null, ctx: CliContext) {
-  const host = routes[0]?.host;
+function printPhoneSteps(caRoot: string | null, ctx: CliContext) {
   ctx.stdout.write(
     [
       "",
       "Manual, per-device (one-time — can't be automated from here):",
-      `  • On each phone: install and trust the CA root, then reload https://${host}`,
+      "  • On each phone: install and trust the CA root, then open a project at https://<name>.internal",
       caRoot === null
-        ? `      Caddy makes its CA when it first serves https://${host}; then save it with \`curl -s ${adminBase()}/pki/ca/local | jq -r .root_certificate > caddy-root.crt\``
+        ? `      Caddy makes its CA when it first serves a project; then save it with \`curl -s ${adminBase()}/pki/ca/local | jq -r .root_certificate > caddy-root.crt\``
         : `      ${caRoot}`,
       "      (iOS: install the profile, then turn it on in Settings → General → About →",
       "       Certificate Trust Settings.)",
@@ -840,19 +771,21 @@ function planCaddyfile(
 
   // The global options block lives in the Caddyfile — Caddy allows exactly one, first in the file. Three cases:
   //   - purely devsite's own rendering (nothing of the user's inside): re-render fresh, keeping the pinned storage.
-  //   - anything the user touched: preserved byte-for-byte; devsite appends its pin when the block names no storage, once.
-  //   - none: devsite creates one for its pin.
+  //   - anything the user touched: preserved byte-for-byte; devsite appends each of its lines the block lacks, once.
+  //   - none: devsite creates one for its lines.
   const g = findGlobalBlock(text);
-  let block: string[] | null = pinRoot === null ? null : storagePinLines(pinRoot);
+  const pin = pinRoot === null ? [] : storagePinLines(pinRoot);
+  let block: string[] | null = [...pin, ...askLines()];
   if (g !== null) {
-    if (hasStoragePin(g.inner) && foreignGlobalDirectives(g.inner).length === 0) {
+    if (foreignGlobalDirectives(g.inner).length === 0) {
       const kept = g.inner.match(/^\s*root\s+"?([^"\n]+?)"?\s*$/m)?.[1];
-      block = kept !== undefined ? storagePinLines(kept) : block;
+      block = [...(kept !== undefined ? storagePinLines(kept) : pin), ...askLines()];
       text = text.slice(0, g.start) + text.slice(g.end);
     } else {
-      if (block !== null && !hasStoragePin(g.inner)) {
+      const add = [...(hasStoragePin(g.inner) ? [] : pin), ...(hasAsk(g.inner) ? [] : askLines())];
+      if (add.length > 0) {
         const closing = g.full.lastIndexOf("}");
-        const augmented = `${g.full.slice(0, closing)}${block.join("\n")}\n${g.full.slice(closing)}`;
+        const augmented = `${g.full.slice(0, closing)}${add.join("\n")}\n${g.full.slice(closing)}`;
         text = text.slice(0, g.start) + augmented + text.slice(g.end);
       }
       block = null;
@@ -966,26 +899,32 @@ function defaultBindStop(binds: string[], sites: UnguardedSite[], ctx: CliContex
   ].join("\n");
 }
 
-// A Caddy with no Caddyfile cannot load devsite's files, so init prints them adapted to JSON. Caddy's adapter makes one server for the hosts and one TLS policy per host's `issuer internal`.
-function adaptedJson(files: string[], ctx: CliContext): string {
+// A Caddy with no Caddyfile cannot load devsite's files, so init prints them adapted to JSON. Caddy's adapter makes one server for the route, one TLS policy for its `issuer internal`, and the ask from the global block.
+function adaptedJson(ctx: CliContext): string {
+  const files = [["{", ...askLines(), "}"].join("\n"), renderGuardFile(), renderNodeRoute(null)];
   const r = exec(
     "caddy",
     ["adapt", "--config", writeTmp(files.join("\n")), "--adapter", "caddyfile"],
     ctx,
     true,
   );
-  if (r.status !== 0) throw new Error("`caddy adapt` could not adapt devsite's host files");
+  if (r.status !== 0) throw new Error("`caddy adapt` could not adapt devsite's route");
   const config = JSON.parse(r.out) as {
-    apps?: { http?: { servers?: unknown }; tls?: { automation?: { policies?: unknown } } };
+    apps?: {
+      http?: { servers?: unknown };
+      tls?: { automation?: { policies?: unknown; on_demand?: unknown } };
+    };
   };
   const json = (v: unknown) => JSON.stringify(v ?? null, null, 2).replace(/^/gm, "    ");
   return [
     "",
-    "Add devsite's hosts to your Caddy config, as JSON, then run `bunx devsite doctor`:",
+    "Add devsite's route to your Caddy config, as JSON, then run `bunx devsite doctor`:",
     "  apps.http.servers — the routes go into your server that listens on :443:",
     json(config.apps?.http?.servers),
     "  apps.tls.automation.policies — append these policies:",
     json(config.apps?.tls?.automation?.policies),
+    "  apps.tls.automation.on_demand — set it to:",
+    json(config.apps?.tls?.automation?.on_demand),
     "",
   ].join("\n");
 }
@@ -996,25 +935,18 @@ function installAfter(settings: Settings, before: KnownInstall, ctx: CliContext)
   return after.kind === "unknown" ? before : after;
 }
 
+// A project the node knows, for the certificate checks: Caddy signs a certificate only for such a name.
+function certHostOf(node: NodeAnswer): string | undefined {
+  const name = node.ok ? Object.keys(node.status.projects).sort()[0] : undefined;
+  return name === undefined ? undefined : `${name}.internal`;
+}
+
 // No argv knowledge here — run.ts parses flags and passes options plus the io context. Fatal conditions return 1 (after explaining themselves); unexpected errors throw and run.ts turns them into an exit code.
 export async function init(
   { dryRun }: { dryRun: boolean },
   ctx: CliContext = processContext(),
 ): Promise<number> {
-  // Installed under node_modules, so ctx.cwd is where the CLI is invoked — the repo root.
-  const cwd = ctx.cwd;
   if (refuseRoot("init", ctx)) return 1;
-
-  const routes = discoverRoutes(cwd);
-  if (routes.length === 0) {
-    ctx.stderr.write(
-      `No package.json#devSite routes found in ${cwd} ` +
-        "(checked package.json, apps/*/package.json, packages/*/package.json). " +
-        "Run from the repo root.\n",
-    );
-    return 1;
-  }
-  const ownProjects = new Set(routes.map((r) => r.project));
 
   const read = readSettings(ctx);
   if (!read.ok) {
@@ -1060,75 +992,40 @@ export async function init(
     }
   }
 
-  const stateDir = resolveStateDir(ctx.env);
   const desired = new Map<string, string>([
     [GUARD_FILE, renderGuardFile()],
-    [OFFLINE_FRAGMENT, renderOfflineFragment()],
+    [NODE_ROUTE_FILE, renderNodeRoute()],
   ]);
-  for (const r of routes) {
-    desired.set(`${r.host}.caddy`, renderHostFile(r, portFilePath(r.host, stateDir)));
-  }
-  const missingPortFiles = routes
-    .map((r) => r.host)
-    .filter((h) => !existsSync(portFilePath(h, stateDir)));
-
-  // The rename cleanup: a host file whose `# <project>` header names a project of THIS run but whose host is no longer declared. Files of other projects are never touched.
-  const deletions: string[] = [];
-  if (existsSync(devsiteDir)) {
-    for (const name of globSync("*.caddy", { cwd: devsiteDir })) {
-      if (desired.has(name)) continue;
-      const first = readFileSync(join(devsiteDir, name), "utf8").split("\n", 1)[0] ?? "";
-      const project = first.match(/^# (.+)$/)?.[1]?.trim();
-      if (project !== undefined && ownProjects.has(project)) deletions.push(name);
-    }
-  }
-
   for (const [name, content] of desired) {
     const abs = join(devsiteDir, name);
     if (!existsSync(abs) || readFileSync(abs, "utf8") !== content) {
-      const generated = name === OFFLINE_FRAGMENT ? "devsite's offline page" : undefined;
+      const generated = name === NODE_ROUTE_FILE ? "devsite's route to the node" : undefined;
       changes.push({ rel: `devsite.d/${name}`, abs, next: content, generated });
     }
-  }
-  for (const name of deletions) {
-    changes.push({ rel: `devsite.d/${name}`, abs: join(devsiteDir, name), next: null });
   }
   changes.sort((a, b) => a.rel.localeCompare(b.rel));
 
   const paint = painter(ctx.stdout, ctx);
   ctx.stdout.write(`${paint(BOLD, "devsite init")}\n`);
-  for (const r of routes) {
-    ctx.stdout.write(`  https://${r.host}  ${paint(DIM, `(${r.project})`)}\n`);
-  }
 
+  const node = await readNode();
   const dns = probeDnsmasq(settings, ctx);
   const tailscale = probeTailscale(dns.tailscale, ctx);
-  const runHosts = new Set(missingPortFiles);
-  const fileChecks = () => [
-    ...portFileChecks(devsiteDir, stateDir, runHosts),
-    ...offlinePageChecks(devsiteDir, join(devsiteDir, OFFLINE_FRAGMENT), renderOfflineFragment()),
-  ];
   const checks = [
+    ...nodeChecks(node, ctx),
     ...(await caddyChecks(install, storage, ctx, {
-      pendingHost: routes[0]?.host,
+      certHost: certHostOf(node),
       jsonFix: JSON_FIX_IN_INIT,
     })),
-    ...fileChecks(),
     ...tailscale.checks,
     ...dns.checks,
   ];
   printSection("Checks", checks, paint, ctx);
-  const ownHosts = new Set(
-    [...machineHosts(devsiteDir), ...routes.map((r) => r.host)].flatMap((h) => {
-      const { internal, localhost } = hostsOf(h.replace(/\.internal$/, ""));
-      return [internal, localhost];
-    }),
-  );
   const repairs = repairsOf(checks, install);
   const dnsPlan =
     repairs.has("run-dnsmasq") && dns.dnsmasq !== null ? planDnsmasq(dns.dnsmasq) : null;
   const dropped = loadsConfig(install, repairs, changes)
-    ? await droppedRoutes(install.config, ownHosts, ctx)
+    ? await droppedRoutes(install.config, ctx)
     : [];
   const steps = planSteps(
     {
@@ -1138,20 +1035,16 @@ export async function init(
       removedBinds,
       guardedSites,
       repairs,
-      missingPortFiles,
-      stateDir,
       dropped,
       dnsmasq: dnsPlan,
       splitDns: tailscale.route,
     },
     ctx,
   );
-  // Printed until Caddy has the routes, so a set-up Mac prints nothing.
-  const routesMissing = checks.some((r) => r.state === "red" && r.repair === "load");
+  // Printed until Caddy has the route, so a set-up Mac prints nothing.
+  const routeMissing = checks.some((r) => r.state === "red" && r.repair === "load");
   const jsonHelp =
-    caddyfilePath === null && (changes.length > 0 || routesMissing)
-      ? adaptedJson([renderGuardFile(), ...routes.map((r) => renderHostFile(r, null))], ctx)
-      : "";
+    caddyfilePath === null && (changes.length > 0 || routeMissing) ? adaptedJson(ctx) : "";
 
   // devsite's dnsmasq files sit outside the Caddy dir, so their diff labels are absolute paths.
   const dnsChanges: Change[] = (dnsPlan?.files ?? []).map((f) => ({
@@ -1225,10 +1118,14 @@ export async function init(
   });
   const after = installAfter(settings, install, ctx);
   const storageAfter = await findStorage(after, ctx);
+  const nodeAfter = await readNode();
   const dnsAfter = probeDnsmasq(settings, ctx);
   const checksAfter = [
-    ...(await caddyChecks(after, storageAfter, ctx, { jsonFix: JSON_FIX_IN_INIT })),
-    ...fileChecks(),
+    ...nodeChecks(nodeAfter, ctx),
+    ...(await caddyChecks(after, storageAfter, ctx, {
+      certHost: certHostOf(nodeAfter),
+      jsonFix: JSON_FIX_IN_INIT,
+    })),
     ...probeTailscale(dnsAfter.tailscale, ctx).checks,
     ...dnsAfter.checks,
   ];
@@ -1245,11 +1142,11 @@ export async function init(
   printSection("Checks after this run", stillRed, paint, ctx);
   ctx.stdout.write(jsonHelp);
   if (steps.some((s) => s.repair === "trust")) {
-    const phoneRoot = join(stateDir, "caddy-root.crt");
-    printPhoneSteps(routes, await caRootFile(storageAfter, phoneRoot), ctx);
+    const phoneRoot = join(supportDir(ctx.env), "caddy-root.crt");
+    printPhoneSteps(await caRootFile(storageAfter, phoneRoot), ctx);
   }
   if (stillRed.every((r) => r.state !== "red")) {
-    ctx.stdout.write("\nFrom now on, run `bun dev`; it needs no sudo.\n");
+    ctx.stdout.write("\nFrom now on, run `bun dev` in any project; it needs no sudo.\n");
   }
   return 0;
 }

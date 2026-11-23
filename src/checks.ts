@@ -1,16 +1,18 @@
 // The checks of this Mac's Caddy that init and doctor share: doctor prints them, init plans a fix for each red one that carries a repair.
 import { X509Certificate } from "node:crypto";
-import { existsSync, globSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import pkg from "../package.json";
+import { adminBase, caddy } from "./caddy-admin";
 import type { CliContext } from "./context";
 import { startsWithGuard } from "./guard.mjs";
 import { describeKind, type KnownInstall } from "./install";
 import { BOLD, DIM, exec, GREEN, type Paint, RED } from "./io";
-import { HOSTNAME_RE } from "./names.mjs";
-import { portFilePath } from "./state.mjs";
+import { type NodeAnswer, nodeAddress } from "./node/install";
+import { nodeLog } from "./paths";
 import { caRootFile, type Storage } from "./storage";
-import { adminBase, caddy, findHostRoute } from "./vite.mjs";
+import { isOlder } from "./version";
 
 export const INIT = "run `bunx devsite init`";
 
@@ -22,7 +24,7 @@ export type Repair =
   | "trust"
   | "run-dnsmasq"
   | "split-dns"
-  | "port-file"
+  | "node"
   | "write";
 
 export type Result =
@@ -32,66 +34,6 @@ export type Result =
 
 export type CaddyRoute = { match?: { host?: string[] }[]; handle?: unknown[] };
 export type Servers = Record<string, { routes?: CaddyRoute[] }>;
-
-// devsite's hosts on this Mac: one `<host>.caddy` file each in devsite.d. A file whose name is not a `.internal` hostname is a snippet, not a host.
-export function machineHosts(devsiteDir: string): string[] {
-  if (!existsSync(devsiteDir)) return [];
-  return globSync("*.caddy", { cwd: devsiteDir })
-    .map((f) => f.replace(/\.caddy$/, ""))
-    .filter((h) => HOSTNAME_RE.test(h) && h.endsWith(".internal"))
-    .sort();
-}
-
-// A host file's first line, `# <project>`, names the project that owns it.
-export function hostFileOwner(text: string): string | undefined {
-  return text
-    .split("\n", 1)[0]
-    ?.match(/^# (.+)$/)?.[1]
-    ?.trim();
-}
-
-// Every host file in devsite.d imports its host's port file, so one missing port file makes every `caddy reload` fail, for each repo's hosts. runHosts: the hosts an init run writes the port file of, so its step fixes them.
-export function portFileChecks(
-  devsiteDir: string,
-  stateDir: string,
-  runHosts: ReadonlySet<string> = new Set(),
-): Result[] {
-  return machineHosts(devsiteDir).map((host): Result => {
-    const label = `${host}'s port file exists`;
-    const path = portFilePath(host, stateDir);
-    if (existsSync(path)) return { state: "green", label };
-    const project = hostFileOwner(readFileSync(join(devsiteDir, `${host}.caddy`), "utf8"));
-    return {
-      state: "red",
-      label,
-      detail: `no ${path}, so \`caddy reload\` fails`,
-      fix: project === undefined ? INIT : `${INIT} in the repo of ${project}`,
-      ...(runHosts.has(host) ? { repair: "port-file" as const } : {}),
-    };
-  });
-}
-
-// Every host file imports the offline page file, so a missing one makes every `caddy reload` fail. With no host file, nothing imports it.
-export function offlinePageChecks(devsiteDir: string, path: string, expected: string): Result[] {
-  if (machineHosts(devsiteDir).length === 0) return [];
-  const label = "the offline page file matches what init writes";
-  if (!existsSync(path)) {
-    return [
-      {
-        state: "red",
-        label,
-        detail: `no ${path}, so \`caddy reload\` fails`,
-        fix: INIT,
-        repair: "write",
-      },
-    ];
-  }
-  return [
-    readFileSync(path, "utf8") === expected
-      ? { state: "green", label }
-      : { state: "red", label, detail: "it differs", fix: INIT, repair: "write" },
-  ];
-}
 
 export async function readServers(): Promise<
   { ok: true; servers: Servers } | { ok: false; why: string }
@@ -125,46 +67,65 @@ function describeRoute(route: CaddyRoute): string {
   return hosts.length > 0 ? hosts.join(", ") : "every host";
 }
 
-function routeChecks(hosts: string[], servers: Servers): Result[] {
-  const results: Result[] = [];
-  for (const host of hosts) {
-    const found = findHostRoute(servers, host);
-    if (found === null) {
-      results.push({
+// The route init writes for every devsite name: the first route that names both.
+const NODE_ROUTE_HOSTS = ["*.internal", "*.localhost"];
+// A name no project uses, for the routes that come before devsite's.
+const PROBE_HOSTS = ["devsite-check.internal", "devsite-check.localhost"];
+
+export function findNodeRoute(servers: Servers): { server: string; index: number } | null {
+  for (const [server, srv] of Object.entries(servers)) {
+    const index = (srv.routes ?? []).findIndex((r) =>
+      (r.match ?? []).some((m) => NODE_ROUTE_HOSTS.every((h) => (m.host ?? []).includes(h))),
+    );
+    if (index !== -1) return { server, index };
+  }
+  return null;
+}
+
+function routeChecks(servers: Servers): Result[] {
+  const routeLabel = "Caddy has devsite's route for *.internal and *.localhost";
+  const found = findNodeRoute(servers);
+  if (found === null) {
+    return [
+      {
         state: "red",
-        label: `${host} has a route in Caddy`,
-        detail: "no route names it",
+        label: routeLabel,
+        detail: "no route names *.internal and *.localhost",
         fix: INIT,
         repair: "load",
-      });
-      continue;
-    }
-    const routes = servers[found.server]?.routes ?? [];
-    const route = routes[found.index] as CaddyRoute;
-    results.push(
-      startsWithGuard(route)
-        ? { state: "green", label: `${host}'s route starts with the LAN guard` }
-        : {
-            state: "red",
-            label: `${host}'s route starts with the LAN guard`,
-            detail: "the guard is missing, so the LAN reaches this host",
-            fix: INIT,
-            repair: "load",
-          },
-    );
-    const before = routes.slice(0, found.index).findIndex((r) => matchesHost(r, host));
-    const shadow = routes[before];
-    results.push(
-      shadow === undefined
-        ? { state: "green", label: `no route before ${host}'s also matches it` }
-        : {
-            state: "red",
-            label: `no route before ${host}'s also matches it`,
-            detail: `route ${before} of server ${found.server} (${describeRoute(shadow)}) comes first`,
-            fix: "delete that route from Caddy's config: a site block in your Caddyfile, or a route another tool added at runtime",
-          },
-    );
+      },
+    ];
   }
+  const routes = servers[found.server]?.routes ?? [];
+  const route = routes[found.index] as CaddyRoute;
+  const guardLabel = "devsite's route starts with the LAN guard";
+  const results: Result[] = [
+    { state: "green", label: routeLabel },
+    startsWithGuard(route)
+      ? { state: "green", label: guardLabel }
+      : {
+          state: "red",
+          label: guardLabel,
+          detail: "the guard is missing, so the LAN reaches the dev servers",
+          fix: INIT,
+          repair: "load",
+        },
+  ];
+  const shadowLabel = "no route before devsite's takes its names";
+  const before = routes
+    .slice(0, found.index)
+    .findIndex((r) => PROBE_HOSTS.some((h) => matchesHost(r, h)));
+  const shadow = routes[before];
+  results.push(
+    shadow === undefined
+      ? { state: "green", label: shadowLabel }
+      : {
+          state: "red",
+          label: shadowLabel,
+          detail: `route ${before} of server ${found.server} (${describeRoute(shadow)}) comes first`,
+          fix: "delete that route from Caddy's config: a site block in your Caddyfile, or a route another tool added at runtime",
+        },
+  );
   return results;
 }
 
@@ -191,14 +152,10 @@ async function certChecks(
   host: string | undefined,
   storage: Storage,
   ctx: CliContext,
-  pendingHost?: string,
 ): Promise<Result[]> {
-  // Caddy makes its CA when it first serves a devsite host, so a Mac with no host or no CA yet still needs the trust step.
+  // Caddy signs a certificate for a name at its first TLS handshake, only for a project the node knows, and makes its CA for the first one: a Mac where no project ran yet still needs the trust step.
   if (host === undefined) {
-    const detail =
-      pendingHost === undefined
-        ? "no devsite host on this Mac yet"
-        : `${pendingHost} has no host file yet`;
+    const detail = "no project has run on this Mac yet";
     return [
       { state: "skipped", label: chainLabel, detail },
       { state: "skipped", label: trustLabel, detail, repair: "trust" },
@@ -308,30 +265,23 @@ function installCheck(install: KnownInstall): Result {
   };
 }
 
-// pendingHost: the first host an init run is about to add, named while no host file exists yet. jsonFix: the fix of a check a load would fix, for a Caddy config init cannot load.
+// certHost: a name of a project the node knows, for the certificate checks. jsonFix: the fix of a check a load would fix, for a Caddy config init cannot load.
 export async function caddyChecks(
   install: KnownInstall,
   storage: Storage,
   ctx: CliContext,
-  { pendingHost, jsonFix = JSON_FIX }: { pendingHost?: string; jsonFix?: string } = {},
+  { certHost, jsonFix = JSON_FIX }: { certHost?: string; jsonFix?: string } = {},
 ): Promise<Result[]> {
-  const hosts = machineHosts(install.devsiteDir);
   const results: Result[] = [installCheck(install)];
   const admin = await readServers();
   if (admin.ok) {
     results.push({ state: "green", label: "Caddy's admin API answers" });
-    results.push(...routeChecks(hosts, admin.servers));
+    results.push(...routeChecks(admin.servers));
   } else {
     results.push(adminDown(install, admin.why));
-    if (hosts.length > 0) {
-      results.push({
-        state: "skipped",
-        label: "the routes of devsite's hosts",
-        detail: "they need the admin API",
-      });
-    }
+    results.push({ state: "skipped", label: "devsite's route", detail: "it needs the admin API" });
   }
-  results.push(...(await certChecks(hosts[0], storage, ctx, pendingHost)));
+  results.push(...(await certChecks(certHost, storage, ctx)));
   // init loads only a Caddyfile: for any other config it prints the JSON to add, so a rerun alone fixes nothing.
   if (install.configKind === "caddyfile") return results;
   return results.map((r) =>
@@ -353,4 +303,48 @@ export function printSection(heading: string, results: Result[], paint: Paint, c
     ctx.stdout.write(`  ${mark} ${r.label}${detail}\n`);
     if (r.state === "red") ctx.stdout.write(`      fix: ${r.fix}\n`);
   }
+}
+
+// The node checks doctor runs first (ADR 0005). A project whose devsite is newer than the node may need what the node lacks.
+export function nodeChecks(node: NodeAnswer, ctx: CliContext): Result[] {
+  const label = `the node answers on ${nodeAddress()}`;
+  if (!node.ok) {
+    return [
+      {
+        state: "red",
+        label,
+        detail: node.why,
+        fix: `${INIT}; the node's log is ${nodeLog(ctx.env)}`,
+        repair: "node",
+      },
+    ];
+  }
+  const versionLabel = `the node runs devsite ${pkg.version} or newer`;
+  const results: Result[] = [
+    { state: "green", label, detail: `devsite ${node.status.version}, pid ${node.status.pid}` },
+    isOlder(node.status.version, pkg.version)
+      ? {
+          state: "red",
+          label: versionLabel,
+          detail: `it runs ${node.status.version}`,
+          fix: INIT,
+          repair: "node",
+        }
+      : { state: "green", label: versionLabel },
+  ];
+  const newer = Object.entries(node.status.projects).filter(
+    ([, p]) => p.devsiteVersion !== "" && isOlder(node.status.version, p.devsiteVersion),
+  );
+  const projectsLabel = "no project runs a devsite newer than the node";
+  results.push(
+    newer.length === 0
+      ? { state: "green", label: projectsLabel }
+      : {
+          state: "red",
+          label: projectsLabel,
+          detail: newer.map(([name, p]) => `${name} runs ${p.devsiteVersion}`).join(", "),
+          fix: `${INIT} in the repo of ${newer[0]?.[0]}, so init installs its newer devsite`,
+        },
+  );
+  return results;
 }

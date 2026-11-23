@@ -2,14 +2,13 @@
 <!--
   devsite offline page — design source.
 
-  `devsite init` renders devsite.d/fragments/offline.caddy from this file on
-  every run. Substitution tokens (replaced by init, never by Caddy syntax):
-    __HOST__         the site host, e.g. myapp.localhost
-    __PROJECT__      the project name
-    __STATUS_CODE__  502 (connection lost) or 503 (server never started)
-
-  Constraint from the renderer: no tight brace pattern that Caddy could read
-  as a placeholder. Every CSS/JS brace is followed by a newline or a space.
+  The node (src/node/server.ts) serves this file for a project whose dev
+  server does not answer, and for a name no project has used on this Mac.
+  Substitution tokens:
+    __HOST__         the visited host, e.g. myapp.localhost
+    __PROJECT__      the project's package.json name
+    __STATUS_CODE__  503 (a known project) or 404 (an unknown name)
+    __FACTS__        the project's state: where it last ran, whether it is live
 -->
 <html lang="en">
 <head>
@@ -24,17 +23,13 @@
     --ink: #ece4ee;
     --dim: #9a90a8;
     --line: #2b2638;
-    --accent: #a58cff; /* 502: waiting */
+    --accent: #ffa070;
     /* A low sunset band along the bottom edge. The top edge stays --bg alone, because Safari fills the area behind the notch and behind its bottom bar with the page's solid colour. */
     --horizon:
       radial-gradient(1400px 170px at 72% 100%, rgba(255, 165, 100, 0.3), rgba(255, 165, 100, 0)),
       radial-gradient(1600px 240px at 45% 100%, rgba(255, 105, 120, 0.18), rgba(255, 105, 120, 0)),
       radial-gradient(1800px 300px at 15% 100%, rgba(140, 80, 230, 0.12), rgba(140, 80, 230, 0)),
       radial-gradient(1200px 320px at 100% 100%, rgba(90, 95, 235, 0.12), rgba(90, 95, 235, 0));
-  }
-
-  body[data-status="503"] {
-    --accent: #ffa070; /* 503: action needed */
   }
 
   * {
@@ -141,17 +136,20 @@
     color: var(--dim);
   }
 
-  /* variant switch: default shows 502; a 503 status flips both blocks */
-  .v503 {
-    display: none;
+  dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.3rem 2ch;
+    margin: 0;
   }
 
-  body[data-status="503"] .v503 {
-    display: block;
+  dt {
+    color: var(--dim);
   }
 
-  body[data-status="503"] .v502 {
-    display: none;
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
   }
 
   .status {
@@ -256,13 +254,9 @@
 <main>
   <header class="brand"><b>devsite</b><span>__PROJECT__</span></header>
 
-  <section class="v503">
+  <section>
     <h1>dev server for <em class="host">__HOST__</em> is not running</h1>
-  </section>
-
-  <section class="v502">
-    <h1>lost connection to the dev server</h1>
-    <p>It may be restarting. This page reconnects on its own.</p>
+    __FACTS__
   </section>
 
   <div class="status">
@@ -287,8 +281,7 @@
     }
     function bump() {
       tries += 1;
-      // biome-ignore lint/style/useTemplate: Caddy serves this page through its placeholder replacer, which reads a brace followed by a name as a placeholder
-      label.textContent = " · attempt " + tries;
+      label.textContent = ` · attempt ${tries}`;
       // A reflow between the two class changes restarts the animation.
       dot.classList.remove("ping");
       void dot.offsetWidth;

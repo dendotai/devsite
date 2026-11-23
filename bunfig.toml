@@ -1,3 +1,3 @@
 [test]
-# Points DEVSITE_STATE_DIR at a scratch dir before any suite loads — see tests/setup.ts.
+# Points devsite at a scratch home, Caddy admin API, and node before any suite loads — see tests/setup.ts.
 preload = ["./tests/setup.ts"]

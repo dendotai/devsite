@@ -1,4 +1,4 @@
-// A Mac as init and doctor see it: a scratch Caddy dir, a test CA, and a local mock of Caddy's admin API.
+// A Mac as init and doctor see it: a scratch Caddy dir, a test CA, a local mock of Caddy's admin API, and a real node in-process.
 import { afterEach, beforeAll } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
@@ -13,17 +13,11 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  OFFLINE_FRAGMENT,
-  renderGuardFile,
-  renderHostFile,
-  renderOfflineFragment,
-} from "../src/commands/init";
-import { guardedRoute } from "../src/guard.mjs";
-import { PORT_PLACEHOLDER, portFilePath, writePortFile } from "../src/state.mjs";
+import { NODE_ROUTE_FILE, renderGuardFile, renderNodeRoute } from "../src/commands/init";
+import { type RunningNode, startNode } from "../src/node/server";
 import { scratchCaddyfile } from "./helpers";
 
-export const HOST = "web.test.internal";
+export const HOST = "web.internal";
 
 export type Pki = { root: string; served: string; otherRoot: string };
 export const pki: Pki = { root: "", served: "", otherRoot: "" };
@@ -87,13 +81,17 @@ const servers: Server[] = [];
 
 // Each suite calls this once at its top: a hook registered at this module's load would bind only to the first suite that imports it.
 export function useMachine() {
-  const savedAdmin = process.env.DEVSITE_CADDY_ADMIN;
-  const savedState = process.env.DEVSITE_STATE_DIR;
+  const saved = {
+    admin: process.env.DEVSITE_CADDY_ADMIN,
+    node: process.env.DEVSITE_NODE,
+    home: process.env.DEVSITE_USER_HOME,
+  };
   beforeAll(makePki);
   afterEach(async () => {
-    if (savedAdmin === undefined) delete process.env.DEVSITE_CADDY_ADMIN;
-    else process.env.DEVSITE_CADDY_ADMIN = savedAdmin;
-    process.env.DEVSITE_STATE_DIR = savedState;
+    process.env.DEVSITE_CADDY_ADMIN = saved.admin;
+    process.env.DEVSITE_NODE = saved.node;
+    process.env.DEVSITE_USER_HOME = saved.home;
+    await Promise.all(nodes.splice(0).map((n) => n.close()));
     await Promise.all(
       servers.splice(0).map((s) => {
         s.closeAllConnections();
@@ -138,8 +136,43 @@ export async function mockAdmin(
   process.env.DEVSITE_CADDY_ADMIN = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-export const placeholder = () =>
-  guardedRoute([HOST], [{ handler: "static_response", status_code: 503 }]);
+// devsite's route as Caddy holds it once it loaded devsite.d: what `caddy adapt` makes of the files init writes.
+export function nodeRoute(): unknown {
+  const dir = mkdtempSync(join(tmpdir(), "devsite-adapt-"));
+  writeFileSync(join(dir, "guard.caddy"), renderGuardFile());
+  writeFileSync(join(dir, NODE_ROUTE_FILE), renderNodeRoute());
+  writeFileSync(join(dir, "Caddyfile"), `import ${join(dir, NODE_ROUTE_FILE)}\n`);
+  const r = spawnSync("caddy", ["adapt", "--config", join(dir, "Caddyfile")], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`caddy adapt failed: ${r.stderr}`);
+  const servers = JSON.parse(r.stdout).apps.http.servers as Record<string, { routes: unknown[] }>;
+  return Object.values(servers)[0]?.routes[0];
+}
+
+// --- the node ---
+
+const nodes: RunningNode[] = [];
+
+// A real node in this process, on a free port and the test's home, with each project registered as `bun dev` registers it. Its dev server ports answer nothing, so no project is live.
+export async function useNodeWith(
+  projects: Record<string, { folder?: string; devsiteVersion?: string }> = {},
+) {
+  const home = process.env.DEVSITE_USER_HOME ?? "";
+  const node = await startNode({ port: 0, env: { DEVSITE_USER_HOME: home } });
+  nodes.push(node);
+  process.env.DEVSITE_NODE = `http://127.0.0.1:${node.port}`;
+  let port = 1;
+  for (const [name, p] of Object.entries(projects)) {
+    await fetch(`http://127.0.0.1:${node.port}/projects/${name}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        port: port++,
+        folder: p.folder ?? `/Users/me/Projects/${name}`,
+        ...p,
+      }),
+    });
+  }
+  return node;
+}
 
 // --- the scratch Caddy dir ---
 
@@ -148,18 +181,16 @@ export type Machine = {
   dir: string;
   storage: string;
   prefix: string;
-  stateDir: string;
+  home: string;
 };
 
-// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and one host file of project "web" beside devsite's guard snippet and offline page file (unless `offlineFragment` is false). A fresh state dir holds the host's port file (unless `portFile` is false).
+// A Caddy dir as init leaves it: Homebrew's caddy binary in the scratch prefix (unless `installed` is false), a Caddyfile that pins storage and asks the node (or `caddyfile`, with STORAGE standing for the storage path), the CA root in that storage, and devsite.d with devsite's route and guard snippet (unless `devsiteFiles` is false). A fresh home holds devsite's own files.
 export function setUpMachine(
   opts: {
     root?: string | null;
-    hostFile?: string | null;
     caddyfile?: string;
     installed?: boolean;
-    portFile?: boolean;
-    offlineFragment?: boolean;
+    devsiteFiles?: boolean;
   } = {},
 ): Machine {
   const caddyfile = scratchCaddyfile();
@@ -173,39 +204,64 @@ export function setUpMachine(
     symlinkSync(join(prefix, "opt", "caddy", "bin", "caddy"), join(prefix, "bin", "caddy"));
   }
   const storage = join(dir, "storage");
-  const text =
-    opts.caddyfile ??
-    '{\n\tstorage file_system {\n\t\troot "STORAGE"\n\t}\n}\n\nimport devsite.d/*.caddy # devsite\n';
-  writeFileSync(caddyfile, text.replace("STORAGE", storage));
+  const text = opts.caddyfile ?? SET_UP_CADDYFILE;
+  writeFileSync(caddyfile, text.replaceAll("STORAGE", storage));
   const root = opts.root === undefined ? pki.root : opts.root;
   if (root !== null) {
     const local = join(storage, "pki", "authorities", "local");
     mkdirSync(local, { recursive: true });
     writeFileSync(join(local, "root.crt"), root);
   }
-  const stateDir = mkdtempSync(join(tmpdir(), "devsite-state-"));
-  process.env.DEVSITE_STATE_DIR = stateDir;
-  if (opts.portFile !== false) writePortFile(HOST, PORT_PLACEHOLDER, stateDir);
-  const hostFile = opts.hostFile === undefined ? hostFileOf("web") : opts.hostFile;
-  if (hostFile !== null) {
+  const home = mkdtempSync(join(tmpdir(), "devsite-home-"));
+  process.env.DEVSITE_USER_HOME = home;
+  if (opts.devsiteFiles !== false) {
     mkdirSync(join(dir, "devsite.d"));
-    writeFileSync(join(dir, "devsite.d", `${HOST}.caddy`), hostFile);
+    writeFileSync(join(dir, "devsite.d", NODE_ROUTE_FILE), renderNodeRoute());
     writeFileSync(join(dir, "devsite.d", "guard.caddy"), renderGuardFile());
-    if (opts.offlineFragment !== false) writeOfflineFragment(join(dir, "devsite.d"));
   }
-  return { caddyfile, dir, storage, prefix, stateDir };
+  return { caddyfile, dir, storage, prefix, home };
 }
 
-// The offline page file in a devsite dir, where init writes it; page stands in for assets/offline.html.
-export function writeOfflineFragment(devsiteDir: string, page?: string) {
-  mkdirSync(join(devsiteDir, dirname(OFFLINE_FRAGMENT)), { recursive: true });
-  writeFileSync(join(devsiteDir, OFFLINE_FRAGMENT), renderOfflineFragment(page));
+// devsite's route file as an older devsite left it, so init rewrites it.
+export function staleRoute(m: Machine): Machine {
+  writeFileSync(join(m.dir, "devsite.d", NODE_ROUTE_FILE), "old\n");
+  return m;
 }
 
-// The host file init writes for HOST, for the state dir the latest setUpMachine set.
-export function hostFileOf(project: string): string {
-  return renderHostFile({ host: HOST, project }, portFilePath(HOST, process.env.DEVSITE_STATE_DIR));
-}
+// A Caddyfile with a global options block of the user's own, as init leaves it: init keeps the block as it is.
+export const USER_CADDYFILE = [
+  "{",
+  "\temail dev@example.com",
+  "\tstorage file_system {",
+  '\t\troot "STORAGE"',
+  "\t}",
+  "\ton_demand_tls {",
+  "\t\task http://127.0.0.1:47380/tls-allowed",
+  "\t}",
+  "}",
+  "",
+  "import devsite.d/*.caddy # devsite",
+  "",
+].join("\n");
+
+// The Caddyfile init writes on a Mac with no Caddyfile and Caddy's storage at STORAGE.
+export const SET_UP_CADDYFILE = [
+  "{",
+  "\t# Pin PKI storage so Caddy's local CA is the SAME no matter how Caddy runs",
+  "\t# it (the always-on service vs a foreground process). Every device trusts",
+  "\t# this one CA root: STORAGE/pki/authorities/local/root.crt",
+  "\tstorage file_system {",
+  '\t\troot "STORAGE"',
+  "\t}",
+  "\t# devsite: Caddy asks the devsite node before it signs a certificate for a name.",
+  "\ton_demand_tls {",
+  "\t\task http://127.0.0.1:47380/tls-allowed",
+  "\t}",
+  "}",
+  "",
+  "import devsite.d/*.caddy # devsite",
+  "",
+].join("\n");
 
 // Every file under dir with its content: a run that wrote nothing leaves it equal.
 export function snapshot(dir: string): Record<string, string> {

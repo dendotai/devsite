@@ -18,23 +18,26 @@ A `devSite` field in `package.json` declares the project's name, and devsite ser
 }
 ```
 
-devsite has three parts:
+devsite is a client-server app ([ADR 0005](docs/adr/0005-devsite-is-a-client-server-app.md)):
 
-- **`devsite init`** — the onboarding, run once per machine and once per repo. It checks each part of the setup, fixes only what is red, and on a set-up Mac asks nothing, runs no `sudo`, and changes nothing. See [The onboarding](#the-onboarding).
-- **`devsite doctor`** — the same checks with the fixes turned off. It prints how this Mac is set up, marks each check green or red, and names the fix for each red one. See [`devsite doctor`](#devsite-doctor).
-- **The Vite plugin** — runs on every `bun dev`. It picks a free ephemeral port, points Vite's server and HMR at it, writes a live `reverse_proxy` to the host's port file, and swaps the host's placeholder route for it through Caddy's admin API on localhost. When the dev server stops, the plugin writes the placeholder back. This step needs no sudo, and because every port is picked at start time, no two projects can want the same one.
-  - It only updates a route that `devsite init` wrote. For a name `init` has not seen yet (a new project, a renamed one), `bun dev` warns that Caddy has no route for `<name>.internal`, names `bunx devsite doctor`, and serves on the raw local URL.
+- **The node** — one devsite process on each Mac that stays on. Caddy sends every `*.internal` and `*.localhost` request to it, and it passes each one to the project's dev server, or answers devsite's offline page with the project's real state (where it last ran, whether it is live). A per-user LaunchAgent starts it at login and again after a crash.
+- **`devsite init`** — the onboarding, run once per Mac, from any folder. It installs the node, writes Caddy's one route to it, and checks each part of the setup, fixing only what is red; on a set-up Mac it asks nothing, runs no `sudo`, and changes nothing. See [The onboarding](#the-onboarding).
+- **`devsite doctor`** — the same checks with the fixes turned off, the node first. It prints how this Mac is set up, marks each check green or red, and names the fix for each red one. See [`devsite doctor`](#devsite-doctor).
+- **The Vite plugin** — runs on every `bun dev`. Vite binds a free port the OS assigns, and the plugin tells the node the project's name, port and folder. That is all: no sudo, no Caddy change, and no `init` in the project's repo. With no node, `bun dev` prints `devsite: the node does not answer — run bunx devsite doctor` and serves on the raw local URL.
   - It also routes `<name>.localhost` to the same port. The Claude desktop app's browser pane asks for approval on every action on a private name such as `.internal`, and skips that only for `localhost` names.
 
 ```text
-Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA)
-                                        │  ▲
-                          reverse_proxy │  ├── devsite init: writes devsite.d/ (once per repo)
-                                        ▼  └── Vite plugin: swaps the route (admin API, localhost)
-                                      Vite dev server (ephemeral port)
+Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA, LAN guard)
+                                        │
+                          reverse_proxy │  one route: *.internal, *.localhost
+                                        ▼
+                                      devsite node (127.0.0.1:47380) ◀── Vite plugin: "myapp runs on port 51234"
+                                        │
+                                        ▼
+                                      Vite dev server (OS-assigned port)
 ```
 
-Each host file in `devsite.d/` takes its handler from the host's port file in devsite's state directory, so a Caddy reload or restart mid-session keeps a running dev server's route. While the dev server is down, the URL answers devsite's offline page. Every devsite route answers only this machine and your tailnet: a request from the LAN gets no response.
+A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not answer, Caddy shows a short "node not running" page.
 
 ## Quick start
 
@@ -48,14 +51,14 @@ Setup has two tiers. The first is complete on its own: after it, `https://<name>
    "devSite": { "name": "myapp" }
    ```
 
-2. **Add devsite to the project and run the onboarding** from the repo root:
+2. **Add devsite to the project and run the onboarding** (once per Mac):
 
    ```sh
    bun add -d @den-ai/devsite
    bunx devsite init       # or: bunx devsite init --dry-run to preview
    ```
 
-   On a new Mac, `init` installs Caddy with Homebrew, writes its config, starts Caddy as you, and adds Caddy's local CA to your keychain. It shows the plan and the diff of your Caddyfile first, and asks once.
+   On a new Mac, `init` installs the node, installs Caddy with Homebrew, writes its config, starts Caddy as you, and adds Caddy's local CA to your keychain. It shows the plan and the diff of your Caddyfile first, and asks once. A second project needs no `init`.
 
 3. **Add the plugin** to your Vite config:
 
@@ -103,13 +106,13 @@ Each additional project needs only steps 1 to 3. Because no project declares a p
 `bunx devsite init` runs in this order:
 
 - **Checks.** It runs every check `doctor` runs and prints each one green (`✓`), red (`✗`), or skipped (`–`).
-- **Plan.** For the red checks it can fix, it prints a numbered plan and the diff of each file it would change, except the files devsite writes whole (the offline page and the dnsmasq files), which show as one line; `--dry-run` prints their diff too. A step that needs root is tagged `[sudo]`; a step only you can do is tagged `[manual]`.
+- **Plan.** For the red checks it can fix, it prints a numbered plan and the diff of each file it would change, except the files devsite writes whole (Caddy's route to the node and the dnsmasq files), which show as one line; `--dry-run` prints their diff too. A step that needs root is tagged `[sudo]`; a step only you can do is tagged `[manual]`.
 - **One prompt.** `Apply these changes? [Y/n]`. `--dry-run` stops before this prompt and writes nothing.
 - **One `sudo` call.** Every root step runs back to back in one `sudo` call, right after your `y`, so you type your password at most once per run. Your password goes only to `sudo`, never through devsite.
 - **Manual steps.** Each asks `Open <url> in your browser? (y/n)`, then `Done? Press y to check, n to skip`. Each prompt takes one key, with no Enter. A skipped step leaves `doctor` red; `init` still finishes.
 - **Checks after this run.** The same checks again, with the fix for each one still red.
 
-On a set-up Mac `init` prints the checks, then `Nothing to do: init changed nothing.` It leaves Caddy alone, so your running dev servers keep their routes.
+On a set-up Mac `init` prints the checks, then `Nothing to do: init changed nothing.` It leaves Caddy and the node alone, so your running dev servers keep their routes. `init` is the only thing that installs or updates the node: it installs the devsite version it runs from when the node does not answer or runs an older devsite.
 
 `init` works with the Caddy you already have:
 
@@ -143,16 +146,17 @@ Setup
 
 Then the checks. They check outcomes, not how they came about, so a setup you built another way passes:
 
-- **Caddy** — installed; the admin API answers; each devsite host's route starts with the LAN guard; no route before a devsite host also matches it; the served certificate chains to the CA in Caddy's storage; that CA is trusted in the keychain; each host has its port file; the offline page file matches what `init` writes.
+- **Node** — it answers on `127.0.0.1:47380`; it runs this devsite or newer; no project runs a devsite newer than it. When it does not answer, the fix names `bunx devsite init` and the node's log.
+- **Caddy** — installed; the admin API answers; devsite's route for `*.internal` and `*.localhost` exists and starts with the LAN guard; no route before it takes its names; the served certificate chains to the CA in Caddy's storage; that CA is trusted in the keychain.
 - **Tailscale** (when it is on the Mac) — up; the split DNS route for `internal` points to this Mac.
 - **dnsmasq** (when Tailscale is on the Mac) — something answers `.internal` with the Tailscale IP on the Tailscale IP; this Mac resolves `.internal` to the Tailscale IP.
-- **This repo** — every `devSite` name is valid and used by one project only, and its host file matches what `init` would write.
+- **This repo** — every `devSite` name is valid and used by one project only, and the node holds no name of this repo for a folder outside it.
 
 Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
 
 ## Settings
 
-`~/.config/devsite/config.json` holds the machine settings. Each one hands a change devsite would make to a shared thing over to you; with the setting on, `init` skips the change and prints what must be true instead. The file is optional, and a setting devsite cannot read stops `init` and `doctor` with the reason.
+`~/Library/Application Support/devsite/config.json` holds the machine settings. Each one hands a change devsite would make to a shared thing over to you; with the setting on, `init` skips the change and prints what must be true instead. The file is optional, and a setting devsite cannot read stops `init` and `doctor` with the reason.
 
 ```jsonc
 {
@@ -181,7 +185,7 @@ Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
 
 - **[portless](https://github.com/typicode/portless) / devurl** — solve the same problem with `*.localhost` URLs. They need no DNS setup, because browsers resolve `.localhost` to loopback on their own — but loopback also means no other device can reach the URL. devsite requires more one-time setup (Caddy, a local CA, DNS); in return the URL carries a trusted certificate and works from other devices.
 - **Laravel Valet / Herd** — the same per-project local HTTPS domain experience, built for the PHP ecosystem on macOS. devsite is a framework-agnostic version of the same idea for Vite projects.
-- **A hand-written Caddyfile** — provides the same URLs, but every project needs a fixed port and every repo edits the shared file by hand. devsite adds route self-registration (each repo's `init` writes its own `devsite.d/` files and never touches another's) and removes fixed ports (ephemeral port plus admin-API swap at dev time).
+- **A hand-written Caddyfile** — provides the same URLs, but every project needs a fixed port and every repo edits the shared file by hand. devsite adds self-registration (`bun dev` tells the node its port) and removes fixed ports.
 
 ## What devsite changes on your machine, and how to undo it
 
@@ -189,14 +193,15 @@ devsite modifies machine-global state. This section lists every change and how t
 
 What `devsite init` changes (each changed file shows its diff first, except the files devsite writes whole, which show as one line, and every service and `sudo` command is printed as it runs):
 
-- `/opt/homebrew/etc/Caddyfile` — set up once: one `import devsite.d/*.caddy # devsite` line, and a `storage` pin only when the file has no `storage` line. Before any Caddyfile write, the previous file is copied to `Caddyfile.bak`; the very first write also saves `Caddyfile.pre-devsite`, which no later run touches. A `default_bind` line is deleted only when the file has no site blocks of your own.
-- `/opt/homebrew/etc/devsite.d/` — devsite's own directory: one `<host>.caddy` file per host (first line `# <project>`, recording which project owns it), `guard.caddy` (the LAN guard snippet), and `fragments/offline.caddy` (the offline page).
-- `~/Library/Application Support/devsite/ports/` — one port file per host, written as you.
+- `/opt/homebrew/etc/Caddyfile` — set up once: one `import devsite.d/*.caddy # devsite` line, the `on_demand_tls` ask that lets Caddy sign a certificate only for a name the node knows, and a `storage` pin only when the file has no `storage` line. Before any Caddyfile write, the previous file is copied to `Caddyfile.bak`; the very first write also saves `Caddyfile.pre-devsite`, which no later run touches. A `default_bind` line is deleted only when the file has no site blocks of your own.
+- `/opt/homebrew/etc/devsite.d/` — devsite's own directory: `node.caddy` (the one route to the node, with the "node not running" page) and `guard.caddy` (the LAN guard snippet).
+- `~/Library/Application Support/devsite/` — the node's program (`node/cli.js`), its state (`state.json`: each project's port, folder, last-used date, and whether it is live), and the settings (`config.json`).
+- `~/Library/LaunchAgents/ai.den.devsite.node.plist` — starts the node as you; its log is `~/Library/Logs/devsite/node.log`.
 - The Caddy service — installed and started with Homebrew only when Caddy is missing or stopped.
 - Your keychain — Caddy's local CA root is added with `sudo caddy trust`.
 - With Tailscale on the Mac: dnsmasq from Homebrew, plus devsite's own `/Library/Application Support/devsite/` (`dnsmasq.conf` and `dnsmasq-watcher.zsh`) and `/Library/LaunchDaemons/ai.den.devsite.dnsmasq.plist`.
 
-What the Vite plugin changes: it edits Caddy's in-memory running config over the localhost admin API, writes the live port to the host's port file, and records the host's last-used date in `~/Library/Application Support/devsite/last-used.json` (`DEVSITE_STATE_DIR` overrides the directory).
+What the Vite plugin changes: nothing on disk. It tells the node the project's name, port and folder.
 
 **Undoing it** — there is no `devsite uninstall` command yet, so removal is manual:
 
@@ -205,14 +210,16 @@ sudo launchctl bootout system/ai.den.devsite.dnsmasq   # stop devsite's dnsmasq
 sudo rm /Library/LaunchDaemons/ai.den.devsite.dnsmasq.plist
 sudo rm -rf "/Library/Application Support/devsite"
 sudo caddy untrust                      # remove the CA root from the keychain
+launchctl bootout gui/$(id -u)/ai.den.devsite.node      # stop the node
+rm ~/Library/LaunchAgents/ai.den.devsite.node.plist
 rm -rf /opt/homebrew/etc/devsite.d      # devsite's own Caddy directory
-# then remove the import line from /opt/homebrew/etc/Caddyfile, or restore Caddyfile.pre-devsite
-rm -rf ~/Library/Application\ Support/devsite   # port files and last-used dates
+# then remove the import line and the on_demand_tls block from /opt/homebrew/etc/Caddyfile, or restore Caddyfile.pre-devsite
+rm -rf ~/Library/Application\ Support/devsite ~/Library/Logs/devsite   # the node, its state, settings, logs
 ```
 
 Also delete the `internal` split DNS nameserver in the [Tailscale admin console](https://login.tailscale.com/admin/dns).
 
-Note: **renaming** a project (changing its `devSite.name`) cleans up after itself — the next `devsite init` in that project deletes the old host's file. **Deleting a whole project** does not: its host file lingers in `devsite.d/` (serving the offline page) until you remove it by hand. `devsite doctor` lists hosts unused for 30+ days.
+Note: a renamed or deleted project stays in the node's state, and its old name keeps answering the offline page. `devsite doctor` lists projects unused for 30+ days.
 
 ## Requirements
 
@@ -220,5 +227,5 @@ Note: **renaming** a project (changing its `devSite.name`) cleans up after itsel
 - **Caddy ≥ 2.** `init` installs it with Homebrew when it is missing. A Caddy installed another way works when it runs with `--config`, or with the `caddy.config` setting.
 - **Vite** — the plugin is developed against Vite 8.
 - **macOS**, with Homebrew on Apple Silicon or Intel (found with `brew --prefix`). Linux and Windows are not supported yet.
-- **Project layout**: `devsite init` reads `devSite` fields from the repo root `package.json` and, in a monorepo, from `apps/*/package.json` and `packages/*/package.json`. Other workspace folders (e.g. `services/*`) are not scanned yet.
+- **Project layout**: `devsite doctor` checks the `devSite` fields of the repo root `package.json` and, in a monorepo, of `apps/*/package.json` and `packages/*/package.json`. The Vite plugin reads the one at its Vite root, in any folder.
 - **Tailscale** — optional, only for `.internal` and the other-devices tier.

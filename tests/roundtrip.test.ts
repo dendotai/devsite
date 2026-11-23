@@ -58,24 +58,6 @@ function makeCaddyfile(content = "") {
 
 const IMPORT_LINE = "import devsite.d/*.caddy # devsite";
 
-// A site block in devsite's own rendered shape — what `devsite init` writes for a host. Deliberately hand-written, not imported: the black-box claim above forbids reaching into the renderer, so this shape must track renderHostFile in src/commands/init.ts by hand.
-function devsiteBlock(host: string, project: string) {
-  return [
-    `# ${project}`,
-    `${host}, ${host.replace(/\.internal$/, ".localhost")} {`,
-    "\ttls {",
-    "\t\tissuer internal {",
-    "\t\t\tlifetime 120h",
-    "\t\t}",
-    "\t}",
-    "\t@outside not remote_ip 127.0.0.1 ::1 100.64.0.0/10",
-    "\tabort @outside",
-    `\timport "${join(process.env.DEVSITE_STATE_DIR ?? "", "ports", `${host}.caddy`)}"`,
-    `\timport fragments/offline.caddy "${project}"`,
-    "}",
-  ].join("\n");
-}
-
 // The global options block devsite creates in the Caddyfile when the user has none — hand-written to track planCaddyfile in src/commands/init.ts, for the same black-box reason.
 function devsiteGlobalBlock(storageRoot: string) {
   return [
@@ -86,12 +68,16 @@ function devsiteGlobalBlock(storageRoot: string) {
     "\tstorage file_system {",
     `\t\troot "${storageRoot}"`,
     "\t}",
+    "\t# devsite: Caddy asks the devsite node before it signs a certificate for a name.",
+    "\ton_demand_tls {",
+    "\t\task http://127.0.0.1:47380/tls-allowed",
+    "\t}",
     "}",
   ].join("\n");
 }
 
-test("fresh init: the Caddyfile gets the global block and the import line; hosts land in devsite.d", async () => {
-  const repo = makeRepo(); // own host: web.test.internal, project "web"
+test("fresh init: the Caddyfile gets the global block and the import line; devsite's route lands in devsite.d", async () => {
+  const repo = makeRepo();
   const caddyfile = makeCaddyfile();
 
   const first = await reInit(repo, caddyfile);
@@ -101,8 +87,8 @@ test("fresh init: the Caddyfile gets the global block and the import line; hosts
   // Caddy is stopped, so the pin is the data dir `brew services` starts it with.
   const brewData = join(dirname(dirname(caddyfile)), "var", "lib", "caddy");
   expect(tree.Caddyfile).toBe(`${devsiteGlobalBlock(brewData)}\n\n${IMPORT_LINE}\n`);
-  expect(tree["devsite.d/web.test.internal.caddy"]).toBe(
-    `${devsiteBlock("web.test.internal", "web")}\n`,
+  expect(tree["devsite.d/node.caddy"]).toContain(
+    "*.internal, *.localhost {\n\ttls {\n\t\tissuer internal {\n\t\t\tlifetime 120h\n\t\t}\n\t\ton_demand\n\t}\n",
   );
   expect(tree["devsite.d/guard.caddy"]).toBe(
     [
@@ -114,7 +100,7 @@ test("fresh init: the Caddyfile gets the global block and the import line; hosts
       "",
     ].join("\n"),
   );
-  // Each host file carries its own `issuer internal`, so nothing gives the user's other sites internal certificates.
+  // devsite's route carries its own `issuer internal`, so nothing gives the user's other sites internal certificates.
   expect(Object.values(tree).join("\n")).not.toContain("local_certs");
 
   const second = await reInit(repo, caddyfile);
@@ -122,21 +108,13 @@ test("fresh init: the Caddyfile gets the global block and the import line; hosts
   expect(readTree(caddyfile)).toEqual(tree);
 });
 
-test("registering from a second repo never touches the Caddyfile again", async () => {
+test("a second run from another folder changes nothing: init sets up the Mac, not a repo", async () => {
   const caddyfile = makeCaddyfile();
   await reInit(makeRepo(), caddyfile);
   const before = readTree(caddyfile);
-
-  const other = await reInit(makeRepo("other.test.internal", "otherproj"), caddyfile);
-  expect(other.changed).toBe(true);
-  const after = readTree(caddyfile);
-  expect(after.Caddyfile).toBe(before.Caddyfile);
-  expect(after["devsite.d/web.test.internal.caddy"]).toBe(
-    before["devsite.d/web.test.internal.caddy"],
-  );
-  expect(after["devsite.d/other.test.internal.caddy"]).toBe(
-    `${devsiteBlock("other.test.internal", "otherproj")}\n`,
-  );
+  const other = await reInit(makeRepo("other", "otherproj"), caddyfile);
+  expect(other.changed).toBe(false);
+  expect(readTree(caddyfile)).toEqual(before);
 });
 
 test("content outside devsite's ownership survives byte-for-byte", async () => {
@@ -159,9 +137,9 @@ test("content outside devsite's ownership survives byte-for-byte", async () => {
   expect(content).toContain(outside);
   expect(content).toContain(IMPORT_LINE);
 
-  // A later re-init from a different repo only writes devsite.d.
-  const again = await reInit(makeRepo("other.test.internal"), caddyfile);
-  expect(again.changed).toBe(true);
+  // A later run from a different folder writes nothing.
+  const again = await reInit(makeRepo("other"), caddyfile);
+  expect(again.changed).toBe(false);
   expect(readTree(caddyfile).Caddyfile).toBe(content);
 });
 
@@ -230,25 +208,4 @@ test("a global block left with only devsite's directives once default_bind goes 
   expect(readTree(caddyfile).Caddyfile).toBe(
     `${devsiteGlobalBlock("/somewhere")}\n\n${IMPORT_LINE}\n`,
   );
-});
-
-test("rename cleanup: the stale host file of a still-present project is deleted, others are not", async () => {
-  const caddyfile = makeCaddyfile();
-  const dir = dirname(caddyfile);
-  await reInit(makeRepo("old.test.internal"), caddyfile); // project "web", host old.…
-  expect(existsSync(join(dir, "devsite.d", "old.test.internal.caddy"))).toBe(true);
-
-  // Another project's file — devsite must never touch it.
-  const foreignFile = `${devsiteBlock("foreign.internal", "otherproj")}\n`;
-  writeFileSync(join(dir, "devsite.d", "foreign.internal.caddy"), foreignFile);
-
-  // The same project ("web") now declares a different host — a rename.
-  const { changed } = await reInit(makeRepo("new.test.internal"), caddyfile);
-  expect(changed).toBe(true);
-  const tree = readTree(caddyfile);
-  expect(tree["devsite.d/old.test.internal.caddy"]).toBeUndefined();
-  expect(tree["devsite.d/new.test.internal.caddy"]).toBe(
-    `${devsiteBlock("new.test.internal", "web")}\n`,
-  );
-  expect(tree["devsite.d/foreign.internal.caddy"]).toBe(foreignFile);
 });

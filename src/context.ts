@@ -20,11 +20,10 @@ export type CliContext = {
   env: {
     DEVSITE_UID?: string;
     DEVSITE_BREW_PREFIX?: string;
-    DEVSITE_STATE_DIR?: string;
+    DEVSITE_USER_HOME?: string;
     DEVSITE_SYSTEM_ROOT?: string;
     DEVSITE_SPLIT_DNS_WAIT_MS?: string;
-    XDG_CONFIG_HOME?: string;
-    XDG_STATE_HOME?: string;
+    DEVSITE_NODE_WAIT_MS?: string;
     [key: string]: string | undefined;
   };
   // Every external command the CLI runs goes through here, so a test scripts each answer and reads which commands ran.
