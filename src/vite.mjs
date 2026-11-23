@@ -65,7 +65,7 @@ export function devsite() {
       project = typeof pkg.name === "string" ? pkg.name : name;
       return {
         server: {
-          // 0 = the OS assigns the port at bind time; there is no pre-picked number to race over. The real port is read in `configureServer`.
+          // 0 = the OS assigns the port at bind time; there is no pre-picked number to race over. The real port is read when the server starts listening.
           port: 0,
           // The node, on this Mac, is the only client: other devices reach the dev server through Caddy and the node, never on this port.
           host: "127.0.0.1",

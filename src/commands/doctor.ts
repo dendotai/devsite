@@ -13,7 +13,7 @@ import { discoverProjects, type RepoProject } from "../repo";
 import { readSettings } from "../settings";
 import { findStorage, type Storage } from "../storage";
 import { probeTailscale } from "../tailscale";
-import { refuseRoot } from "./init";
+import { certHostOf, refuseRoot } from "./init";
 
 const UNUSED_DAYS = 30;
 
@@ -112,7 +112,6 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   const dns = probeDnsmasq(read.settings, ctx);
   printSetup(install, storage, dns, node, ctx, paint);
 
-  const certName = node.ok ? Object.keys(node.status.projects).sort()[0] : undefined;
   const caddyResults: Result[] =
     install.kind === "unknown"
       ? [
@@ -124,7 +123,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
           },
         ]
       : await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx, {
-          certHost: certName === undefined ? undefined : `${certName}.internal`,
+          certHost: certHostOf(node),
         });
   printSection("Caddy", caddyResults, paint, ctx);
   results.push(...caddyResults);

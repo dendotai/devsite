@@ -75,10 +75,13 @@ function probe(port: number): Promise<boolean> {
 
 const html = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.codePointAt(0)};`);
 
+// 404: no project of that name has run on this Mac; 503: one has, and its dev server does not answer.
+const offlineStatus = (p: Project | undefined) => (p === undefined ? 404 : 503);
+
 export function renderOfflinePage(host: string, p: Project | undefined): string {
   const facts =
     p === undefined
-      ? `<p>No project named <em class="host">${html(host.replace(/\.[a-z]+$/, ""))}</em> has run on this Mac.</p>`
+      ? `<p>No project named <em class="host">${html(projectOf(host) ?? host)}</em> has run on this Mac.</p>`
       : [
           "<dl>",
           `<dt>last ran in</dt><dd>${html(p.folder)}</dd>`,
@@ -91,7 +94,7 @@ export function renderOfflinePage(host: string, p: Project | undefined): string 
     .replace(/<!--[\s\S]*?-->\n?/, "")
     .replaceAll("__HOST__", html(host))
     .replaceAll("__PROJECT__", html(p?.project ?? ""))
-    .replaceAll("__STATUS_CODE__", p === undefined ? "404" : "503")
+    .replaceAll("__STATUS_CODE__", String(offlineStatus(p)))
     .replace("__FACTS__", facts);
 }
 
@@ -100,9 +103,15 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+// A registration is a few hundred bytes; the cap keeps a stray client from filling the node's memory.
+const MAX_BODY = 64 * 1024;
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   let text = "";
-  for await (const chunk of req) text += chunk;
+  for await (const chunk of req) {
+    text += chunk;
+    if (text.length > MAX_BODY) return null;
+  }
   try {
     return JSON.parse(text);
   } catch {
@@ -119,9 +128,30 @@ function projectOf(host: string | undefined): string | null {
   return m?.[1] !== undefined && NAME_RE.test(m[1]) ? m[1] : null;
 }
 
-// The API answers only a request sent to the node's own address, so a web page that rebinds its DNS name to 127.0.0.1 reaches none of it.
-function isApi(host: string | undefined, port: number): boolean {
-  return host === `127.0.0.1:${port}` || host === `localhost:${port}`;
+// The API answers only a request sent to the node's own address, so a web page that rebinds its DNS name to 127.0.0.1 reaches none of it. A browser sends an Origin header with every cross-site POST, and the clients (the CLI, the Vite plugin, Caddy's ask) send none, so a web page cannot mark a project not live either.
+function isApi(req: IncomingMessage, port: number): boolean {
+  const host = req.headers.host;
+  return (
+    (host === `127.0.0.1:${port}` || host === `localhost:${port}`) &&
+    req.headers.origin === undefined
+  );
+}
+
+type Registration = Pick<Project, "port" | "folder"> &
+  Partial<Pick<Project, "project" | "devsiteVersion">>;
+
+function parseRegistration(body: unknown): Registration | null {
+  if (typeof body !== "object" || body === null) return null;
+  const b = body as Record<string, unknown>;
+  const { port, folder } = b;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  if (typeof folder !== "string") return null;
+  return {
+    port,
+    folder,
+    project: typeof b.project === "string" ? b.project : undefined,
+    devsiteVersion: typeof b.devsiteVersion === "string" ? b.devsiteVersion : undefined,
+  };
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -136,7 +166,7 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
   const save = () => writeState(file, state);
 
   // A dev server that stopped with no stop request (Ctrl-C, a crash) is found here, at the first request that cannot reach it.
-  const markDown = (name: string, deadPort: number) => {
+  const markNotLive = (name: string, deadPort: number) => {
     const p = state.projects[name];
     if (p?.live && p.port === deadPort) {
       p.live = false;
@@ -146,7 +176,7 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
 
   const offline = (res: ServerResponse, host: string, name: string) => {
     const p = state.projects[name];
-    res.writeHead(p === undefined ? 404 : 503, {
+    res.writeHead(offlineStatus(p), {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
     });
@@ -167,42 +197,42 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
     up.on("response", (r) => {
       res.writeHead(r.statusCode ?? 502, r.headers);
       r.pipe(res);
+      // A dev server that resets mid-response: an error with no listener would end the node.
+      r.on("error", () => res.destroy());
     });
     up.on("error", () => {
       if (res.headersSent) {
         res.destroy();
         return;
       }
-      markDown(name, target);
+      markNotLive(name, target);
       offline(res, req.headers.host ?? "", name);
+    });
+    // A browser that leaves mid-response: the dev server's request ends with it.
+    res.on("close", () => {
+      if (!res.writableFinished) up.destroy();
     });
     req.pipe(up);
   };
 
   const register = async (req: IncomingMessage, res: ServerResponse, name: string) => {
-    const body = (await readBody(req)) as Partial<Project> | null;
-    const port = body?.port;
-    if (
-      typeof port !== "number" ||
-      !Number.isInteger(port) ||
-      port < 1 ||
-      port > 65535 ||
-      typeof body?.folder !== "string"
-    ) {
+    const body = parseRegistration(await readBody(req));
+    if (body === null) {
       return sendJson(res, 400, { error: "the body needs a port (1-65535) and a folder" });
     }
+    const { port } = body;
     // A port the OS gave a dead dev server can go to the next one: the project that held it is no longer live.
     for (const other of Object.values(state.projects)) {
       if (other.port === port) other.live = false;
     }
     state.projects[name] = {
-      project: typeof body.project === "string" ? body.project : name,
+      project: body.project ?? name,
       port,
       folder: body.folder,
       mac,
       live: true,
       lastUsed: today(),
-      devsiteVersion: typeof body.devsiteVersion === "string" ? body.devsiteVersion : "",
+      devsiteVersion: body.devsiteVersion ?? "",
     };
     save();
     sendJson(res, 200, state.projects[name]);
@@ -210,7 +240,7 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
 
   const stop = async (req: IncomingMessage, res: ServerResponse, name: string) => {
     const body = (await readBody(req)) as { port?: unknown } | null;
-    if (typeof body?.port === "number") markDown(name, body.port);
+    if (typeof body?.port === "number") markNotLive(name, body.port);
     sendJson(res, 200, state.projects[name] ?? null);
   };
 
@@ -250,10 +280,13 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
     sendJson(res, 404, { error: `no ${req.method} ${url.pathname}` });
   };
 
+  // The port listen() binds; it differs from `port` only when that is 0.
+  let boundPort = port;
+
   const server = createServer((req, res) => {
     const name = projectOf(req.headers.host);
     if (name !== null) return proxy(req, res, name);
-    if (isApi(req.headers.host, actualPort())) {
+    if (isApi(req, boundPort)) {
       api(req, res).catch((err) => {
         console.error(`devsite node: ${req.method} ${req.url}: ${(err as Error).message}`);
         if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
@@ -288,7 +321,7 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
       socket.pipe(up).pipe(socket);
     });
     up.on("error", () => {
-      markDown(name, target);
+      markNotLive(name, target);
       socket.destroy();
     });
     socket.on("error", () => up.destroy());
@@ -298,12 +331,10 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve());
   });
-  const actualPort = () => {
-    const a = server.address();
-    return typeof a === "object" && a !== null ? a.port : port;
-  };
+  const a = server.address();
+  if (typeof a === "object" && a !== null) boundPort = a.port;
   return {
-    port: actualPort(),
+    port: boundPort,
     close: () =>
       new Promise<void>((resolve) => {
         for (const s of tunnels) s.destroy();

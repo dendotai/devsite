@@ -343,7 +343,7 @@ export function nodeChecks(node: NodeAnswer, ctx: CliContext): Result[] {
           state: "red",
           label: projectsLabel,
           detail: newer.map(([name, p]) => `${name} runs ${p.devsiteVersion}`).join(", "),
-          fix: `${INIT} in the repo of ${newer[0]?.[0]}, so init installs its newer devsite`,
+          fix: `${INIT} in ${newer[0]?.[1].folder}, so init installs its newer devsite`,
         },
   );
   return results;

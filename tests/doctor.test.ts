@@ -381,13 +381,13 @@ test("no node: the node check is red first, with init and the node's log as the 
   expect(r.status).toBe(1);
 });
 
-test("a project whose devsite is newer than the node: red, with init in that project's repo", async () => {
+test("a project whose devsite is newer than the node: red, with init in that project's folder", async () => {
   await mockAdmin([nodeRoute()]);
   const r = await doctor(setUpMachine(), {
     node: { shop: { folder: "/Users/me/Projects/shop", devsiteVersion: "99.0.0" } },
   });
   expect(r.stdout).toContain("✗ no project runs a devsite newer than the node — shop runs 99.0.0");
-  expect(r.stdout).toContain("fix: run `bunx devsite init` in the repo of shop");
+  expect(r.stdout).toContain("fix: run `bunx devsite init` in /Users/me/Projects/shop");
   expect(r.status).toBe(1);
 });
 

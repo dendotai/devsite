@@ -11,9 +11,19 @@ export async function runNode({ port }: { port?: string }, ctx: CliContext): Pro
     ctx.stderr.write(`--port must be a port number, not ${JSON.stringify(port)}\n`);
     return 1;
   }
-  const node = await startNode({ port: wanted, env: ctx.env });
+  let node: Awaited<ReturnType<typeof startNode>>;
+  try {
+    node = await startNode({ port: wanted, env: ctx.env });
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    ctx.stderr.write(
+      e.code === "EADDRINUSE"
+        ? `devsite node: another process listens on 127.0.0.1:${wanted}; \`lsof -i :${wanted}\` names it\n`
+        : `devsite node: ${e.message}\n`,
+    );
+    return 1;
+  }
   ctx.stdout.write(`devsite node: listening on 127.0.0.1:${node.port}\n`);
-  // launchd stops the node with SIGTERM.
   await new Promise<void>((resolve) => {
     process.once("SIGTERM", resolve);
     process.once("SIGINT", resolve);

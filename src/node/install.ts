@@ -13,8 +13,9 @@ export const NODE_LABEL = "ai.den.devsite.node";
 export const plistPath = (ctx: CliContext) => join(launchAgentsDir(ctx.env), `${NODE_LABEL}.plist`);
 export const installedProgram = (ctx: CliContext) => join(nodeProgramDir(ctx.env), "cli.js");
 
-// The file this code runs from: `bun build` makes the whole CLI one file, dist/cli.js, which runs the node too.
-const programSource = () => fileURLToPath(import.meta.url);
+// The file this code runs from: `bun build` makes the whole CLI one file, dist/cli.js, which runs the node too. Run from source, it is this .ts file, which cannot run alone. DEVSITE_NODE_PROGRAM names the file to copy in tests, which run from source.
+const programSource = (ctx: CliContext) =>
+  ctx.env.DEVSITE_NODE_PROGRAM || fileURLToPath(import.meta.url);
 
 // A Homebrew runtime runs from its versioned Cellar dir, which `brew upgrade` deletes; its opt link follows the upgrade.
 export function stableRuntime(execPath: string): string {
@@ -67,36 +68,64 @@ export async function readNode(): Promise<NodeAnswer> {
 
 const NODE_WAIT_MS = 5000;
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 // DEVSITE_NODE_WAIT_MS shortens the wait in tests.
-async function waitForNode(ctx: CliContext): Promise<number | null> {
+function nodeWaitMs(ctx: CliContext): number {
   const set = Number(ctx.env.DEVSITE_NODE_WAIT_MS);
-  const waitMs = ctx.env.DEVSITE_NODE_WAIT_MS && Number.isFinite(set) ? set : NODE_WAIT_MS;
+  return ctx.env.DEVSITE_NODE_WAIT_MS && Number.isFinite(set) ? set : NODE_WAIT_MS;
+}
+
+// Polls the node until its answer is `wanted` or the wait ends; returns the last answer.
+async function waitForAnswer(wanted: boolean, waitMs: number): Promise<NodeAnswer> {
   const deadline = Date.now() + waitMs;
   for (;;) {
-    if ((await readNode()).ok) return null;
-    if (Date.now() >= deadline) return waitMs;
-    await new Promise((r) => setTimeout(r, 100));
+    const answer = await readNode();
+    if (answer.ok === wanted || Date.now() >= deadline) return answer;
+    await sleep(100);
   }
 }
 
 export const nodeAddress = () => `127.0.0.1:${NODE_PORT}`;
 
+// launchd can refuse a bootstrap while the job of the bootout before it still exits ("Bootstrap failed: 5").
+const BOOTSTRAP_TRIES = 5;
+const BOOTSTRAP_GAP_MS = 500;
+
 // A bootout of a node that is not loaded fails, and the install goes on: only the bootstrap must work.
 export async function installNode(ctx: CliContext) {
+  const source = programSource(ctx);
+  if (!source.endsWith(".js")) {
+    throw new Error(
+      "init installs the node from the built devsite: run `bun run build`, then `node dist/cli.js init`",
+    );
+  }
   const uid = ctx.env.DEVSITE_UID ? Number(ctx.env.DEVSITE_UID) : (process.getuid?.() ?? -1);
   const program = installedProgram(ctx);
   const log = nodeLog(ctx.env);
   mkdirSync(dirname(program), { recursive: true });
   mkdirSync(dirname(log), { recursive: true });
   mkdirSync(launchAgentsDir(ctx.env), { recursive: true });
-  copyFileSync(programSource(), program);
+  copyFileSync(source, program);
   writeFileSync(plistPath(ctx), renderNodePlist(stableRuntime(process.execPath), program, log));
+  const waitMs = nodeWaitMs(ctx);
   exec("launchctl", ["bootout", `gui/${uid}/${NODE_LABEL}`], ctx, true);
-  const boot = exec("launchctl", ["bootstrap", `gui/${uid}`, plistPath(ctx)], ctx, true);
-  if (boot.status !== 0)
-    throw new Error(`\`launchctl bootstrap gui/${uid} ${plistPath(ctx)}\` failed`);
-  const waited = await waitForNode(ctx);
-  if (waited !== null) {
-    throw new Error(`the node did not answer within ${waited / 1000} s. See its log: ${log}`);
+  // A node that still answers after the bootout is not the LaunchAgent's: the new node could not bind its port, and init would read the old one as installed.
+  const old = await waitForAnswer(false, waitMs);
+  if (old.ok) {
+    throw new Error(
+      `process ${old.status.pid} (devsite ${old.status.version}) holds ${nodeAddress()}, and it is not the node's LaunchAgent. Stop it, then run init again.`,
+    );
+  }
+  for (let tries = 1; ; tries++) {
+    const boot = exec("launchctl", ["bootstrap", `gui/${uid}`, plistPath(ctx)], ctx, true);
+    if (boot.status === 0) break;
+    if (tries === BOOTSTRAP_TRIES) {
+      throw new Error(`\`launchctl bootstrap gui/${uid} ${plistPath(ctx)}\` failed`);
+    }
+    await sleep(BOOTSTRAP_GAP_MS);
+  }
+  if (!(await waitForAnswer(true, waitMs)).ok) {
+    throw new Error(`the node did not answer within ${waitMs / 1000} s. See its log: ${log}`);
   }
 }

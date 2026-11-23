@@ -54,6 +54,7 @@ export function makeIo(opts: IoOpts = {}) {
     env: {
       DEVSITE_BREW_PREFIX: dirname(dirname(opts.caddyfile ?? scratchCaddyfile())),
       DEVSITE_USER_HOME: opts.home ?? process.env.DEVSITE_USER_HOME,
+      DEVSITE_NODE_PROGRAM: process.env.DEVSITE_NODE_PROGRAM,
       ...opts.env,
     },
     runCommand: opts.runCommand ?? quietRunner().runCommand,

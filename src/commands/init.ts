@@ -12,7 +12,7 @@
  *
  * `bun dev` never needs sudo: it only tells the node which port the project runs on.
  */
-// Adding a version-sensitive node API here? Check engines.node in package.json, and consider a node-version matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
+// Adding a version-sensitive Node.js API here? Check engines.node in package.json, and consider a Node.js version matrix on the CI smoke step (ci.yml) — one version stops proving the floor.
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { BlockList, isIP } from "node:net";
 import { tmpdir } from "node:os";
@@ -936,7 +936,7 @@ function installAfter(settings: Settings, before: KnownInstall, ctx: CliContext)
 }
 
 // A project the node knows, for the certificate checks: Caddy signs a certificate only for such a name.
-function certHostOf(node: NodeAnswer): string | undefined {
+export function certHostOf(node: NodeAnswer): string | undefined {
   const name = node.ok ? Object.keys(node.status.projects).sort()[0] : undefined;
   return name === undefined ? undefined : `${name}.internal`;
 }

@@ -1,6 +1,9 @@
 // The node (ADR 0005), driven over HTTP as Caddy and the clients drive it: each test starts a real node in its own process.
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer, request } from "node:http";
+import type { AddressInfo } from "node:net";
 import { connect } from "node:net";
 import { join } from "node:path";
 import pkg from "../package.json";
@@ -182,4 +185,60 @@ test("a register with no port is refused, and changes nothing", async () => {
   const res = await fetch(`${node.url}/projects/web`, { method: "PUT", body: "{}" });
   expect(res.status).toBe(400);
   expect((await status(node)).projects).toEqual({});
+});
+
+test("a web page's cross-site POST cannot mark a project not live", async () => {
+  const node = await startTestNode();
+  const dev = await startDevServer();
+  await register(node, "web", { port: dev.port });
+  const res = await fetch(`${node.url}/projects/web/stop`, {
+    method: "POST",
+    headers: { origin: "https://example.com", "content-type": "text/plain" },
+    body: JSON.stringify({ port: dev.port }),
+  });
+  expect(res.status).toBe(421);
+  expect((await status(node)).projects.web?.live).toBe(true);
+});
+
+test("a dev server that resets mid-response leaves the node running", async () => {
+  const node = await startTestNode();
+  const dev = createServer((_req, res) => {
+    res.writeHead(200, { "content-length": "1000" });
+    res.write("partial");
+    setTimeout(() => res.socket?.destroy(), 20);
+  });
+  await new Promise<void>((r) => dev.listen(0, "127.0.0.1", r));
+  try {
+    await register(node, "web", { port: (dev.address() as AddressInfo).port });
+    // The browser side ends with the dev server's reset: it gets no end, only a close.
+    await new Promise<void>((resolve) => {
+      const req = request(
+        { host: "127.0.0.1", port: node.port, headers: { host: "web.internal" } },
+        (res) => {
+          res.resume();
+          res.on("error", () => undefined);
+          res.on("close", () => resolve());
+        },
+      );
+      req.on("error", () => resolve());
+      req.end();
+    });
+    expect((await status(node)).projects.web).toBeDefined();
+  } finally {
+    dev.closeAllConnections();
+    await new Promise((r) => dev.close(r));
+  }
+});
+
+test("a second node on a taken port exits 1 with a devsite message, not a stack", async () => {
+  const node = await startTestNode();
+  const r = spawnSync(
+    process.execPath,
+    [join(import.meta.dir, "..", "src", "cli.ts"), "node", "--port", String(node.port)],
+    { encoding: "utf8", env: { ...process.env, DEVSITE_USER_HOME: node.home } },
+  );
+  expect(r.status).toBe(1);
+  expect(r.stderr).toBe(
+    `devsite node: another process listens on 127.0.0.1:${node.port}; \`lsof -i :${node.port}\` names it\n`,
+  );
 });

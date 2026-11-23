@@ -3,7 +3,16 @@ import { expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type CliContext, processRunner } from "../src/context";
-import { type CommandCall, cli, fakeStdin, MISSING, makeRepo, scriptedRunner } from "./helpers";
+import { installNode } from "../src/node/install";
+import {
+  type CommandCall,
+  cli,
+  fakeStdin,
+  MISSING,
+  makeIo,
+  makeRepo,
+  scriptedRunner,
+} from "./helpers";
 import {
   HOST,
   mockAdmin,
@@ -192,6 +201,41 @@ test("no node: init installs it as you, before the one sudo call, and the checks
   expect(existsSync(program)).toBe(true);
   const after = r.stdout.slice(r.stdout.indexOf("Checks after this run"));
   expect(after).toContain("✓ the node answers on 127.0.0.1:47380");
+});
+
+test("a process that still holds the node's port after the bootout: the install stops and names it", async () => {
+  await useNodeWith();
+  const { runCommand, calls } = scriptedRunner(() => ({}));
+  const { ctx } = makeIo({ runCommand, env: { DEVSITE_NODE_WAIT_MS: "300" } });
+  await expect(installNode(ctx)).rejects.toThrow(
+    new RegExp(
+      `^process ${process.pid} \\(devsite 0\\.0\\.0\\) holds 127\\.0\\.0\\.1:47380, and it is not the node's LaunchAgent\\. Stop it, then run init again\\.$`,
+    ),
+  );
+  expect(calls.map((c) => `${c.cmd} ${c.args[0]}`)).toEqual(["launchctl bootout"]);
+});
+
+test("init run from source stops before it touches the node, and says to build first", async () => {
+  const { runCommand, calls } = scriptedRunner(() => ({}));
+  const { ctx } = makeIo({ runCommand, env: { DEVSITE_NODE_PROGRAM: undefined } });
+  await expect(installNode(ctx)).rejects.toThrow(
+    "init installs the node from the built devsite: run `bun run build`, then `node dist/cli.js init`",
+  );
+  expect(calls).toEqual([]);
+});
+
+test("a bootstrap that launchd refuses while the old node exits is tried again", async () => {
+  let tries = 0;
+  const { runCommand } = scriptedRunner((c) => {
+    if (c.cmd !== "launchctl" || c.args[0] !== "bootstrap") return {};
+    tries++;
+    if (tries < 3) return { status: 5 };
+    void useNodeWith();
+    return {};
+  });
+  const { ctx } = makeIo({ runCommand, env: { DEVSITE_NODE_WAIT_MS: "2000" } });
+  await installNode(ctx);
+  expect(tries).toBe(3);
 });
 
 test("a node that does not come up after the install: init stops and names the node's log", async () => {
