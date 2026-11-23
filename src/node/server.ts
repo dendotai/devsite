@@ -200,7 +200,10 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
       // A dev server that resets mid-response: an error with no listener would end the node.
       r.on("error", () => res.destroy());
     });
+    let browserLeft = false;
     up.on("error", () => {
+      // The destroy below fires this error too, and says nothing about the dev server.
+      if (browserLeft) return;
       if (res.headersSent) {
         res.destroy();
         return;
@@ -210,7 +213,9 @@ export async function startNode({ port, env }: NodeOptions): Promise<RunningNode
     });
     // A browser that leaves mid-response: the dev server's request ends with it.
     res.on("close", () => {
-      if (!res.writableFinished) up.destroy();
+      if (res.writableFinished) return;
+      browserLeft = true;
+      up.destroy();
     });
     req.pipe(up);
   };

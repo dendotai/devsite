@@ -104,6 +104,31 @@ test("a dev server that died with no stop: the next request shows the offline pa
   expect((await status(node)).projects.web?.live).toBe(false);
 });
 
+test("a browser that drops a request before the dev server answers leaves the project live", async () => {
+  const node = await startTestNode();
+  // A dev server still busy with the request, as Vite is while it transforms a module.
+  const reached = Promise.withResolvers<void>();
+  const dropped = Promise.withResolvers<void>();
+  const dev = createServer((req) => {
+    req.socket.once("close", () => dropped.resolve());
+    reached.resolve();
+  });
+  await new Promise<void>((r) => dev.listen(0, "127.0.0.1", r));
+  try {
+    await register(node, "web", { port: (dev.address() as AddressInfo).port });
+    const req = request({ host: "127.0.0.1", port: node.port, headers: { host: "web.internal" } });
+    req.on("error", () => undefined);
+    req.end();
+    await reached.promise;
+    req.destroy();
+    await dropped.promise;
+    expect((await status(node)).projects.web?.live).toBe(true);
+  } finally {
+    dev.closeAllConnections();
+    await new Promise((r) => dev.close(r));
+  }
+});
+
 test("status asks each live project's dev server, so a dead one reads as not live", async () => {
   const node = await startTestNode();
   const dev = await startDevServer();
