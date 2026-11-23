@@ -4,7 +4,8 @@ import { spawnSync } from "node:child_process";
 export type Writer = { write(chunk: string): unknown };
 
 // capture: the child's stdout comes back in `stdout` and its stderr is dropped; otherwise the child shares the terminal (a sudo password prompt needs it) and `stdout` is "".
-export type CommandOptions = { capture: boolean };
+// timeoutMs: the child is stopped after it, and the run reads as failed.
+export type CommandOptions = { capture: boolean; timeoutMs?: number };
 // error is set when the command could not start at all (not on PATH); status is then 1.
 export type CommandResult = { status: number; stdout: string; error?: Error };
 export type CommandRunner = (cmd: string, args: string[], opts: CommandOptions) => CommandResult;
@@ -30,10 +31,11 @@ export type CliContext = {
   runCommand: CommandRunner;
 };
 
-export const processRunner: CommandRunner = (cmd, args, { capture }) => {
+export const processRunner: CommandRunner = (cmd, args, { capture, timeoutMs }) => {
   const r = spawnSync(cmd, args, {
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: "utf8",
+    timeout: timeoutMs,
   });
   return { status: r.status ?? 1, stdout: r.stdout ?? "", error: r.error };
 };

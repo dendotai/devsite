@@ -31,7 +31,10 @@ import offlinePage from "../../assets/offline.html" with { type: "text" };
 import {
   type CaddyRoute,
   caddyChecks,
+  JSON_FIX_IN_INIT,
   machineHosts,
+  offlinePageChecks,
+  portFileChecks,
   printSection,
   type Repair,
   type Result,
@@ -42,7 +45,19 @@ import { type CliContext, processContext } from "../context";
 import { type DnsmasqPlan, digAnswer, planDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { ALLOWED_SOURCES, guardCaddyfileLines } from "../guard.mjs";
 import { findCaddy, type KnownInstall, unknownFix } from "../install";
-import { BOLD, CYAN, DIM, exec, GREEN, type Paint, painter, RED, YELLOW } from "../io";
+import {
+  BOLD,
+  CYAN,
+  DIM,
+  exec,
+  GREEN,
+  type Paint,
+  painter,
+  plural,
+  RED,
+  type RootCommand,
+  YELLOW,
+} from "../io";
 import { devSiteName, hostsOf } from "../names.mjs";
 import { readSettings, type Settings, settingsPath } from "../settings";
 import { PORT_PLACEHOLDER, portFilePath, resolveStateDir, writePortFile } from "../state.mjs";
@@ -51,7 +66,6 @@ import {
   ADMIN_DNS_URL,
   probeTailscale,
   readSplitDns,
-  SPLIT_DNS_DOMAIN,
   type SplitDns,
   type SplitDnsRoute,
   splitDnsDetail,
@@ -167,6 +181,8 @@ export function renderGuardFile(): string {
 
 // Outside the `devsite.d/*.caddy` glob (`*` does not cross `/`), so Caddy loads it only through each host file's import, which passes the project as its argument. A named snippet would have to come before every host file in parse order.
 export const OFFLINE_FRAGMENT = "fragments/offline.caddy";
+
+// The files devsite writes whole, by file name, with what each one is: init names them in one line.
 const OFFLINE_HEREDOC_END = "HTML";
 const OFFLINE_PROJECT = "{args[0]}";
 
@@ -251,7 +267,8 @@ export function renderHostFile(r: Route, portFile: string | null): string {
 }
 
 // One planned file operation; next === null deletes the file. rel is the diff's label: the path relative to the Caddyfile's directory, or the absolute path of a file outside it.
-type Change = { rel: string; abs: string; next: string | null };
+// generated: what a file devsite writes whole is; init names such a file in one line, and --dry-run prints its diff.
+type Change = { rel: string; abs: string; next: string | null; generated?: string };
 
 function dirsToMake(changes: Change[], caddyfilePath: string | null): string[] {
   return [
@@ -351,9 +368,11 @@ function paintDiff(diff: string, paint: Paint): string {
 
 // A root step's commands join the run's one sudo call. A step handed to the user is a command init prints after the run instead of running it, because a setting handed that change to the user.
 // A manual step is one only the user can do, in a web page; init guides it after the root steps.
-type Step = { text: string; details?: string[] } & (
+// repair: the red check this step fixes, so a check still red after the run names the step.
+// planNote: printed after the text in the plan only, where it points at what the plan prints below it.
+type Step = { text: string; planNote?: string; details?: string[]; repair?: Repair } & (
   | { run: () => Promise<void>; root?: never; handedToUser?: never; manual?: never }
-  | { root: string[][]; run?: never; handedToUser?: never; manual?: never }
+  | { root: RootCommand[]; run?: never; handedToUser?: never; manual?: never }
   | { handedToUser: string[]; run?: never; root?: never; manual?: never }
   | { manual: () => Promise<void>; run?: never; root?: never; handedToUser?: never }
 );
@@ -397,13 +416,16 @@ function rootWriteCommands(changes: Change[], caddyfilePath: string | null) {
 }
 
 // Inside the one sudo call init cannot wait in-process, so the shell waits for the admin API the way waitForCaddyAdmin does: any HTTP answer means the listener is up.
-function waitForAdminCommand(): string[] {
+function waitForAdminCommand(): RootCommand {
   const tries = ADMIN_WAIT_MS / 100;
-  return [
-    "sh",
-    "-c",
-    `i=0; until curl -so /dev/null ${adminBase()}/config/; do i=$((i+1)); [ $i -ge ${tries} ] && exit 1; sleep 0.1; done`,
-  ];
+  return Object.assign(
+    [
+      "sh",
+      "-c",
+      `i=0; until curl -so /dev/null ${adminBase()}/config/; do i=$((i+1)); [ $i -ge ${tries} ] && exit 1; sleep 0.1; done`,
+    ],
+    { shown: `wait up to ${ADMIN_WAIT_MS / 1000} s for Caddy's admin API` },
+  );
 }
 
 function repairsOf(checks: Result[], install: KnownInstall): Set<Repair> {
@@ -495,6 +517,7 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
   if (p.missingPortFiles.length > 0) {
     steps.push({
       text: `write the port file of ${p.missingPortFiles.join(", ")} in ${join(p.stateDir, "ports")}`,
+      repair: "port-file",
       run: async () => {
         for (const host of p.missingPortFiles) writePortFile(host, PORT_PLACEHOLDER, p.stateDir);
       },
@@ -503,19 +526,21 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
   if (repairs.has("install")) {
     steps.push({
       text: "install Caddy with Homebrew",
+      repair: "install",
       run: async () => runInTerminal("brew", ["install", "caddy"], ctx),
     });
   }
   if (p.changes.length > 0) {
-    const text = `write ${p.changes.length} file(s) in ${dirname(install.devsiteDir)}, as the diff below shows`;
+    const text = `write ${plural(p.changes.length, "file", "files")} in ${dirname(install.devsiteDir)}`;
+    const planNote = ", as the diff below shows";
     const details = [
       ...p.guardedSites.map(
         (s) =>
-          `adds "import devsite-guard" to your site ${s}: the guard keeps the LAN out of it in place of default_bind`,
+          `adds \`import devsite-guard\` to your site ${s}: the guard keeps the LAN out of it in place of default_bind`,
       ),
       ...p.removedBinds.map(
         (b) =>
-          `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy as you cannot start with it, and the guard keeps the LAN out`,
+          `deletes ${JSON.stringify(b)} from the Caddyfile: Caddy cannot run as you with it, and the guard keeps the LAN out`,
       ),
       ...(p.guardedSites.length > 0
         ? [`to keep default_bind instead, answer n and ${keepBindsWithRoot(ctx)}`]
@@ -523,9 +548,17 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
     ];
     steps.push(
       asRoot
-        ? { text, details, root: rootWriteCommands(p.changes, caddyfilePath) }
+        ? {
+            text,
+            planNote,
+            details,
+            repair: "write",
+            root: rootWriteCommands(p.changes, caddyfilePath),
+          }
         : {
             text,
+            planNote,
+            repair: "write",
             details,
             run: async () => applyChanges(p.changes, caddyfilePath),
           },
@@ -537,17 +570,19 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
       asRoot
         ? {
             text: "start Caddy as root",
+            repair: "start",
             root: [["brew", "services", "start", "caddy"], waitForAdminCommand()],
           }
         : {
             text: "start Caddy as you",
+            repair: "start",
             run: async () => {
               runInTerminal("brew", ["services", "start", "caddy"], ctx);
               if (!(await waitForCaddyAdmin())) {
                 // `brew services start` does nothing for a service launchd still has loaded after Caddy crashed.
                 throw new Error(
-                  `the Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s — see ${install.log ?? "Caddy's log"}.\n` +
-                    "If `brew services start caddy` said the service is already started, Caddy crashed while loaded; run `brew services restart caddy`, then `bunx devsite init` again",
+                  `the Caddy service did not start within ${ADMIN_WAIT_MS / 1000} s. See ${install.log ?? "Caddy's log"}.\n` +
+                    "If `brew services start caddy` said the service is already started, Caddy crashed while loaded: run `brew services restart caddy`, then `bunx devsite init` again.",
                 );
               }
             },
@@ -567,18 +602,19 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
         handedToUser: reload,
       });
     } else if (asRoot) {
-      steps.push({ text, details: p.dropped, root: [reload] });
+      steps.push({ text, details: p.dropped, repair: "load", root: [reload] });
     } else {
       steps.push({
         text,
         details: p.dropped,
+        repair: "load",
         run: async () => runInTerminal("caddy", reload.slice(1), ctx),
       });
     }
   }
   // Caddy's own auto-trust needs an interactive prompt it cannot get as a background service, so init runs `caddy trust`; it reads the CA from the admin API, which the steps above leave answering.
   if (repairs.has("trust")) {
-    steps.push({ text: "trust Caddy's local CA", root: [["caddy", "trust"]] });
+    steps.push({ text: "trust Caddy's local CA", repair: "trust", root: [["caddy", "trust"]] });
   }
   if (p.dnsmasq !== null) steps.push(...dnsmasqSteps(p.dnsmasq, ctx));
   if (repairs.has("split-dns") && p.splitDns !== null) steps.push(splitDnsStep(p.splitDns, ctx));
@@ -594,7 +630,12 @@ function dnsmasqSteps(plan: DnsmasqPlan, ctx: CliContext): Step[] {
       run: async () => runInTerminal("brew", ["install", "dnsmasq"], ctx),
     });
   }
-  steps.push({ text: plan.text, details: plan.details, root: plan.rootCommands(writeTmp) });
+  steps.push({
+    text: plan.text,
+    details: plan.details,
+    repair: "run-dnsmasq",
+    root: plan.rootCommands(writeTmp),
+  });
   return steps;
 }
 
@@ -621,7 +662,7 @@ function splitDnsStep({ ip, split }: SplitDnsRoute, ctx: CliContext): Step {
         ]
       : [];
   return {
-    text: `${split.state === "elsewhere" ? "change" : "add"} the split DNS route for ${SPLIT_DNS_DOMAIN} in the Tailscale admin console, so the phone finds .internal names`,
+    text: `${split.state === "elsewhere" ? "change" : "add"} the split DNS route for .internal in the Tailscale admin console, so the phone finds .internal names`,
     details: [...splitDnsValues(ip), ...elsewhere],
     manual: async () => {
       const open = await yesNo(`Open ${ADMIN_DNS_URL} in your browser? (y/n) `, ctx);
@@ -634,7 +675,7 @@ function splitDnsStep({ ip, split }: SplitDnsRoute, ctx: CliContext): Step {
         if (!done) return skipSplitDns(ip, ctx);
         const now = await waitForSplitDns(ip, ctx);
         if (now.state === "this-mac") {
-          ctx.stdout.write(`  The split DNS route for ${SPLIT_DNS_DOMAIN} points to this Mac.\n`);
+          ctx.stdout.write(`  The split DNS route for .internal points to this Mac.\n`);
           return;
         }
         ctx.stdout.write(`  Not yet: \`tailscale dns status\` shows ${splitDnsDetail(now)}.\n`);
@@ -645,23 +686,24 @@ function splitDnsStep({ ip, split }: SplitDnsRoute, ctx: CliContext): Step {
 
 function skipSplitDns(ip: string, ctx: CliContext) {
   ctx.stdout.write(
-    `  Skipped: \`bunx devsite doctor\` stays red until the route for ${SPLIT_DNS_DOMAIN} points to ${ip}.\n`,
+    `  Skipped: \`bunx devsite doctor\` stays red until the route for .internal points to ${ip}.\n`,
   );
 }
 
-function stepLine(step: Step, i: number, total: number, paint: Paint): string {
+function stepLine(step: Step, i: number, total: number, paint: Paint, inPlan = false): string {
   const tag = step.root
     ? `  ${paint(YELLOW, "[sudo]")}`
     : step.manual
       ? `  ${paint(CYAN, "[manual]")}`
       : "";
-  return `${paint(BOLD, `Step ${i + 1} of ${total}:`)} ${step.text}${tag}`;
+  const note = inPlan ? (step.planNote ?? "") : "";
+  return `${paint(BOLD, `Step ${i + 1} of ${total}:`)} ${step.text}${note}${tag}`;
 }
 
 function printSteps(heading: string, steps: Step[], paint: Paint, ctx: CliContext) {
   ctx.stdout.write(`\n${paint(BOLD, heading)}\n`);
   steps.forEach((s, i) => {
-    ctx.stdout.write(`  ${stepLine(s, i, steps.length, paint)}\n`);
+    ctx.stdout.write(`  ${stepLine(s, i, steps.length, paint, true)}\n`);
     for (const d of s.details ?? []) ctx.stdout.write(`     ${paint(DIM, d)}\n`);
   });
 }
@@ -683,7 +725,9 @@ async function runSteps(
     ctx.stdout.write("\n");
     for (const r of root) {
       ctx.stdout.write(`${stepLine(r.s, r.i, steps.length, paint)}\n`);
-      for (const c of r.root) ctx.stdout.write(`  sudo ${c.map(shellQuote).join(" ")}\n`);
+      for (const c of r.root) {
+        ctx.stdout.write(`  ${c.shown ?? `sudo ${c.map(shellQuote).join(" ")}`}\n`);
+      }
     }
     sudoAll(
       root.flatMap((r) => r.root),
@@ -750,17 +794,19 @@ export async function waitForCaddyAdmin(timeoutMs = ADMIN_WAIT_MS): Promise<bool
   }
 }
 
-function printChecklist(routes: Route[], caRoot: string | null, ctx: CliContext) {
+// A phone trusts the CA once, so the steps show only on the run that set the CA up.
+function printPhoneSteps(routes: Route[], caRoot: string | null, ctx: CliContext) {
+  const host = routes[0]?.host;
   ctx.stdout.write(
     [
       "",
       "Manual, per-device (one-time — can't be automated from here):",
-      `  • On each phone: install AND trust the CA root, then reload https://${routes[0]?.host}`,
-      `      ${caRoot ?? `the root_certificate that ${adminBase()}/pki/ca/local answers`}`,
-      `      (iOS: install the profile, THEN Settings → General → About →`,
-      `       Certificate Trust Settings → toggle it ON — installing ≠ trusting.)`,
-      "",
-      "From here on your only surface is `bun dev` — it needs no sudo.",
+      `  • On each phone: install and trust the CA root, then reload https://${host}`,
+      caRoot === null
+        ? `      Caddy makes its CA when it first serves https://${host}; then save it with \`curl -s ${adminBase()}/pki/ca/local | jq -r .root_certificate > caddy-root.crt\``
+        : `      ${caRoot}`,
+      "      (iOS: install the profile, then turn it on in Settings → General → About →",
+      "       Certificate Trust Settings.)",
       "",
     ].join("\n"),
   );
@@ -913,8 +959,8 @@ function defaultBindStop(binds: string[], sites: UnguardedSite[], ctx: CliContex
     "Your Caddyfile has a default_bind line and site blocks of your own:",
     ...binds.map((b) => `  ${b}`),
     ...sites.map((s) => `  ${s.address}`),
-    "Caddy as you cannot start with default_bind, and deleting the line would open your sites to the LAN. init changed nothing.",
-    "To go on, do one of these, then run `bunx devsite init` again:",
+    "Caddy cannot run as you with default_bind, and deleting the line would open your sites to the LAN. init changed nothing.",
+    `To go on, do ${ways.length === 1 ? "this" : "one of these"}, then run \`bunx devsite init\` again:`,
     ...ways,
     "",
   ].join("\n");
@@ -979,7 +1025,7 @@ export async function init(
   const install = findCaddy(settings, ctx);
   if (install.kind === "unknown") {
     ctx.stderr.write(
-      `devsite does not know this Mac's Caddy install: ${install.why}.\n` +
+      `This Mac's Caddy is an install devsite does not know: ${install.why}.\n` +
         `To use it anyway, ${unknownFix(ctx)}.\n`,
     );
     return 1;
@@ -1040,7 +1086,8 @@ export async function init(
   for (const [name, content] of desired) {
     const abs = join(devsiteDir, name);
     if (!existsSync(abs) || readFileSync(abs, "utf8") !== content) {
-      changes.push({ rel: `devsite.d/${name}`, abs, next: content });
+      const generated = name === OFFLINE_FRAGMENT ? "devsite's offline page" : undefined;
+      changes.push({ rel: `devsite.d/${name}`, abs, next: content, generated });
     }
   }
   for (const name of deletions) {
@@ -1056,8 +1103,17 @@ export async function init(
 
   const dns = probeDnsmasq(settings, ctx);
   const tailscale = probeTailscale(dns.tailscale, ctx);
+  const runHosts = new Set(missingPortFiles);
+  const fileChecks = () => [
+    ...portFileChecks(devsiteDir, stateDir, runHosts),
+    ...offlinePageChecks(devsiteDir, join(devsiteDir, OFFLINE_FRAGMENT), renderOfflineFragment()),
+  ];
   const checks = [
-    ...(await caddyChecks(install, storage, ctx)),
+    ...(await caddyChecks(install, storage, ctx, {
+      pendingHost: routes[0]?.host,
+      jsonFix: JSON_FIX_IN_INIT,
+    })),
+    ...fileChecks(),
     ...tailscale.checks,
     ...dns.checks,
   ];
@@ -1102,21 +1158,26 @@ export async function init(
     rel: f.abs,
     abs: f.abs,
     next: f.next,
+    generated: f.about,
   }));
+  const allChanges = [...changes, ...dnsChanges];
+  const relativeNote = (cs: Change[]) =>
+    cs.some((c) => c.rel !== c.abs) ? ` (relative paths are in ${caddyDir})` : "";
   // Each piece ends with its own newline; concatenation is one multi-file unified diff, whose relative labels patch(1) applies with -p0 from the Caddyfile's dir.
-  const diff = [...changes, ...dnsChanges].map((c) => unifiedDiff(c, ctx)).join("");
-  const fileCount = changes.length + dnsChanges.length;
+  const diff = allChanges.map((c) => unifiedDiff(c, ctx)).join("");
+  const fileCount = allChanges.length;
 
   if (dryRun) {
     if (steps.length === 0) ctx.stdout.write("\n--dry-run: nothing to do.\n");
-    else printSteps("Plan:", steps, paint, ctx);
+    else printSteps("Plan", steps, paint, ctx);
     if (fileCount === 0) {
       ctx.stdout.write(
         `\n--dry-run: ${caddyfilePath ?? devsiteDir} and devsite.d are already up to date; nothing to write.\n`,
       );
     } else {
+      ctx.stdout.write(`\n--dry-run: would change ${plural(fileCount, "file", "files")}.\n`);
       ctx.stdout.write(
-        `\n--dry-run: would change ${fileCount} file(s); relative paths are in ${caddyDir}; the diff:\n\n${paintDiff(diff, paint)}\n`,
+        `\n${paint(BOLD, `The diff${relativeNote(allChanges)}`)}\n\n${paintDiff(diff, paint)}\n`,
       );
     }
     ctx.stdout.write(jsonHelp);
@@ -1128,11 +1189,19 @@ export async function init(
     ctx.stdout.write(jsonHelp);
     return 0;
   }
-  printSteps("Plan:", steps, paint, ctx);
-  if (fileCount > 0) {
-    ctx.stdout.write(`\n${paint(BOLD, `The diff (relative paths are in ${caddyDir}):`)}\n\n`);
-    ctx.stdout.write(`${paintDiff(diff, paint)}\n`);
+  printSteps("Plan", steps, paint, ctx);
+  // A file devsite writes whole holds nothing of the user's, so init names it in one line; --dry-run prints its diff.
+  const shown = allChanges.filter((c) => c.generated === undefined);
+  if (shown.length > 0) {
+    ctx.stdout.write(`\n${paint(BOLD, `The diff${relativeNote(shown)}`)}\n\n`);
+    ctx.stdout.write(`${paintDiff(shown.map((c) => unifiedDiff(c, ctx)).join(""), paint)}\n`);
   }
+  const named = allChanges.flatMap((c) =>
+    c.generated === undefined
+      ? []
+      : [`  ${c.rel} — ${c.generated}, ${existsSync(c.abs) ? "rewritten" : "new"}\n`],
+  );
+  if (named.length > 0) ctx.stdout.write(`\n${named.join("")}`);
   // A plan of manual steps only changes nothing on this Mac, so it needs no y: each manual step asks its own questions.
   const manualOnly = steps.every((s) => s.manual !== undefined);
   if (!ctx.stdin.isTTY) {
@@ -1158,13 +1227,29 @@ export async function init(
   const storageAfter = await findStorage(after, ctx);
   const dnsAfter = probeDnsmasq(settings, ctx);
   const checksAfter = [
-    ...(await caddyChecks(after, storageAfter, ctx)),
+    ...(await caddyChecks(after, storageAfter, ctx, { jsonFix: JSON_FIX_IN_INIT })),
+    ...fileChecks(),
     ...probeTailscale(dnsAfter.tailscale, ctx).checks,
     ...dnsAfter.checks,
   ];
-  printSection("Checks after this run", checksAfter, paint, ctx);
+  // A check the run just tried to fix points at that step: its fix line would send the user back to this same run.
+  const ran = new Map(steps.flatMap((s) => (s.repair ? [[s.repair, s.text] as const] : [])));
+  const stillRed = checksAfter.map((r): Result => {
+    const step = r.state === "red" && r.repair ? ran.get(r.repair) : undefined;
+    if (r.state !== "red" || step === undefined) return r;
+    return {
+      ...r,
+      fix: `read the output of the step "${step}" above: it ran and this is still red`,
+    };
+  });
+  printSection("Checks after this run", stillRed, paint, ctx);
   ctx.stdout.write(jsonHelp);
-  const phoneRoot = join(stateDir, "caddy-root.crt");
-  printChecklist(routes, await caRootFile(storageAfter, phoneRoot), ctx);
+  if (steps.some((s) => s.repair === "trust")) {
+    const phoneRoot = join(stateDir, "caddy-root.crt");
+    printPhoneSteps(routes, await caRootFile(storageAfter, phoneRoot), ctx);
+  }
+  if (stillRed.every((r) => r.state !== "red")) {
+    ctx.stdout.write("\nFrom now on, run `bun dev`; it needs no sudo.\n");
+  }
   return 0;
 }

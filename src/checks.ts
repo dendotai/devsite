@@ -8,13 +8,22 @@ import { startsWithGuard } from "./guard.mjs";
 import { describeKind, type KnownInstall } from "./install";
 import { BOLD, DIM, exec, GREEN, type Paint, RED } from "./io";
 import { HOSTNAME_RE } from "./names.mjs";
+import { portFilePath } from "./state.mjs";
 import { caRootFile, type Storage } from "./storage";
 import { adminBase, caddy, findHostRoute } from "./vite.mjs";
 
-export const INIT = "bunx devsite init";
+export const INIT = "run `bunx devsite init`";
 
-// What init does about a check that is not green: install Caddy, start it, load its config through the admin API, trust its CA, or run devsite's dnsmasq. A check with no repair is one init only reports.
-export type Repair = "install" | "start" | "load" | "trust" | "run-dnsmasq" | "split-dns";
+// What init does about a check that is not green. A check with no repair is one init only reports.
+export type Repair =
+  | "install"
+  | "start"
+  | "load"
+  | "trust"
+  | "run-dnsmasq"
+  | "split-dns"
+  | "port-file"
+  | "write";
 
 export type Result =
   | { state: "green"; label: string; detail?: string }
@@ -31,6 +40,57 @@ export function machineHosts(devsiteDir: string): string[] {
     .map((f) => f.replace(/\.caddy$/, ""))
     .filter((h) => HOSTNAME_RE.test(h) && h.endsWith(".internal"))
     .sort();
+}
+
+// A host file's first line, `# <project>`, names the project that owns it.
+export function hostFileOwner(text: string): string | undefined {
+  return text
+    .split("\n", 1)[0]
+    ?.match(/^# (.+)$/)?.[1]
+    ?.trim();
+}
+
+// Every host file in devsite.d imports its host's port file, so one missing port file makes every `caddy reload` fail, for each repo's hosts. runHosts: the hosts an init run writes the port file of, so its step fixes them.
+export function portFileChecks(
+  devsiteDir: string,
+  stateDir: string,
+  runHosts: ReadonlySet<string> = new Set(),
+): Result[] {
+  return machineHosts(devsiteDir).map((host): Result => {
+    const label = `${host}'s port file exists`;
+    const path = portFilePath(host, stateDir);
+    if (existsSync(path)) return { state: "green", label };
+    const project = hostFileOwner(readFileSync(join(devsiteDir, `${host}.caddy`), "utf8"));
+    return {
+      state: "red",
+      label,
+      detail: `no ${path}, so \`caddy reload\` fails`,
+      fix: project === undefined ? INIT : `${INIT} in the repo of ${project}`,
+      ...(runHosts.has(host) ? { repair: "port-file" as const } : {}),
+    };
+  });
+}
+
+// Every host file imports the offline page file, so a missing one makes every `caddy reload` fail. With no host file, nothing imports it.
+export function offlinePageChecks(devsiteDir: string, path: string, expected: string): Result[] {
+  if (machineHosts(devsiteDir).length === 0) return [];
+  const label = "the offline page file matches what init writes";
+  if (!existsSync(path)) {
+    return [
+      {
+        state: "red",
+        label,
+        detail: `no ${path}, so \`caddy reload\` fails`,
+        fix: INIT,
+        repair: "write",
+      },
+    ];
+  }
+  return [
+    readFileSync(path, "utf8") === expected
+      ? { state: "green", label }
+      : { state: "red", label, detail: "it differs", fix: INIT, repair: "write" },
+  ];
 }
 
 export async function readServers(): Promise<
@@ -131,10 +191,14 @@ async function certChecks(
   host: string | undefined,
   storage: Storage,
   ctx: CliContext,
+  pendingHost?: string,
 ): Promise<Result[]> {
   // Caddy makes its CA when it first serves a devsite host, so a Mac with no host or no CA yet still needs the trust step.
   if (host === undefined) {
-    const detail = "no devsite host on this Mac yet";
+    const detail =
+      pendingHost === undefined
+        ? "no devsite host on this Mac yet"
+        : `${pendingHost} has no host file yet`;
     return [
       { state: "skipped", label: chainLabel, detail },
       { state: "skipped", label: trustLabel, detail, repair: "trust" },
@@ -244,10 +308,12 @@ function installCheck(install: KnownInstall): Result {
   };
 }
 
+// pendingHost: the first host an init run is about to add, named while no host file exists yet. jsonFix: the fix of a check a load would fix, for a Caddy config init cannot load.
 export async function caddyChecks(
   install: KnownInstall,
   storage: Storage,
   ctx: CliContext,
+  { pendingHost, jsonFix = JSON_FIX }: { pendingHost?: string; jsonFix?: string } = {},
 ): Promise<Result[]> {
   const hosts = machineHosts(install.devsiteDir);
   const results: Result[] = [installCheck(install)];
@@ -265,9 +331,18 @@ export async function caddyChecks(
       });
     }
   }
-  results.push(...(await certChecks(hosts[0], storage, ctx)));
-  return results;
+  results.push(...(await certChecks(hosts[0], storage, ctx, pendingHost)));
+  // init loads only a Caddyfile: for any other config it prints the JSON to add, so a rerun alone fixes nothing.
+  if (install.configKind === "caddyfile") return results;
+  return results.map((r) =>
+    r.state === "red" && r.repair === "load" ? { ...r, fix: jsonFix } : r,
+  );
 }
+
+const JSON_FIX = `${INIT}, then add the JSON it prints to your Caddy config`;
+// init prints that JSON below its checks.
+export const JSON_FIX_IN_INIT =
+  "add the JSON below to your Caddy config, then run `bunx devsite doctor`";
 
 export function printSection(heading: string, results: Result[], paint: Paint, ctx: CliContext) {
   ctx.stdout.write(`\n${paint(BOLD, heading)}\n`);

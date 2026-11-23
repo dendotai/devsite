@@ -3,11 +3,20 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { caddyChecks, INIT, machineHosts, printSection, type Result } from "../checks";
+import {
+  caddyChecks,
+  hostFileOwner,
+  INIT,
+  machineHosts,
+  offlinePageChecks,
+  portFileChecks,
+  printSection,
+  type Result,
+} from "../checks";
 import { type CliContext, processContext } from "../context";
 import { type DnsmasqProbe, describeDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
-import { BOLD, GREEN, type Paint, painter, RED } from "../io";
+import { BOLD, GREEN, type Paint, painter, plural, RED } from "../io";
 import { readSettings } from "../settings";
 import { portFilePath, resolveStateDir } from "../state.mjs";
 import { findStorage, type Storage } from "../storage";
@@ -22,14 +31,6 @@ import {
 } from "./init";
 
 const UNUSED_DAYS = 30;
-
-// A host file's first line, `# <project>`, names the project that owns it.
-function hostFileOwner(text: string): string | undefined {
-  return text
-    .split("\n", 1)[0]
-    ?.match(/^# (.+)$/)?.[1]
-    ?.trim();
-}
 
 function projectChecks(routes: Route[], devsiteDir: string, stateDir: string): Result[] {
   const results: Result[] = [];
@@ -60,37 +61,6 @@ function projectChecks(routes: Route[], devsiteDir: string, stateDir: string): R
     );
   }
   return results;
-}
-
-// Every host file in devsite.d imports its host's port file, so one missing port file makes every `caddy reload` fail, for each repo's hosts.
-function portFileChecks(devsiteDir: string, stateDir: string): Result[] {
-  return machineHosts(devsiteDir).map((host) => {
-    const label = `${host}'s port file exists`;
-    const path = portFilePath(host, stateDir);
-    if (existsSync(path)) return { state: "green", label };
-    const project = hostFileOwner(readFileSync(join(devsiteDir, `${host}.caddy`), "utf8"));
-    return {
-      state: "red",
-      label,
-      detail: `no ${path}, so \`caddy reload\` fails`,
-      fix: project === undefined ? INIT : `${INIT}, in the repo of ${project}`,
-    };
-  });
-}
-
-// Every host file imports the offline page file, so a missing one makes every `caddy reload` fail. With no host file, nothing imports it.
-function offlinePageChecks(devsiteDir: string): Result[] {
-  if (machineHosts(devsiteDir).length === 0) return [];
-  const label = "the offline page file matches what init writes";
-  const path = join(devsiteDir, OFFLINE_FRAGMENT);
-  if (!existsSync(path)) {
-    return [{ state: "red", label, detail: `no ${path}, so \`caddy reload\` fails`, fix: INIT }];
-  }
-  return [
-    readFileSync(path, "utf8") === renderOfflineFragment()
-      ? { state: "green", label }
-      : { state: "red", label, detail: "it differs", fix: INIT },
-  ];
 }
 
 // The Vite plugin stamps each host's last-used date on every dev-server start (#48). A host with no stamp is left out: its file may predate the stamps.
@@ -172,7 +142,11 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
       : [
           ...(await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx)),
           ...portFileChecks(install.devsiteDir, stateDir),
-          ...offlinePageChecks(install.devsiteDir),
+          ...offlinePageChecks(
+            install.devsiteDir,
+            join(install.devsiteDir, OFFLINE_FRAGMENT),
+            renderOfflineFragment(),
+          ),
         ];
   printSection("Caddy", caddyResults, paint, ctx);
 
@@ -226,7 +200,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   ctx.stdout.write(
     red === 0
       ? `\n${paint(GREEN, "Every check is green.")}\n`
-      : `\n${paint(RED, `${red} check(s) red.`)}\n`,
+      : `\n${paint(RED, `${plural(red, "check", "checks")} red.`)}\n`,
   );
   return red === 0 ? 0 : 1;
 }

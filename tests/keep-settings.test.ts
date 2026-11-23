@@ -4,13 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processRunner } from "../src/context";
-import { run } from "../src/run";
 import {
   type CommandCall,
   fakeStdin,
   makeIo,
   makeRepo,
   makeStateDir,
+  runAndRecordScenario,
   scriptedRunner,
 } from "./helpers";
 import { HOST, mockAdmin, pki, placeholder, setUpMachine, snapshot, useMachine } from "./machine";
@@ -73,7 +73,7 @@ async function devsite(
     stdin: opts.stdin ?? fakeStdin("y", true),
   });
   io.ctx.env.DEVSITE_STATE_DIR = opts.stateDir ?? process.env.DEVSITE_STATE_DIR;
-  const status = await run(argv, io.ctx);
+  const status = await runAndRecordScenario(argv, io.ctx);
   const ran = calls.filter((c) => c.cmd !== "diff").map((c) => [c.cmd, ...c.args].join(" "));
   return { status, stdout: io.stdout.text(), stderr: io.stderr.text(), ran };
 }
@@ -115,14 +115,25 @@ test("no storage line and a Caddy whose environment ps hides: no pin, and the ph
   await mockAdmin([placeholder()], { caRoot: pki.root });
   const m = setUpMachine({ caddyfile: "", hostFile: "# web\nold {\n}\n" });
   const stateDir = makeStateDir();
-  const r = await devsite(["init"], m.caddyfile, { caddy: running(m, "root") }, { stateDir });
+  const r = await devsite(
+    ["init"],
+    m.caddyfile,
+    { caddy: running(m, "root"), trusted: false },
+    { stateDir },
+  );
   // A root Caddy's files are copied into place with sudo, so the plan's diff shows what lands.
   expect(r.stdout).toContain("+import devsite.d/*.caddy # devsite");
   expect(r.stdout).not.toContain("storage file_system");
-  expect(r.stdout).toContain("✓ that CA is trusted in the keychain");
+  expect(r.stdout).toContain("that CA is trusted in the keychain — the CA Caddy's admin API gives");
   expect(r.stdout).toContain(join(stateDir, "caddy-root.crt"));
   expect(readFileSync(join(stateDir, "caddy-root.crt"), "utf8")).toBe(pki.root);
   expect(r.status).toBe(0);
+
+  const d = await devsite(["doctor"], m.caddyfile, { caddy: running(m, "root") }, { stateDir });
+  expect(d.stdout).toContain(
+    "Caddy storage: not read by devsite (the running Caddy's data dir: Caddy runs as ",
+  );
+  expect(d.stdout).not.toContain("which devsite cannot read");
 });
 
 // --- default_bind: deleted only when no site of the user's own needs it ---
@@ -135,7 +146,7 @@ test("default_bind and a site block of the user's own: the plan guards the site,
   const m = setUpMachine({ caddyfile: BIND_WITH_SITE });
   const r = await devsite(["init"], m.caddyfile);
   expect(r.stdout).toContain(
-    'adds "import devsite-guard" to your site notes.localhost: the guard keeps the LAN out of it in place of default_bind',
+    "adds `import devsite-guard` to your site notes.localhost: the guard keeps the LAN out of it in place of default_bind",
   );
   expect(r.stdout).toContain('deletes "default_bind 127.0.0.1 100.64.0.9" from the Caddyfile');
   expect(r.stdout).toContain(
@@ -163,6 +174,7 @@ test("a default_bind on a LAN address: the stop offers only caddy.user root, sin
   expect(r.stderr).toContain("Your Caddyfile has a default_bind line and site blocks of your own:");
   expect(r.stderr).toContain("  default_bind 127.0.0.1 192.168.1.5\n  notes.localhost\n");
   expect(r.stderr).not.toContain("import devsite-guard");
+  expect(r.stderr).toContain("To go on, do this, then run `bunx devsite init` again:");
   expect(r.stderr).toContain('set caddy.user to "root" in');
   expect(snapshot(m.dir)).toEqual(before);
   expect(r.ran.filter((c) => /^(caddy|sudo|brew services start)/.test(c))).toEqual([]);
@@ -226,6 +238,17 @@ test("a JSON config: init writes devsite.d, prints the adapted JSON with where i
   );
   expect(r.stdout).toContain("  apps.tls.automation.policies — append these policies:");
   expect(r.stdout).toContain('"module": "internal"');
+  // init cannot load a JSON config, so a route check points at the JSON, not at a rerun.
+  const after = r.stdout.slice(r.stdout.indexOf("Checks after this run"));
+  expect(after).toContain(
+    "fix: add the JSON below to your Caddy config, then run `bunx devsite doctor`",
+  );
+  expect(after).not.toContain("fix: run `bunx devsite init`");
+  // The admin API gives no CA yet, so the phone steps name the command that saves it once Caddy makes it.
+  expect(r.stdout).toContain(
+    `Caddy makes its CA when it first serves https://${HOST}; then save it with \`curl -s http://127.0.0.1:`,
+  );
+  expect(r.stdout).toContain("/pki/ca/local | jq -r .root_certificate > caddy-root.crt`");
   expect(r.status).toBe(0);
 });
 
@@ -246,6 +269,9 @@ test("a Caddy run with no --config: devsite.d goes under Homebrew's etc, and doc
   );
   expect(d.stdout).toContain(`devsite's Caddy config: ${join(m.dir, "devsite.d")}`);
   expect(d.stdout).toContain(`✗ ${HOST} has a route in Caddy`);
+  expect(d.stdout).toContain(
+    "fix: run `bunx devsite init`, then add the JSON it prints to your Caddy config",
+  );
   expect(d.status).toBe(1);
 });
 

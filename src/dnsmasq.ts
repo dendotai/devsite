@@ -1,10 +1,10 @@
 // devsite's own dnsmasq (ADR 0003): one root dnsmasq under devsite's LaunchDaemon, listening on this Mac's Tailscale IP only and answering `.internal` with that IP, so the phone resolves dev URLs through Tailscale split DNS. A dnsmasq the user runs is never changed, and no /etc/resolver file is written.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Result } from "./checks";
+import { INIT, type Result } from "./checks";
 import type { CliContext } from "./context";
 import { brewPrefix } from "./install";
-import { exec } from "./io";
+import { exec, type RootCommand } from "./io";
 import { type Settings, settingsPath } from "./settings";
 import { type TailscaleIp, tailscaleIp } from "./tailscale";
 
@@ -12,7 +12,8 @@ const LABEL = "ai.den.devsite.dnsmasq";
 // Any name answers: devsite's config answers every `.internal` name.
 const PROBE_NAME = "devsite-check.internal";
 
-type DnsFile = { abs: string; current: string | null; next: string };
+// about: what the file is, the line init prints in place of its diff, since devsite writes it whole.
+type DnsFile = { abs: string; about: string; current: string | null; next: string };
 
 export type Dnsmasq = {
   ip: string;
@@ -62,6 +63,7 @@ export function renderWatcher(): string {
     "child= notifier=",
     "trap 'stop; [[ -n $notifier ]] && kill $notifier 2>/dev/null; exit 0' TERM INT",
     "",
+    // `tailscale down` removes the address from the interface, though `tailscale ip -4` still reports it, so this test agrees with doctor's BackendState read (measured on macOS). A comment here, not in the script, so a change does not rewrite the installed watcher.
     "# Tailscale's IP is in 100.64.0.0/10; its utun interface name differs per Mac.",
     "tailscale_up() {",
     "  ifconfig | grep -Eq '^[[:space:]]+inet 100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.'",
@@ -157,10 +159,21 @@ function findDnsmasq(ip: string, ctx: CliContext): Dnsmasq {
     ip,
     binary,
     installed: binary !== null && existsSync(binary),
-    conf: { abs: confPath, current: confNow, next: renderConf(ip) },
-    watcher: { abs: watcherPath, current: readOrNull(watcherPath), next: renderWatcher() },
+    conf: {
+      abs: confPath,
+      about: "devsite's dnsmasq config",
+      current: confNow,
+      next: renderConf(ip),
+    },
+    watcher: {
+      abs: watcherPath,
+      about: "devsite's dnsmasq watcher",
+      current: readOrNull(watcherPath),
+      next: renderWatcher(),
+    },
     plist: {
       abs: plistPath,
+      about: "devsite's dnsmasq LaunchDaemon",
       current: readOrNull(plistPath),
       next: renderPlist(binary ?? "dnsmasq", confPath, watcherPath),
     },
@@ -184,16 +197,16 @@ export function digAnswer(ip: string, ctx: CliContext): string | null {
   return status === "NOERROR" ? "no address" : status;
 }
 
-// dscacheutil asks macOS's resolver, the path every app on the Mac takes; dig would read only /etc/resolv.conf.
+// dscacheutil asks macOS's resolver, the path every app on the Mac takes; dig would read only /etc/resolv.conf. The resolver waits about a minute for a nameserver that gives no reply, such as a split DNS route to a Mac that is off.
 function macAnswer(ctx: CliContext): string | null {
-  const r = exec("dscacheutil", ["-q", "host", "-a", "name", PROBE_NAME], ctx, true);
+  const r = exec("dscacheutil", ["-q", "host", "-a", "name", PROBE_NAME], ctx, true, 3000);
   return r.out.match(/^ip_address:\s*(\S+)$/m)?.[1] ?? null;
 }
 
 const changed = (f: DnsFile) => f.current !== f.next;
 
 function answerCheck(d: Dnsmasq, answer: string | null, manual: string | null): Result {
-  const label = `dnsmasq answers .internal with ${d.ip} on ${d.ip}`;
+  const label = `dnsmasq on the Tailscale IP (${d.ip}) answers .internal with it`;
   if (answer === d.ip) return { state: "green", label };
   const heard = answer === null ? "no answer" : `answers ${answer}`;
   // No reply: devsite's dnsmasq is missing or stopped. An old IP in devsite's config: dnsmasq rereads its listen address only on a restart. Any other reply comes from a server that is not devsite's, which init leaves alone.
@@ -202,7 +215,7 @@ function answerCheck(d: Dnsmasq, answer: string | null, manual: string | null): 
       state: "red",
       label,
       detail: `${heard}, from a DNS server that is not devsite's`,
-      fix: `if it is your own dnsmasq, make it answer address=/internal/${d.ip}, or stop it listening on ${d.ip}`,
+      fix: `if it is your own dnsmasq, make it answer \`address=/internal/${d.ip}\`, or stop it listening on ${d.ip}`,
     };
   }
   if (manual !== null) {
@@ -210,7 +223,7 @@ function answerCheck(d: Dnsmasq, answer: string | null, manual: string | null): 
       state: "red",
       label,
       detail: heard,
-      fix: `dnsmasq.run is manual in ${manual}, so init runs no dnsmasq: make a DNS server on ${d.ip}:53 answer .internal with ${d.ip}`,
+      fix: `make a DNS server on ${d.ip}:53 answer .internal with ${d.ip}: dnsmasq.run is manual in ${manual}, so init runs no dnsmasq`,
     };
   }
   if (d.binary === null) {
@@ -218,7 +231,7 @@ function answerCheck(d: Dnsmasq, answer: string | null, manual: string | null): 
       state: "red",
       label,
       detail: `${heard}, and devsite finds dnsmasq through Homebrew, which is not on this Mac`,
-      fix: "install Homebrew, then run bunx devsite init",
+      fix: `install Homebrew, then ${INIT}`,
     };
   }
   const stale =
@@ -229,23 +242,27 @@ function answerCheck(d: Dnsmasq, answer: string | null, manual: string | null): 
     state: "red",
     label,
     detail: heard + stale,
-    fix: "bunx devsite init",
+    fix: INIT,
     repair: "run-dnsmasq",
   };
 }
 
-function macCheck(d: Dnsmasq, answerGreen: boolean, ctx: CliContext): Result {
+// With Tailscale on, the Mac asks through the split DNS route, which reaches the dnsmasq above: with no reply there, the lookup could only time out.
+function macCheck(d: Dnsmasq, answer: string | null, ctx: CliContext): Result {
   const label = `this Mac resolves .internal to ${d.ip}`;
+  if (answer === null) {
+    return { state: "skipped", label, detail: `nothing answers on ${d.ip} yet` };
+  }
   const mac = macAnswer(ctx);
   if (mac === d.ip) return { state: "green", label };
   return {
     state: "red",
     label,
     detail: mac === null ? "no answer" : `resolves to ${mac}`,
-    // With Tailscale on, the Mac asks through the split DNS route, which reaches the dnsmasq above.
-    fix: answerGreen
-      ? `in the Tailscale admin console (https://login.tailscale.com/admin/dns), add a split DNS nameserver: domain internal, nameserver ${d.ip}`
-      : "fix the dnsmasq check above first",
+    fix:
+      answer === d.ip
+        ? `add a split DNS nameserver in the Tailscale admin console (https://login.tailscale.com/admin/dns): domain internal, nameserver ${d.ip}`
+        : "see the dnsmasq check above",
   };
 }
 
@@ -259,26 +276,27 @@ export function probeDnsmasq(settings: Settings, ctx: CliContext): DnsmasqProbe 
     const checks: Result[] = [
       {
         state: "skipped",
-        label: "dnsmasq answers .internal on the Tailscale IP",
-        detail: "Tailscale gives no IP: it is stopped or logged out",
+        label: "dnsmasq on the Tailscale IP answers .internal with it",
+        detail: "Tailscale is down (no IP)",
       },
     ];
     return { tailscale, dnsmasq: null, checks };
   }
   const dnsmasq = findDnsmasq(tailscale.ip, ctx);
   const manual = settings.dnsmasq.run === "manual" ? settingsPath(ctx) : null;
-  const answer = answerCheck(dnsmasq, digAnswer(dnsmasq.ip, ctx), manual);
+  const heard = digAnswer(dnsmasq.ip, ctx);
+  const answer = answerCheck(dnsmasq, heard, manual);
   return {
     tailscale,
     dnsmasq,
-    checks: [answer, macCheck(dnsmasq, answer.state === "green", ctx)],
+    checks: [answer, macCheck(dnsmasq, heard, ctx)],
   };
 }
 
 export function describeDnsmasq(p: DnsmasqProbe): string {
   if (p.tailscale.state === "absent") return "none, Tailscale is not on this Mac";
   const d = p.dnsmasq;
-  if (d === null) return "none, Tailscale gives no IP";
+  if (d === null) return "none, Tailscale is down (no IP)";
   if (d.conf.current === null) {
     return `devsite's config ${d.conf.abs} is not written; the Tailscale IP is ${d.ip}`;
   }
@@ -289,25 +307,29 @@ export type DnsmasqPlan = {
   install: boolean;
   text: string;
   details: string[];
-  files: { abs: string; next: string }[];
+  files: { abs: string; about: string; next: string }[];
   // The root commands that install the files root-owned, then load or restart dnsmasq; a staged file's path comes from the caller.
-  rootCommands: (stage: (content: string) => string) => string[][];
+  rootCommands: (stage: (content: string) => string) => RootCommand[];
 };
 
 // launchctl bootout returns before launchd has removed the job, and a bootstrap right after fails with "5: Input/output error", so the shell waits until the job is gone.
-function waitUntilUnloaded(): string[] {
-  return [
-    "sh",
-    "-c",
-    `i=0; while launchctl print system/${LABEL} >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 50 ] && exit 1; sleep 0.1; done`,
-  ];
+const UNLOAD_TRIES = 50;
+function waitUntilUnloaded(): RootCommand {
+  return Object.assign(
+    [
+      "sh",
+      "-c",
+      `i=0; while launchctl print system/${LABEL} >/dev/null 2>&1; do i=$((i+1)); [ $i -ge ${UNLOAD_TRIES} ] && exit 1; sleep 0.1; done`,
+    ],
+    { shown: `wait up to ${UNLOAD_TRIES / 10} s until launchd drops devsite's dnsmasq` },
+  );
 }
 
 // One root step: write devsite's files when they differ, then load the LaunchDaemon, or restart dnsmasq so it rereads its config.
 export function planDnsmasq(d: Dnsmasq): DnsmasqPlan {
   const files = [d.conf, d.watcher, d.plist]
     .filter(changed)
-    .map((f) => ({ abs: f.abs, next: f.next }));
+    .map((f) => ({ abs: f.abs, about: f.about, next: f.next }));
   const launchd: string[][] = [];
   if (d.loaded && changed(d.plist)) {
     launchd.push(["launchctl", "bootout", `system/${LABEL}`], waitUntilUnloaded());

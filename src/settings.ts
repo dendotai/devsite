@@ -62,10 +62,10 @@ export function readSettings(
   for (const [section, value] of Object.entries(raw ?? {})) {
     const rules = RULES[section as keyof Settings] as Record<string, Rule> | undefined;
     if (rules === undefined) {
-      return { ok: false, error: `${path}: unknown section "${section}" (known: ${known})` };
+      return { ok: false, error: `${path}: unknown section ${section} (known: ${known})` };
     }
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return { ok: false, error: `${path}: "${section}" must be an object` };
+      return { ok: false, error: `${path}: ${section} must be an object` };
     }
     for (const [key, v] of Object.entries(value)) {
       const rule = rules[key];
@@ -75,7 +75,7 @@ export function readSettings(
       if (!rule.valid(v)) {
         return {
           ok: false,
-          error: `${path}: ${section}.${key} must be ${rule.expected}, not ${JSON.stringify(v)}`,
+          error: `${path}: ${section}.${key} must be ${rule.expected}, not ${JSON.stringify(v)}; delete the key to use the default`,
         };
       }
     }

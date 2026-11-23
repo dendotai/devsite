@@ -12,7 +12,7 @@ async function dryRunDiff(cwd: string, caddyfile: string): Promise<string | null
   const r = await cli(["init", "--dry-run"], { cwd, caddyfile });
   if (r.status !== 0) throw new Error(`dry-run failed:\n${r.stderr}`);
   if (r.stdout.includes("already up to date")) return null;
-  const m = r.stdout.match(/the diff:\n\n([\s\S]*)$/);
+  const m = r.stdout.match(/\nThe diff[^\n]*\n\n([\s\S]*)$/);
   if (!m?.[1]) throw new Error(`no diff in dry-run output:\n${r.stdout}`);
   return m[1];
 }

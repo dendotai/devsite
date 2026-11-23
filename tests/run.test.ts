@@ -113,7 +113,7 @@ test("init --dry-run runs only ps and tailscale, for the install seams, and one 
   // The last argument, the planned content, is a temp file with a per-run name.
   expect(calls.map((c) => [c.cmd, ...c.args.slice(0, -1), c.capture])).toEqual([
     ["ps", "-axo", true],
-    ["tailscale", "ip", true],
+    ["tailscale", "status", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/fragments/offline.caddy", "/dev/null", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/guard.caddy", "/dev/null", true],

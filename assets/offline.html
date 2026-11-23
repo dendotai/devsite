@@ -20,15 +20,21 @@
 <title>__HOST__ · offline</title>
 <style>
   :root {
-    --bg: #0e1013;
-    --ink: #d9d6cf;
-    --dim: #80868f;
-    --line: #23262b;
-    --accent: #64b6ac; /* 502: waiting */
+    --bg: #100f1c;
+    --ink: #ece4ee;
+    --dim: #9a90a8;
+    --line: #2b2638;
+    --accent: #a58cff; /* 502: waiting */
+    /* A low sunset band along the bottom edge. The top edge stays --bg alone, because Safari fills the area behind the notch and behind its bottom bar with the page's solid colour. */
+    --horizon:
+      radial-gradient(1400px 170px at 72% 100%, rgba(255, 165, 100, 0.3), rgba(255, 165, 100, 0)),
+      radial-gradient(1600px 240px at 45% 100%, rgba(255, 105, 120, 0.18), rgba(255, 105, 120, 0)),
+      radial-gradient(1800px 300px at 15% 100%, rgba(140, 80, 230, 0.12), rgba(140, 80, 230, 0)),
+      radial-gradient(1200px 320px at 100% 100%, rgba(90, 95, 235, 0.12), rgba(90, 95, 235, 0));
   }
 
   body[data-status="503"] {
-    --accent: #e2a65a; /* 503: action needed */
+    --accent: #ffa070; /* 503: action needed */
   }
 
   * {
@@ -45,24 +51,49 @@
     font-size: 15px;
     line-height: 1.6;
     color: var(--ink);
-    background:
-      radial-gradient(90rem 40rem at 15% -10%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%),
-      var(--bg);
+    background: var(--bg);
     display: grid;
     place-items: center;
   }
 
+  /* The band sits on a layer pinned to the visible screen, the box the 503 and the cut line use too: a background measured from 100svh sat higher than the line on an iPhone. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background: var(--horizon), var(--bg);
+  }
+
+  /* Each layer fills the viewport, so a background it paints lines up with the band. */
   .watermark {
     position: fixed;
-    right: -0.05em;
-    bottom: -0.18em;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    overflow: hidden;
+    /* Menlo, the font desktop Chrome draws: Chrome has no ui-monospace, so the 503 looked different on an iPhone. */
+    font-family: Menlo, monospace;
     font-size: 42vmin;
     font-weight: 700;
     line-height: 1;
     color: transparent;
-    -webkit-text-stroke: 1px color-mix(in srgb, var(--accent) 16%, transparent);
+    -webkit-text-stroke: 2px rgba(255, 190, 150, 0.3);
     user-select: none;
     pointer-events: none;
+  }
+
+  .watermark span {
+    margin: 0 -0.05em -0.18em 0;
+  }
+
+  /* Safari strokes each part of a glyph on its own, so the 0's slash drew its outline across the oval. This layer fills the glyphs with the page's own background over the inner half of the 2px stroke, which leaves one clean 1px outline in every browser. */
+  .watermark.fill {
+    -webkit-text-stroke: 0;
+    background: var(--horizon), var(--bg);
+    -webkit-background-clip: text;
+    background-clip: text;
   }
 
   main {
@@ -87,11 +118,17 @@
   }
 
   h1 {
-    font-size: 1.5rem;
+    /* Small enough on a phone for a whole host name on one line. */
+    font-size: min(1.5rem, 5.4vw);
     font-weight: 600;
     line-height: 1.35;
     margin: 0 0 1rem;
     text-wrap: balance;
+  }
+
+  /* A host name is never split, at a hyphen or at a dot. */
+  .host {
+    white-space: nowrap;
   }
 
   h1 em {
@@ -137,7 +174,11 @@
     height: 8px;
     border-radius: 50%;
     background: var(--accent);
-    animation: pulse 2s ease-in-out infinite;
+  }
+
+  /* The script restarts the ring on each attempt, so the ring and the count change together. */
+  .dot.ping {
+    animation: pulse 1.6s ease-out;
   }
 
   .brand, section, .status {
@@ -164,14 +205,35 @@
     }
   }
 
+  /* The ring only grows and fades, then starts again from the dot: a ring that also shrinks back reads as back and forth. */
   @keyframes pulse {
-    0%, 100% {
-      opacity: 1;
+    from {
       box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
     }
-    50% {
-      opacity: 0.5;
-      box-shadow: 0 0 0 6px transparent;
+    to {
+      box-shadow: 0 0 0 8px transparent;
+    }
+  }
+
+  /* On a phone, Safari's bottom bar cuts the 503; a line marks the cut. */
+  @media (max-width: 600px) {
+    :root {
+      --line-cut: #4a2a45;
+      --horizon:
+        radial-gradient(600px 150px at 60% 100%, rgba(255, 165, 100, 0.32), rgba(255, 165, 100, 0)),
+        radial-gradient(700px 210px at 35% 100%, rgba(255, 105, 120, 0.2), rgba(255, 105, 120, 0)),
+        radial-gradient(800px 260px at 0% 100%, rgba(140, 80, 230, 0.12), rgba(140, 80, 230, 0)),
+        radial-gradient(600px 280px at 100% 100%, rgba(90, 95, 235, 0.12), rgba(90, 95, 235, 0));
+    }
+
+    body::after {
+      content: "";
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: var(--line-cut);
     }
   }
 
@@ -180,7 +242,7 @@
       animation: none;
       opacity: 1;
     }
-    .dot {
+    .dot, .dot.ping {
       animation: none;
     }
   }
@@ -188,13 +250,14 @@
 </head>
 <body data-status="__STATUS_CODE__">
 
-<div class="watermark" aria-hidden="true">__STATUS_CODE__</div>
+<div class="watermark" aria-hidden="true"><span>__STATUS_CODE__</span></div>
+<div class="watermark fill" aria-hidden="true"><span>__STATUS_CODE__</span></div>
 
 <main>
   <header class="brand"><b>devsite</b><span>__PROJECT__</span></header>
 
   <section class="v503">
-    <h1>dev server for <em>__HOST__</em> is not running</h1>
+    <h1>dev server for <em class="host">__HOST__</em> is not running</h1>
   </section>
 
   <section class="v502">
@@ -204,7 +267,7 @@
 
   <div class="status">
     <span class="dot" aria-hidden="true"></span>
-    <span>waiting for <span style="color: var(--ink)">__HOST__</span> — reloads when it answers<span id="tries"></span></span>
+    <span>waiting for the dev server — reloads when it answers<span id="tries"></span></span>
   </div>
 </main>
 
@@ -212,6 +275,7 @@
   (() => {
     var tries = 0;
     var label = document.getElementById("tries");
+    var dot = document.querySelector(".dot");
     function check() {
       fetch("/", { cache: "no-store" }).then((res) => {
         if (res.ok) {
@@ -225,6 +289,10 @@
       tries += 1;
       // biome-ignore lint/style/useTemplate: Caddy serves this page through its placeholder replacer, which reads a brace followed by a name as a placeholder
       label.textContent = " · attempt " + tries;
+      // A reflow between the two class changes restarts the animation.
+      dot.classList.remove("ping");
+      void dot.offsetWidth;
+      dot.classList.add("ping");
     }
     setInterval(check, 2000);
     check();
