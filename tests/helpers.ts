@@ -38,6 +38,8 @@ export type IoOpts = {
   // The home devsite's files hang from: ~/Library/Application Support/devsite/config.json and the rest.
   home?: string;
   stdin?: CliContext["stdin"];
+  // The terminal init asks its questions on when stdin carries data (`init --ca -`); null: no terminal.
+  terminal?: CliContext["stdin"] | null;
   runCommand?: CliContext["runCommand"];
   env?: CliContext["env"];
 };
@@ -50,6 +52,7 @@ export function makeIo(opts: IoOpts = {}) {
     stdout,
     stderr,
     stdin: opts.stdin ?? fakeStdin("", false),
+    terminal: () => opts.terminal ?? null,
     cwd: opts.cwd ?? makeEmptyRepo(),
     env: {
       DEVSITE_BREW_PREFIX: dirname(dirname(opts.caddyfile ?? scratchCaddyfile())),
@@ -106,7 +109,9 @@ export async function runAndRecordScenario(argv: string[], ctx: CliContext): Pro
   const status = await run(argv, ctx);
   const out = process.env.DEVSITE_SCENARIOS_FILE;
   if (out && scenario) {
-    const keys = (ctx.stdin as { keys?: string[] }).keys?.filter((k) => k !== "");
+    // With --ca, stdin carried a CA root, and the keys were pressed on the terminal.
+    const keyed = argv.includes("--ca") ? ctx.terminal() : ctx.stdin;
+    const keys = (keyed as { keys?: string[] } | null)?.keys?.filter((k) => k !== "");
     const text = [
       `## ${scenario}`,
       "",

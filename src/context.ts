@@ -1,5 +1,7 @@
 // The CLI's contact surface with the process (io, and every external command it runs), as one injectable value. run() and the command handlers read and write only through this — tests pass buffers and plain objects instead of spying on console or mutating process state. Production uses processContext(), the real thing.
 import { spawnSync } from "node:child_process";
+import { openSync } from "node:fs";
+import { ReadStream } from "node:tty";
 
 export type Writer = { write(chunk: string): unknown };
 
@@ -15,6 +17,8 @@ export type CliContext = {
   stderr: Writer;
   // confirm() reads the answer here; isTTY decides whether asking is possible.
   stdin: NodeJS.ReadableStream & { isTTY?: boolean };
+  // The terminal, opened apart from stdin: `init --ca -` reads the CA root from stdin and asks its questions here. null with no terminal (a CI run, a launchd job).
+  terminal: () => (NodeJS.ReadableStream & { isTTY?: boolean }) | null;
   cwd: string;
   // The named keys are the full set of env vars the CLI reads; the index signature is what lets process.env (and test env objects) assign.
   env: {
@@ -44,8 +48,17 @@ export function processContext(): CliContext {
     stdout: process.stdout,
     stderr: process.stderr,
     stdin: process.stdin,
+    terminal: openTerminal,
     cwd: process.cwd(),
     env: process.env,
     runCommand: processRunner,
   };
+}
+
+function openTerminal(): ReadStream | null {
+  try {
+    return new ReadStream(openSync("/dev/tty", "r"));
+  } catch {
+    return null;
+  }
 }

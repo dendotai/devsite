@@ -3,6 +3,7 @@
 // run() is three named steps: parse (argv → values/positionals, strict per command), resolve (a COMMANDS table lookup and nothing else), then the command's handler. Commands are data: one COMMANDS row per command carries its help lines, its flags, and its handler, and USAGE is generated from the table — help text and the parser cannot drift apart. Command-like global flags (--help, --version) map to their command through GLOBAL_FLAGS' `command` field — adding one adds a table entry, never a branch. parseArgs is strict, scoped per command: an unknown flag (--dyr-run), or a command flag outside its command (--dry-run with no init), fails with usage instead of silently reaching the privileged bootstrap.
 import { parseArgs } from "node:util";
 import pkg from "../package.json";
+import { caExport } from "./commands/ca";
 import { doctor } from "./commands/doctor";
 import { init } from "./commands/init";
 import { runNode } from "./commands/node";
@@ -54,8 +55,19 @@ const COMMANDS: Record<string, Command> = {
         default: false,
         help: "Print the plan and the diff init would apply; touch nothing.",
       },
+      ca: {
+        type: "string",
+        help: "- reads a CA root from stdin (`devsite ca export` on another Mac) into Caddy.",
+      },
     },
-    run: (values, ctx) => init({ dryRun: values["dry-run"] === true }, ctx),
+    run: (values, ctx) =>
+      init(
+        {
+          dryRun: values["dry-run"] === true,
+          ca: typeof values.ca === "string" ? values.ca : undefined,
+        },
+        ctx,
+      ),
   },
   doctor: {
     summary: [
@@ -64,6 +76,14 @@ const COMMANDS: Record<string, Command> = {
     ],
     flags: {},
     run: (_values, ctx) => doctor(ctx),
+  },
+  "ca export": {
+    summary: [
+      "Print this Mac's CA root certificate and key, to pipe into your secret store.",
+      "Writes no file; `devsite init --ca -` on another Mac reads the output.",
+    ],
+    flags: {},
+    run: (_values, ctx) => caExport(ctx),
   },
   node: {
     summary: [
@@ -132,7 +152,11 @@ function parse(argv: string[]): Parsed {
     strict: false,
     allowPositionals: true,
   });
-  const commandName = loose.positionals[0];
+  const [first, second] = loose.positionals;
+  const commandName =
+    first !== undefined && second !== undefined && COMMANDS[`${first} ${second}`] !== undefined
+      ? `${first} ${second}`
+      : first;
   const command = commandName !== undefined ? COMMANDS[commandName] : undefined;
   try {
     const { values, positionals } = parseArgs({
@@ -161,7 +185,7 @@ function resolve({ commandName, values, positionals }: Parsed & { ok: true }): R
   if (commandName === undefined) return { ok: false };
   const command = COMMANDS[commandName];
   if (command === undefined) return { ok: false, message: `Unknown command: ${commandName}` };
-  const extra = positionals.slice(1);
+  const extra = positionals.slice(commandName.split(" ").length);
   if (extra.length > 0) return { ok: false, message: `Unexpected argument: ${extra.join(" ")}` };
   return { ok: true, name: commandName, command };
 }

@@ -177,6 +177,18 @@ Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
 
 **Why does the browser trust the certificate?** Caddy runs a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` adds that CA's root to your keychain and keeps the storage Caddy already uses, so a device that trusted the root once keeps trusting every certificate it issues. Other devices trust the same root file by hand (Step 2.3).
 
+**One CA root on several Macs.** Each Mac's Caddy makes its own root, so a phone would need one root per Mac. Give every Mac the same root instead: save it once in your secret store, then import it on each other Mac before you trust anything there. For example, with the 1Password CLI:
+
+```bash
+bunx devsite ca export | op document create - --title "devsite CA root" --file-name devsite-ca.pem
+```
+
+```bash
+op document get "devsite CA root" | bunx devsite init --ca -
+```
+
+`ca export` prints the root certificate and its key and writes no file. `init --ca -` reads them from standard input, asks its questions on the terminal, puts the root into Caddy's storage, deletes the intermediate and the certificates the old root signed, and restarts Caddy so it serves certificates from the new root. When the storage already holds a different root, the plan names both and waits for your y. It imports into a Caddy that runs as you, stopped or under `brew services`.
+
 ## FAQ
 
 **Why does devsite need `sudo` for dnsmasq?** The phone sends its `.internal` lookups to port 53 on the Mac's Tailscale IP, and on macOS only root can bind an address below port 1024. devsite therefore runs one dnsmasq of its own as root, under its own LaunchDaemon, listening on the Tailscale IP only; after the bind it runs as `nobody`. `sudo` runs on the first setup and when the Tailscale IP changes, because dnsmasq rereads its addresses only on a restart. devsite never changes a dnsmasq you run yourself. See [ADR 0003](docs/adr/0003-dnsmasq-runs-as-root.md).

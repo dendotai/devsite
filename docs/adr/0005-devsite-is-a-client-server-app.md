@@ -20,6 +20,7 @@ devsite's work was spread over three programs that each ran only for a moment: `
 - Files: settings (`config.json`), state (`state.json`) and the node's program (`node/cli.js`) in `~/Library/Application Support/devsite/`; the log in `~/Library/Logs/devsite/node.log`.
 - Install: `init` copies the devsite program it runs from into Application Support and starts it through a per-user LaunchAgent (`ai.den.devsite.node`), at login and again after a crash, with the runtime that ran `init` (a Homebrew Cellar path becomes its `opt` path, which survives `brew upgrade`). `init` is the only thing that installs or updates the node: it does so when the node does not answer or runs an older devsite, and never installs an older one. `bun dev` never changes the node.
 - `doctor` checks the node first: that it answers, that it runs this devsite or newer, and that no project runs a devsite newer than the node.
+- Caddy's CA root stays with the command-line tool: `devsite ca export` prints it and `devsite init --ca -` reads it from standard input (#104). Each step needs the user at a terminal (the pipe from the secret store, the question before a replace, the Caddy restart, and the sudo of `caddy trust`), and nothing unattended uses the key. The node gets the root certificate, never the key, when it relays to another Mac over HTTPS (#66).
 
 ## Consequences
 

@@ -19,8 +19,23 @@ import { scratchCaddyfile } from "./helpers";
 
 export const HOST = "web.internal";
 
-export type Pki = { root: string; served: string; otherRoot: string };
-export const pki: Pki = { root: "", served: "", otherRoot: "" };
+// The other CA comes with its key and its own served chain, so a test can import it as a second Mac's root.
+export type Pki = {
+  root: string;
+  rootKey: string;
+  served: string;
+  otherRoot: string;
+  otherKey: string;
+  otherServed: string;
+};
+export const pki: Pki = {
+  root: "",
+  rootKey: "",
+  served: "",
+  otherRoot: "",
+  otherKey: "",
+  otherServed: "",
+};
 
 function openssl(args: string[], cwd: string) {
   const r = spawnSync("openssl", args, { cwd, encoding: "utf8" });
@@ -67,11 +82,17 @@ function makePki() {
   req("other", "Other Root");
   signed("inter", "Test Intermediate", "root");
   signed("leaf", HOST, "inter");
+  signed("otherInter", "Other Intermediate", "other");
+  signed("otherLeaf", HOST, "otherInter");
   const read = (n: string) => readFileSync(join(dir, `${n}.crt`), "utf8");
+  const key = (n: string) => readFileSync(join(dir, `${n}.key`), "utf8");
   Object.assign(pki, {
     root: read("root"),
+    rootKey: key("root"),
     served: read("leaf") + read("inter"),
     otherRoot: read("other"),
+    otherKey: key("other"),
+    otherServed: read("otherLeaf") + read("otherInter"),
   });
 }
 
