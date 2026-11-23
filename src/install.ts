@@ -1,4 +1,4 @@
-// The install seam: where this Mac's Caddy lives and how it runs, so init and doctor never assume one install. This file knows the Homebrew kind; another kind stops init with a message that names the caddy.config setting.
+// The install seam: where this Mac's Caddy lives and how it runs, so init and doctor never assume one install. This file knows the Homebrew kind; another kind with no config file it can find (no caddy.config setting, no running Caddy's --config) stops init with a message that names the caddy.config setting.
 import { realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { CliContext } from "./context";
@@ -22,7 +22,7 @@ type ConfigFile =
 export type CaddyInstall =
   | { kind: "unknown"; why: string }
   | (ConfigFile & {
-      // "other": a kind devsite does not know, with the paths from the caddy.config setting.
+      // "other": a kind devsite does not know, with its config from the caddy.config setting or the running Caddy's --config.
       kind: "homebrew" | "other";
       prefix: string | null;
       installed: boolean;
@@ -93,10 +93,10 @@ export function findCaddy(settings: Settings, ctx: CliContext): CaddyInstall {
   const homebrew = prefix !== null && (proc === null || fromBrew(proc.binary));
   const set = settings.caddy;
 
-  if (set.config === undefined && !homebrew) {
+  if (set.config === undefined && !homebrew && !proc?.config) {
     const why =
       proc !== null
-        ? `Caddy runs from ${proc.binary}, which is not Homebrew's Caddy`
+        ? `Caddy runs from ${proc.binary}, which is not Homebrew's Caddy, with no --config`
         : "Homebrew is not on this Mac";
     return { kind: "unknown", why };
   }

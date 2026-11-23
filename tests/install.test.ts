@@ -209,12 +209,34 @@ test("caddy.user root with Caddy stopped: start, wait for the admin API, and tru
 
 // --- an install devsite does not know ---
 
-test("Caddy from outside Homebrew: init stops and names caddy.config, doctor reports the same", async () => {
-  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+test("Caddy from outside Homebrew with --config: init writes beside that config and reloads it", async () => {
+  await mockAdmin([placeholder()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, hostFile: "# web\nold {\n}\n" });
+  const caddy = { user: "den", args: `/usr/local/bin/caddy run --config ${m.caddyfile}` };
+  const r = await devsite(["init"], { caddyfile: m.caddyfile, answers: { caddy } });
+  expect(r.stdout).toContain("✓ Caddy is installed — an install devsite does not know");
+  expect(r.ran).toContain(`caddy reload --config ${m.caddyfile} --adapter caddyfile`);
+  expect(readFileSync(join(m.dir, "devsite.d", `${HOST}.caddy`), "utf8")).toContain(
+    `${HOST}, web.test.localhost {`,
+  );
+  expect(r.status).toBe(0);
+});
+
+test("Caddy from outside Homebrew at /etc/caddy: doctor reads its config from the running Caddy's --config", async () => {
   const caddy = { user: "den", args: "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile" };
+  const d = await devsite(["doctor"], { answers: { caddy } });
+  expect(d.stdout).toContain("Caddy: an install devsite does not know");
+  expect(d.stdout).toContain("Caddy config: /etc/caddy/Caddyfile (the running Caddy's --config)");
+  expect(d.stdout).toContain("devsite's Caddy config: /etc/caddy/devsite.d");
+  expect(d.stdout).not.toContain("devsite knows this Mac's Caddy install");
+});
+
+test("Caddy from outside Homebrew with no --config: init stops and names caddy.config, doctor reports the same", async () => {
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const caddy = { user: "den", args: "/usr/local/bin/caddy run" };
   const r = await devsite(["init"], { caddyfile: m.caddyfile, answers: { caddy } });
   expect(r.stderr).toContain(
-    "This Mac's Caddy is an install devsite does not know: Caddy runs from /usr/local/bin/caddy, which is not Homebrew's Caddy.",
+    "This Mac's Caddy is an install devsite does not know: Caddy runs from /usr/local/bin/caddy, which is not Homebrew's Caddy, with no --config.",
   );
   expect(r.stderr).toContain(
     `set caddy.config to the path of your main Caddy config in ${join(r.configHome, "devsite", "config.json")}`,
@@ -234,7 +256,7 @@ test("a caddy put under the Homebrew prefix by hand: not Homebrew's, so init sto
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, installed: false });
   mkdirSync(join(m.prefix, "bin"));
   writeFileSync(join(m.prefix, "bin", "caddy"), "");
-  const caddy = { user: "den", args: `${m.prefix}/bin/caddy run --config ${m.caddyfile}` };
+  const caddy = { user: "den", args: `${m.prefix}/bin/caddy run` };
   const r = await devsite(["init"], { caddyfile: m.caddyfile, answers: { caddy } });
   expect(r.stderr).toContain(
     `Caddy runs from ${m.prefix}/bin/caddy, which is not Homebrew's Caddy`,

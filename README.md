@@ -157,7 +157,7 @@ Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
 ```jsonc
 {
   "caddy": {
-    "config": "/etc/caddy/Caddyfile",           // the main Caddy config, for a Caddy not installed with Homebrew
+    "config": "/etc/caddy/Caddyfile",           // the main Caddy config, for a Caddy not installed with Homebrew that runs with no --config
     "user": "root",                             // "user" or "root": the user Caddy runs as, over what devsite found
     "reload": "manual"                          // init writes devsite's files; you reload Caddy
   },
@@ -217,7 +217,7 @@ Note: **renaming** a project (changing its `devSite.name`) cleans up after itsel
 ## Requirements
 
 - **Node.js ≥ 22** — the published CLI runs under plain Node (`npx @den-ai/devsite init` works without bun). Developing the repo itself still uses bun.
-- **Caddy ≥ 2.** `init` installs it with Homebrew when it is missing. A Caddy installed another way works with the `caddy.config` setting.
+- **Caddy ≥ 2.** `init` installs it with Homebrew when it is missing. A Caddy installed another way works when it runs with `--config`, or with the `caddy.config` setting.
 - **Vite** — the plugin is developed against Vite 8.
 - **macOS**, with Homebrew on Apple Silicon or Intel (found with `brew --prefix`). Linux and Windows are not supported yet.
 - **Project layout**: `devsite init` reads `devSite` fields from the repo root `package.json` and, in a monorepo, from `apps/*/package.json` and `packages/*/package.json`. Other workspace folders (e.g. `services/*`) are not scanned yet.
