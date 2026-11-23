@@ -6,7 +6,7 @@ import { callNode, NODE_PORT } from "../client.mjs";
 import type { CliContext } from "../context";
 import { exec, xml } from "../io";
 import { launchAgentsDir, nodeLog, nodeProgramDir } from "../paths";
-import type { Status } from "./server";
+import type { PeerState, Status } from "./server";
 
 export const NODE_LABEL = "ai.den.devsite.node";
 
@@ -63,6 +63,16 @@ export async function readNode(): Promise<NodeAnswer> {
     return { ok: true, status: (await res.json()) as Status };
   } catch {
     return { ok: false, why: "no answer" };
+  }
+}
+
+// The node's answer can take 3 s for `tailscale status` plus 1.5 s for a Mac that does not reply, so the wait is longer than both.
+export async function readPeers(): Promise<PeerState[]> {
+  try {
+    const res = await callNode("/peers", { signal: AbortSignal.timeout(6000) });
+    return res.ok ? ((await res.json()) as PeerState[]) : [];
+  } catch {
+    return [];
   }
 }
 

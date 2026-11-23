@@ -16,3 +16,10 @@ process.env.DEVSITE_CADDY_ADMIN = "http://127.0.0.1:9";
 
 // The clients call the node; a closed port keeps every suite off this Mac's real node. Suites that start a test node re-point the var per test.
 process.env.DEVSITE_NODE = "http://127.0.0.1:9";
+
+// The node asks Tailscale for the tailnet; this stand-in answers from a folder each test fills, and an empty one means no tailnet, so no suite binds this Mac's real Tailscale IP.
+process.env.DEVSITE_TAILSCALE = join(import.meta.dir, "bin", "tailscale");
+process.env.DEVSITE_FAKE_TAILSCALE = mkdtempSync(join(tmpdir(), "devsite-tailnet-none-"));
+
+// A node tries a taken peer port again at each refresh; a short one lets a test see it take the port once freed.
+process.env.DEVSITE_TAILNET_REFRESH_MS = "200";

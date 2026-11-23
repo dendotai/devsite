@@ -10,6 +10,8 @@ import { startsWithGuard } from "./guard.mjs";
 import { describeKind, type KnownInstall } from "./install";
 import { BOLD, DIM, exec, GREEN, type Paint, RED } from "./io";
 import { type NodeAnswer, nodeAddress } from "./node/install";
+import { type PeerState, TAILNET_REFRESH_MS, type TailnetListener } from "./node/server";
+import { PROTOCOL } from "./node/tailnet";
 import { nodeLog } from "./paths";
 import { caRootFile, type Storage } from "./storage";
 import { isOlder } from "./version";
@@ -358,4 +360,83 @@ export function nodeChecks(node: NodeAnswer, ctx: CliContext): Result[] {
         },
   );
   return results;
+}
+
+// A Mac whose node is refused or times out runs no devsite, has its node stopped, or sleeps: none is a fault, so it gets no check. port: the peer port every Mac shares.
+export function peerChecks(peers: PeerState[], port: number): Result[] {
+  return peers.flatMap((p): Result[] => {
+    const label = `the node on ${p.mac} speaks this node's protocol`;
+    switch (p.state) {
+      case "refused":
+      case "timeout":
+        return [];
+      case "same-protocol":
+        return [{ state: "green", label }];
+      case "not-a-node":
+        return [
+          {
+            state: "red",
+            label: `the node on ${p.mac} answers on port ${port}`,
+            detail: "another program answers there",
+            fix: `run \`bunx devsite doctor\` on ${p.mac}: it names the program`,
+          },
+        ];
+      case "denied":
+        return [
+          {
+            state: "red",
+            label: `the node on ${p.mac} accepts this Mac's calls`,
+            detail: "its Tailscale names another user for this Mac",
+            fix: "log in both Macs to one Tailscale user",
+          },
+        ];
+      default:
+        return [
+          {
+            state: "red",
+            label,
+            detail: `it speaks protocol ${p.protocol ?? "unknown"}, this node ${PROTOCOL}`,
+            fix:
+              p.protocol !== null && p.protocol > PROTOCOL
+                ? `update devsite on this Mac: ${INIT}`
+                : `update devsite on ${p.mac}`,
+          },
+        ];
+    }
+  });
+}
+
+export const portOf = (address: string) => Number(address.slice(address.lastIndexOf(":") + 1));
+
+// The program lsof names as listening on a port: its command, and its command with its pid for the detail line.
+function holderOf(port: number, ctx: CliContext): { name: string; command: string } | null {
+  const r = exec("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"], ctx, true);
+  const pid = r.out.match(/^p(\d+)$/m)?.[1];
+  const command = r.out.match(/^c(.+)$/m)?.[1];
+  return pid === undefined || command === undefined
+    ? null
+    : { name: `${command} (pid ${pid})`, command };
+}
+
+// The other Macs reach this node only on its Tailscale IPs; a port another program holds there leaves it unheard, and the node takes the port at its next refresh once it is free.
+export function tailnetListenerChecks(listeners: TailnetListener[], ctx: CliContext): Result[] {
+  return listeners.map((l): Result => {
+    const label = `the node listens for other Macs on ${l.address}`;
+    if (l.error === undefined) return { state: "green", label };
+    const port = portOf(l.address);
+    const holder = l.error === "EADDRINUSE" ? holderOf(port, ctx) : null;
+    return holder === null
+      ? {
+          state: "red",
+          label,
+          detail: `the listen failed (${l.error})`,
+          fix: `\`lsof -nP -iTCP:${port} -sTCP:LISTEN\` names the program that holds the port; stop it, and the node takes the port within ${TAILNET_REFRESH_MS / 1000} s`,
+        }
+      : {
+          state: "red",
+          label,
+          detail: `${holder.name} holds the port`,
+          fix: `stop ${holder.command}; the node takes the port within ${TAILNET_REFRESH_MS / 1000} s`,
+        };
+  });
 }

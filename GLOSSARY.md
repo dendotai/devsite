@@ -11,6 +11,12 @@ _Avoid_: daemon, agent, service
 **Client**:
 A program that sends a request to the node and shows the answer: the command-line tool, the Vite plugin, the menu bar app.
 
+**Peer**:
+The node on another Mac of your Tailscale user.
+
+**Protocol number**:
+The number each call between nodes carries; a node on another number shows in `doctor` and does not count as gone.
+
 **Live**:
 A project is live on a Mac when its dev server there answers; a Mac that gives no answer, or serves only the offline page, does not count.
 _Avoid_: running, up

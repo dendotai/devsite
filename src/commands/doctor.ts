@@ -2,12 +2,22 @@
  * devsite doctor — checks the node first, prints how this Mac is set up, then checks the outcomes devsite needs, whoever set them up. It writes nothing and runs no sudo, so it is safe to run any time; it exits 1 on any red check, so a script can use it as a gate.
  */
 import { sep } from "node:path";
-import { caddyChecks, certTarget, nodeChecks, printSection, type Result } from "../checks";
+import {
+  caddyChecks,
+  certTarget,
+  nodeChecks,
+  peerChecks,
+  portOf,
+  printSection,
+  type Result,
+  tailnetListenerChecks,
+} from "../checks";
+import { NODE_PORT } from "../client.mjs";
 import { type CliContext, processContext } from "../context";
 import { type DnsmasqProbe, describeDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
 import { BOLD, GREEN, type Paint, painter, plural, RED } from "../io";
-import { type NodeAnswer, nodeAddress, readNode } from "../node/install";
+import { type NodeAnswer, nodeAddress, readNode, readPeers } from "../node/install";
 import { nodeLog, settingsFile, supportDir } from "../paths";
 import { discoverProjects, type RepoProject } from "../repo";
 import { readSettings } from "../settings";
@@ -105,6 +115,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
 
   const node = await readNode();
   const results = nodeChecks(node, ctx);
+  if (node.ok) results.push(...tailnetListenerChecks(node.status.tailnetListeners ?? [], ctx));
   printSection(`Node (${nodeAddress()})`, results, paint, ctx);
 
   const install = findCaddy(read.settings, ctx);
@@ -136,6 +147,13 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   if (dns.checks.length > 0) {
     printSection("dnsmasq", dns.checks, paint, ctx);
     results.push(...dns.checks);
+  }
+  const listener = node.ok ? node.status.tailnetListeners?.[0]?.address : undefined;
+  const peerPort = listener === undefined ? NODE_PORT : portOf(listener);
+  const peers = node.ok ? peerChecks(await readPeers(), peerPort) : [];
+  if (peers.length > 0) {
+    printSection("Other Macs", peers, paint, ctx);
+    results.push(...peers);
   }
   let projects: RepoProject[] = [];
   let invalid: string | null = null;

@@ -226,14 +226,25 @@ export function fakeViteServer(port: number) {
   httpServer.address = () => ({ port });
   const infos: string[] = [];
   const warns: string[] = [];
+  const errors: string[] = [];
+  const state = { closed: false };
   return {
     httpServer,
     infos,
     warns,
+    errors,
+    state,
     server: {
       httpServer,
+      close: async () => {
+        state.closed = true;
+      },
       config: {
-        logger: { info: (m: string) => infos.push(m), warn: (m: string) => warns.push(m) },
+        logger: {
+          info: (m: string) => infos.push(m),
+          warn: (m: string) => warns.push(m),
+          error: (m: string) => errors.push(m),
+        },
       },
     },
   };

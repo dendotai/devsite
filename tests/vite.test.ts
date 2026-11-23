@@ -123,6 +123,25 @@ test("a node that answers an error: the warning names the status", async () => {
   );
 });
 
+test("a name live on another Mac stops the dev server with the node's error, and exits 1", async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(409, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "web.internal runs on Mac mini from ~/Projects/acme-web" }));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  process.env.DEVSITE_NODE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const exitCode = process.exitCode;
+  const { fake } = await start({ name: "web", devSite: { name: "web" } }, 54321);
+  const stopExit = process.exitCode;
+  process.exitCode = exitCode;
+  server.close();
+  expect(fake.errors).toEqual(["devsite: web.internal runs on Mac mini from ~/Projects/acme-web"]);
+  expect(fake.state.closed).toBe(true);
+  expect(stopExit).toBe(1);
+  expect(fake.warns).toEqual([]);
+  expect(fake.infos).toEqual([]);
+});
+
 test("a devSite.name that keeps the old .internal suffix is refused with the bare name", () => {
   const plugin = devsite();
   expect(() =>

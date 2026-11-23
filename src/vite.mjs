@@ -12,6 +12,9 @@ const VERSION = /** @type {{ version: string }} */ (
   JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
 ).version;
 
+// The node refuses a name live on another Mac (#66); its message names that Mac and the folder there.
+class Refused extends Error {}
+
 /**
  * @param {string} name
  * @param {{ port: number; folder: string; project: string }} project
@@ -24,6 +27,12 @@ async function register(name, project) {
   }).catch((cause) => {
     throw new Error("the node does not answer — run bunx devsite doctor", { cause });
   });
+  if (res.status === 409) {
+    const body = /** @type {{ error?: unknown } | null} */ (await res.json().catch(() => null));
+    throw new Refused(
+      typeof body?.error === "string" ? body.error : `${name}.internal runs on another Mac`,
+    );
+  }
   if (!res.ok) throw new Error(`the node answered HTTP ${res.status} — run bunx devsite doctor`);
 }
 
@@ -101,11 +110,18 @@ export function devsite() {
               server.config.logger.info(
                 `devsite: https://${internal} and https://${localhost} → 127.0.0.1:${port}`,
               ),
-            (err) =>
+            (err) => {
+              // The name has one URL, so a second dev server for it stops: Vite ends once its server closes.
+              if (err instanceof Refused) {
+                server.config.logger.error(`devsite: ${err.message}`);
+                process.exitCode = 1;
+                return server.close();
+              }
               server.config.logger.warn(
                 `devsite: ${err instanceof Error ? err.message : err}\n` +
                   `devsite: the dev server runs at http://127.0.0.1:${port}/ only; HMR works only through the https names.`,
-              ),
+              );
+            },
           )
           .then(settle);
       });
