@@ -5,12 +5,13 @@ import { parseArgs } from "node:util";
 import pkg from "../package.json";
 import { doctor } from "./commands/doctor";
 import { init } from "./commands/init";
+import { runNode } from "./commands/node";
 import { type CliContext, processContext } from "./context";
 
 type FlagDef = {
-  type: "boolean";
+  type: "boolean" | "string";
   short?: string;
-  default?: boolean;
+  default?: boolean | string;
   help: string;
   // A flag that IS a command: resolve dispatches to this COMMANDS row when the flag is set. Only meaningful on GLOBAL_FLAGS entries.
   command?: string;
@@ -63,6 +64,17 @@ const COMMANDS: Record<string, Command> = {
     ],
     flags: {},
     run: (_values, ctx) => doctor(ctx),
+  },
+  node: {
+    summary: [
+      "Run the node, the devsite server Caddy sends each request to.",
+      "launchd starts it at login; init installs it.",
+    ],
+    flags: {
+      port: { type: "string", help: "The loopback port to listen on; 0 takes a free one." },
+    },
+    run: (values, ctx) =>
+      runNode({ port: typeof values.port === "string" ? values.port : undefined }, ctx),
   },
   help: {
     summary: ["Print this help."],

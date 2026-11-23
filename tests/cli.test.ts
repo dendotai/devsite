@@ -1,8 +1,7 @@
 // End-to-end tests of the CLI surface. Runs that stop before init reads this Mac's Caddy spawn the bin shim (src/cli.ts): the real process boundary — exit codes, stdout/stderr routing. Dry runs go in-process through dryRun(), because a spawned run would read this Mac's running Caddy through ps. In-process coverage of parse/dispatch lives in run.test.ts (#9).
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { run } from "../src/run";
 import { makeEmptyRepo, makeIo, makeRepo, scratchCaddyfile } from "./helpers";
@@ -70,78 +69,13 @@ test("unknown flag prints usage and exits 1 — a typo'd --dry-run must not appl
   expect(r.stderr).toContain("Usage: devsite");
 });
 
-test("init passes the guard: no routes in cwd exits 1 with the discovery error", async () => {
-  const r = devsite(["init"], { cwd: makeEmptyRepo() });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("No package.json#devSite routes");
-  // The message must name the searched folder — the wrong-cwd case must explain itself.
-  expect(r.stderr).toContain("devsite-empty-");
-});
-
-test("init --dry-run renders the devsite.d tree and touches nothing", async () => {
-  const r = await dryRun({ cwd: makeRepo() });
+test("init sets up the Mac from any folder: a folder with no package.json renders the devsite.d tree", async () => {
+  const r = await dryRun({ cwd: makeEmptyRepo() });
   expect(r.status).toBe(0);
   expect(r.stdout).toContain("--dry-run: would change");
   expect(r.stdout).toContain("import devsite.d/*.caddy # devsite");
-  expect(r.stdout).toContain("+++ devsite.d/web.test.internal.caddy");
-  expect(r.stdout).toContain("web.test.internal, web.test.localhost {");
-});
-
-test("a single-package repo: root package.json#devSite is discovered", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "devsite-single-"));
-  writeFileSync(
-    join(repo, "package.json"),
-    JSON.stringify({ name: "solo", devSite: { name: "solo.test" } }),
-  );
-  const r = await dryRun({ cwd: repo });
-  expect(r.status).toBe(0);
-  expect(r.stdout).toContain("solo.test.internal, solo.test.localhost {");
-});
-
-test("root and workspace devSite hosts are both discovered", async () => {
-  const repo = makeRepo();
-  writeFileSync(
-    join(repo, "package.json"),
-    JSON.stringify({ name: "rootproj", devSite: { name: "root.test" } }),
-  );
-  const r = await dryRun({ cwd: repo });
-  expect(r.status).toBe(0);
-  expect(r.stdout).toContain("root.test.internal, root.test.localhost {");
-  expect(r.stdout).toContain("web.test.internal, web.test.localhost {");
-});
-
-test("a host that is not a plain hostname is rejected at discovery", async () => {
-  const r = await dryRun({ cwd: makeRepo("a.internal; touch pwned") });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("is not a plain hostname");
-  expect(r.stderr).toContain("a.internal; touch pwned");
-});
-
-test("two packages declaring the same devSite name are rejected at discovery", async () => {
-  const repo = makeRepo(); // apps/web → devSite.name "web.test"
-  mkdirSync(join(repo, "apps", "api"), { recursive: true });
-  writeFileSync(
-    join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { name: "web.test" } }),
-  );
-  const r = await dryRun({ cwd: repo });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain('devSite.name "web.test"');
-  // The message must name both claimants so the fix is findable.
-  expect(r.stderr).toContain("api");
-  expect(r.stderr).toContain("web");
-});
-
-test("names differing only in case are still duplicates (DNS is case-insensitive)", async () => {
-  const repo = makeRepo();
-  mkdirSync(join(repo, "apps", "api"), { recursive: true });
-  writeFileSync(
-    join(repo, "apps", "api", "package.json"),
-    JSON.stringify({ name: "api", devSite: { name: "WEB.test" } }),
-  );
-  const r = await dryRun({ cwd: repo });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain('devSite.name "web.test"');
+  expect(r.stdout).toContain("+++ devsite.d/node.caddy");
+  expect(r.stdout).toContain("+*.internal, *.localhost {");
 });
 
 // --- running as root: refuse, because `brew services` would install a root service (ADR 0002) ---

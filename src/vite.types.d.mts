@@ -1,11 +1,6 @@
 import type { Plugin } from "vite";
 
 /**
- * Dev-only Vite plugin: has Vite bind an OS-assigned port (`port: 0`), configures Vite's server/HMR for the `package.json#devSite` name, and registers `https://<name>.internal` and `https://<name>.localhost` → the bound port in the local Caddy via its admin API.
+ * Dev-only Vite plugin: has Vite bind an OS-assigned port (`port: 0`), configures Vite's server/HMR for the `package.json#devSite` name, and tells the devsite node the project's name, port and folder, so the project opens at `https://<name>.internal` and `https://<name>.localhost`.
  */
 export function devsite(): Plugin;
-
-/**
- * @internal Exported for tests. Fetch against the Caddy admin API (`DEVSITE_CADDY_ADMIN`, defaulting to the local admin address) with the Origin header pinned to that base — the pin wins over caller headers in any casing or headers shape.
- */
-export function caddy(path: string, init?: RequestInit): Promise<Response>;

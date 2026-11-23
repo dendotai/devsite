@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { INIT, type Result } from "./checks";
 import type { CliContext } from "./context";
 import { brewPrefix } from "./install";
-import { exec, type RootCommand } from "./io";
+import { exec, type RootCommand, xml } from "./io";
 import { type Settings, settingsPath } from "./settings";
 import { type TailscaleIp, tailscaleIp } from "./tailscale";
 
@@ -104,9 +104,6 @@ export function renderWatcher(): string {
     "",
   ].join("\n");
 }
-
-const xml = (s: string) =>
-  s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 // The watcher starts and stops dnsmasq (ADR 0003). KeepAlive starts the watcher again only after a non-zero exit, which it gives when scutil ends; a SIGTERM exits 0, so a bootout stays stopped. launchd waits at least 10 s between starts.
 export function renderPlist(binary: string, conf: string, watcher: string): string {

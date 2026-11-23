@@ -4,15 +4,7 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { init } from "../src/commands/init";
-import {
-  cli,
-  fakeStdin,
-  makeEmptyRepo,
-  makeIo,
-  makeRepo,
-  scratchCaddyfile,
-  scriptedRunner,
-} from "./helpers";
+import { cli, fakeStdin, makeIo, makeRepo, scratchCaddyfile, scriptedRunner } from "./helpers";
 
 test("--help prints help to stdout and exits 0", async () => {
   const r = await cli(["--help"]);
@@ -89,18 +81,12 @@ test("an extra positional after init exits 1 with usage", async () => {
   expect(r.stderr).toContain("Usage: devsite");
 });
 
-test("init is dispatched: no routes in cwd returns 1 with the discovery error", async () => {
-  const r = await cli(["init"], { cwd: makeEmptyRepo() });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("No package.json#devSite routes");
-});
-
 test("init --dry-run through the io context: renders the tree diff, returns 0", async () => {
   const { ctx, stdout } = makeIo({ cwd: makeRepo(), caddyfile: scratchCaddyfile() });
   const status = await init({ dryRun: true }, ctx);
   expect(status).toBe(0);
   expect(stdout.text()).toContain("--dry-run: would change");
-  expect(stdout.text()).toContain("web.test.internal, web.test.localhost {");
+  expect(stdout.text()).toContain("*.internal, *.localhost {");
 });
 
 test("init --dry-run runs only ps and tailscale, for the install seams, and one diff per planned file", async () => {
@@ -115,11 +101,10 @@ test("init --dry-run runs only ps and tailscale, for the install seams, and one 
     ["ps", "-axo", true],
     ["tailscale", "status", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
-    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/fragments/offline.caddy", "/dev/null", true],
     ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/guard.caddy", "/dev/null", true],
-    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/web.test.internal.caddy", "/dev/null", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/node.caddy", "/dev/null", true],
   ]);
-  expect(r.stdout).toContain("scripted diff of devsite.d/web.test.internal.caddy");
+  expect(r.stdout).toContain("scripted diff of devsite.d/node.caddy");
 });
 
 test("init --dry-run stops when diff cannot start, and writes no diff", async () => {

@@ -1,92 +1,45 @@
 /**
- * devsite doctor — prints how this Mac is set up, then checks the outcomes devsite needs, whoever set them up. It writes nothing and runs no sudo, so it is safe to run any time; it exits 1 on any red check, so a script can use it as a gate.
+ * devsite doctor — checks the node first, prints how this Mac is set up, then checks the outcomes devsite needs, whoever set them up. It writes nothing and runs no sudo, so it is safe to run any time; it exits 1 on any red check, so a script can use it as a gate.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import {
-  caddyChecks,
-  hostFileOwner,
-  INIT,
-  machineHosts,
-  offlinePageChecks,
-  portFileChecks,
-  printSection,
-  type Result,
-} from "../checks";
+import { sep } from "node:path";
+import { caddyChecks, certTarget, nodeChecks, printSection, type Result } from "../checks";
 import { type CliContext, processContext } from "../context";
 import { type DnsmasqProbe, describeDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
 import { BOLD, GREEN, type Paint, painter, plural, RED } from "../io";
+import { type NodeAnswer, nodeAddress, readNode } from "../node/install";
+import { nodeLog, settingsFile, supportDir } from "../paths";
+import { discoverProjects, type RepoProject } from "../repo";
 import { readSettings } from "../settings";
-import { portFilePath, resolveStateDir } from "../state.mjs";
 import { findStorage, type Storage } from "../storage";
 import { probeTailscale } from "../tailscale";
-import {
-  discoverRoutes,
-  OFFLINE_FRAGMENT,
-  type Route,
-  refuseRoot,
-  renderHostFile,
-  renderOfflineFragment,
-} from "./init";
+import { refuseRoot } from "./init";
 
 const UNUSED_DAYS = 30;
 
-function projectChecks(routes: Route[], devsiteDir: string, stateDir: string): Result[] {
-  const results: Result[] = [];
-  for (const r of routes) {
-    const path = join(devsiteDir, `${r.host}.caddy`);
-    const label = `${r.host}'s host file matches what init writes`;
-    if (!existsSync(path)) {
-      results.push({ state: "red", label, detail: `no ${path}`, fix: INIT });
-      continue;
-    }
-    const current = readFileSync(path, "utf8");
-    const owner = hostFileOwner(current);
-    const ownerLabel = `${r.host} is used by ${r.project} only`;
-    if (owner !== undefined && owner !== r.project) {
-      results.push({
-        state: "red",
-        label: ownerLabel,
-        detail: `project ${owner} in another repo uses it too`,
-        fix: `pick another devSite.name for ${r.project}`,
-      });
-      continue;
-    }
-    results.push({ state: "green", label: ownerLabel });
-    results.push(
-      current === renderHostFile(r, portFilePath(r.host, stateDir))
-        ? { state: "green", label }
-        : { state: "red", label, detail: "it differs", fix: INIT },
-    );
-  }
-  return results;
-}
-
-// The Vite plugin stamps each host's last-used date on every dev-server start (#48). A host with no stamp is left out: its file may predate the stamps.
-function unusedHosts(hosts: string[], ctx: CliContext): string[] {
-  let stamps: Record<string, unknown> = {};
-  try {
-    stamps = JSON.parse(readFileSync(join(resolveStateDir(ctx.env), "last-used.json"), "utf8"));
-  } catch {
-    return [];
-  }
+// The node keeps each project's last-used date; a name unseen for 30+ days may be one to clean up.
+function unusedNames(node: NodeAnswer): string[] {
+  if (!node.ok) return [];
   const cutoff = new Date(Date.now() - UNUSED_DAYS * 86_400_000).toISOString().slice(0, 10);
-  return hosts.flatMap((h) => {
-    const day = stamps[h];
-    return typeof day === "string" && day <= cutoff ? [`${h} (last used ${day})`] : [];
-  });
+  return Object.entries(node.status.projects)
+    .filter(([, p]) => p.lastUsed <= cutoff)
+    .map(([name, p]) => `${name} (last used ${p.lastUsed})`)
+    .sort();
 }
 
 function printSetup(
   install: CaddyInstall,
   storage: Storage | null,
   dns: DnsmasqProbe,
+  node: NodeAnswer,
   ctx: CliContext,
   paint: Paint,
 ) {
   const line = (s: string) => ctx.stdout.write(`  ${s}\n`);
   ctx.stdout.write(`\n${paint(BOLD, "Setup")}\n`);
+  line(`devsite's files: ${supportDir(ctx.env)}`);
+  line(`devsite's settings: ${settingsFile(ctx.env)}`);
+  line(`Node log: ${nodeLog(ctx.env)}`);
   if (install.kind === "unknown") {
     line(`Caddy: an install devsite does not know (${install.why})`);
     line(`dnsmasq: ${describeDnsmasq(dns)}`);
@@ -107,10 +60,37 @@ function printSetup(
   if (storage !== null)
     line(`Caddy storage: ${storage.root ?? "not read by devsite"} (${storage.source})`);
   line(`dnsmasq: ${describeDnsmasq(dns)}`);
-  const unused = unusedHosts(machineHosts(install.devsiteDir), ctx);
+  const unused = unusedNames(node);
   line(
-    `Hosts unused for ${UNUSED_DAYS}+ days: ${unused.length === 0 ? "none" : unused.join(", ")}`,
+    `Projects unused for ${UNUSED_DAYS}+ days: ${unused.length === 0 ? "none" : unused.join(", ")}`,
   );
+}
+
+// A name the node holds for a folder outside this repo belongs to another project: the two would take turns at one URL.
+function repoChecks(projects: RepoProject[], node: NodeAnswer, repoRoot: string): Result[] {
+  if (!node.ok) {
+    return [
+      {
+        state: "skipped",
+        label: "this repo's names on the node",
+        detail: "the node does not answer",
+      },
+    ];
+  }
+  return projects.map((r): Result => {
+    const label = `${r.name} is used by this repo only`;
+    const held = node.status.projects[r.name];
+    const inRepo =
+      held === undefined || held.folder === repoRoot || held.folder.startsWith(repoRoot + sep);
+    return inRepo
+      ? { state: "green", label }
+      : {
+          state: "red",
+          label,
+          detail: `the project in ${held.folder} uses it too`,
+          fix: `pick another devSite.name for ${r.project}`,
+        };
+  });
 }
 
 export async function doctor(ctx: CliContext = processContext()): Promise<number> {
@@ -120,14 +100,17 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
     ctx.stderr.write(`${read.error}\n`);
     return 1;
   }
-  const install = findCaddy(read.settings, ctx);
   const paint = painter(ctx.stdout, ctx);
-  const stateDir = resolveStateDir(ctx.env);
-
   ctx.stdout.write(`${paint(BOLD, "devsite doctor")}\n`);
+
+  const node = await readNode();
+  const results = nodeChecks(node, ctx);
+  printSection(`Node (${nodeAddress()})`, results, paint, ctx);
+
+  const install = findCaddy(read.settings, ctx);
   const storage = install.kind === "unknown" ? null : await findStorage(install, ctx);
   const dns = probeDnsmasq(read.settings, ctx);
-  printSetup(install, storage, dns, ctx, paint);
+  printSetup(install, storage, dns, node, ctx, paint);
 
   const caddyResults: Result[] =
     install.kind === "unknown"
@@ -139,18 +122,12 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
             fix: unknownFix(ctx),
           },
         ]
-      : [
-          ...(await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx)),
-          ...portFileChecks(install.devsiteDir, stateDir),
-          ...offlinePageChecks(
-            install.devsiteDir,
-            join(install.devsiteDir, OFFLINE_FRAGMENT),
-            renderOfflineFragment(),
-          ),
-        ];
+      : await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx, {
+          cert: certTarget(node),
+        });
   printSection("Caddy", caddyResults, paint, ctx);
+  results.push(...caddyResults);
 
-  const results = [...caddyResults];
   const tailscale = probeTailscale(dns.tailscale, ctx);
   if (tailscale.checks.length > 0) {
     printSection("Tailscale", tailscale.checks, paint, ctx);
@@ -160,10 +137,10 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
     printSection("dnsmasq", dns.checks, paint, ctx);
     results.push(...dns.checks);
   }
-  let routes: Route[] = [];
+  let projects: RepoProject[] = [];
   let invalid: string | null = null;
   try {
-    routes = discoverRoutes(ctx.cwd);
+    projects = discoverProjects(ctx.cwd);
   } catch (err) {
     invalid = err instanceof Error ? err.message : String(err);
   }
@@ -177,20 +154,12 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
     };
     results.push(bad);
     printSection(`This repo (${ctx.cwd})`, [bad], paint, ctx);
-  } else if (routes.length === 0) {
+  } else if (projects.length === 0) {
     ctx.stdout.write(`\nSkipped the checks of this repo: no package.json#devSite in ${ctx.cwd}.\n`);
   } else {
     const repoResults: Result[] = [
       { state: "green", label: namesLabel },
-      ...(install.kind === "unknown"
-        ? [
-            {
-              state: "skipped",
-              label: "the host files of this repo",
-              detail: "they need Caddy's paths",
-            } as const,
-          ]
-        : projectChecks(routes, install.devsiteDir, stateDir)),
+      ...repoChecks(projects, node, ctx.cwd),
     ];
     results.push(...repoResults);
     printSection(`This repo (${ctx.cwd})`, repoResults, paint, ctx);

@@ -1,8 +1,7 @@
-// The machine settings in ~/.config/devsite/config.json: each one hands a change devsite would make to a shared thing over to the user (ADR 0004).
+// The machine settings in devsite's Application Support folder: each one hands a change devsite would make to a shared thing over to the user (ADR 0004).
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { CliContext } from "./context";
+import { settingsFile } from "./paths";
 
 export type CaddyUser = "user" | "root";
 
@@ -22,8 +21,7 @@ export type Settings = {
 };
 
 export function settingsPath(ctx: CliContext): string {
-  const base = ctx.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(base, "devsite", "config.json");
+  return settingsFile(ctx.env);
 }
 
 type Rule = { valid: (v: unknown) => boolean; expected: string };

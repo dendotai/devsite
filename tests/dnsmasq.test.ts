@@ -5,16 +5,32 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { processRunner } from "../src/context";
 import { renderConf, renderPlist, renderWatcher } from "../src/dnsmasq";
-import { type CommandCall, cli, fakeStdin, MISSING, makeRepo, scriptedRunner } from "./helpers";
-import { mockAdmin, pki, placeholder, setUpMachine, snapshot, useMachine } from "./machine";
+import {
+  type CommandCall,
+  cli,
+  fakeStdin,
+  MISSING,
+  makeRepo,
+  scriptedRunner,
+  writeSettings,
+} from "./helpers";
+import {
+  mockAdmin,
+  nodeRoute,
+  pki,
+  setUpMachine,
+  snapshot,
+  USER_CADDYFILE,
+  useMachine,
+  useNodeWith,
+} from "./machine";
 
 useMachine();
 
 const IP = "100.90.1.2";
 const OLD_IP = "100.90.9.9";
 const LABEL = "ai.den.devsite.dnsmasq";
-const SET_UP_CADDYFILE =
-  '{\n\temail dev@example.com\n\tstorage file_system {\n\t\troot "STORAGE"\n\t}\n}\n\nimport devsite.d/*.caddy # devsite\n';
+const SET_UP_CADDYFILE = USER_CADDYFILE;
 const USER_CONF = "address=/lan/192.168.1.10\n";
 
 // tailscale: what Tailscale's app CLI gives; onPath: a `tailscale` on PATH gives the same. dig: what answers .internal on the Tailscale IP before init's sudo call and after it: an address, a reply status with no address (NXDOMAIN), or null for no reply. mac: what the Mac's resolver gives.
@@ -48,7 +64,7 @@ type Mac = {
 async function setUp(
   opts: { dnsmasq?: boolean; files?: string; oldBinary?: string; noWatcher?: boolean } = {},
 ): Promise<Mac> {
-  await mockAdmin([placeholder()]);
+  await mockAdmin([nodeRoute()]);
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
   const systemRoot = mkdtempSync(join(tmpdir(), "devsite-system-"));
   const conf = join(systemRoot, "Library", "Application Support", "devsite", "dnsmasq.conf");
@@ -155,14 +171,13 @@ async function devsite(
   opts: { noBrew?: boolean; settings?: object; keys?: string[]; tty?: boolean } = {},
 ) {
   const { runCommand, calls } = runner(net);
-  const configHome = mkdtempSync(join(tmpdir(), "devsite-config-"));
-  if (opts.settings !== undefined) {
-    mkdirSync(join(configHome, "devsite"));
-    writeFileSync(join(configHome, "devsite", "config.json"), JSON.stringify(opts.settings));
-  }
+  const home = process.env.DEVSITE_USER_HOME ?? "";
+  if (opts.settings !== undefined) writeSettings(home, opts.settings);
+  const cwd = makeRepo();
+  await useNodeWith({ web: { folder: join(cwd, "apps", "web") } });
   const r = await cli(argv, {
-    configHome,
-    cwd: makeRepo(),
+    home,
+    cwd,
     caddyfile: m.caddyfile,
     runCommand,
     stdin: fakeStdin(opts.keys ?? "y", opts.tty ?? true),
@@ -484,7 +499,7 @@ test("dnsmasq.run is manual: doctor names what must be true, and init installs a
   );
   expect(d.stdout).toMatch(
     new RegExp(
-      `fix: make a DNS server on ${IP}:53 answer \\.internal with ${IP}: dnsmasq\\.run is manual in \\S+config\\.json, so init runs no dnsmasq`,
+      `fix: make a DNS server on ${IP}:53 answer \\.internal with ${IP}: dnsmasq\\.run is manual in .+config\\.json, so init runs no dnsmasq`,
     ),
   );
   expect(d.status).toBe(1);
