@@ -23,6 +23,7 @@ import { adminBase, caddy } from "../caddy-admin";
 import {
   type CaddyRoute,
   caddyChecks,
+  certTarget,
   JSON_FIX_IN_INIT,
   nodeChecks,
   printSection,
@@ -49,7 +50,7 @@ import {
   type RootCommand,
   YELLOW,
 } from "../io";
-import { installNode, type NodeAnswer, readNode } from "../node/install";
+import { installNode, readNode } from "../node/install";
 import { supportDir } from "../paths";
 import { readSettings, type Settings, settingsPath } from "../settings";
 import { caRootFile, findStorage, rootCrtIn } from "../storage";
@@ -935,12 +936,6 @@ function installAfter(settings: Settings, before: KnownInstall, ctx: CliContext)
   return after.kind === "unknown" ? before : after;
 }
 
-// A project the node knows, for the certificate checks: Caddy signs a certificate only for such a name.
-export function certHostOf(node: NodeAnswer): string | undefined {
-  const name = node.ok ? Object.keys(node.status.projects).sort()[0] : undefined;
-  return name === undefined ? undefined : `${name}.internal`;
-}
-
 // No argv knowledge here — run.ts parses flags and passes options plus the io context. Fatal conditions return 1 (after explaining themselves); unexpected errors throw and run.ts turns them into an exit code.
 export async function init(
   { dryRun }: { dryRun: boolean },
@@ -1014,7 +1009,7 @@ export async function init(
   const checks = [
     ...nodeChecks(node, ctx),
     ...(await caddyChecks(install, storage, ctx, {
-      certHost: certHostOf(node),
+      cert: certTarget(node),
       jsonFix: JSON_FIX_IN_INIT,
     })),
     ...tailscale.checks,
@@ -1123,7 +1118,7 @@ export async function init(
   const checksAfter = [
     ...nodeChecks(nodeAfter, ctx),
     ...(await caddyChecks(after, storageAfter, ctx, {
-      certHost: certHostOf(nodeAfter),
+      cert: certTarget(nodeAfter),
       jsonFix: JSON_FIX_IN_INIT,
     })),
     ...probeTailscale(dnsAfter.tailscale, ctx).checks,

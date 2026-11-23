@@ -376,7 +376,7 @@ test("no node: the node check is red first, with init and the node's log as the 
     `fix: run \`bunx devsite init\`; the node's log is ${join(m.home, "Library", "Logs", "devsite", "node.log")}`,
   );
   expect(r.stdout).toContain(
-    "– the served certificate chains to the CA in Caddy's storage — no project has run on this Mac yet",
+    "– the served certificate chains to the CA in Caddy's storage — the node does not answer",
   );
   expect(r.status).toBe(1);
 });

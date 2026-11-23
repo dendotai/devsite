@@ -30,7 +30,7 @@ useMachine();
 
 const SET_UP_CADDYFILE = USER_CADDYFILE;
 
-// adapted: what `caddy adapt` prints for the user's Caddyfile (an empty config when left out); null fails the adapt. onBootstrap: what `launchctl bootstrap` brings up.
+// adapted: what `caddy adapt` prints for the user's Caddyfile (the real `caddy adapt` when left out); null fails the adapt. onBootstrap: what `launchctl bootstrap` brings up.
 type Answers = {
   trusted?: boolean;
   onBrew?: () => void;
@@ -48,7 +48,8 @@ function runner(a: Answers = {}) {
     if (c.cmd === "brew" && c.args[0] === "services") a.onBrew?.();
     if (c.cmd === "launchctl" && c.args[0] === "bootstrap") a.onBootstrap?.();
     if (c.cmd === "caddy" && c.args[0] === "adapt") {
-      return a.adapted === null ? { status: 1 } : { stdout: JSON.stringify(a.adapted ?? {}) };
+      if (a.adapted === undefined) return processRunner(c.cmd, c.args, { capture: c.capture });
+      return a.adapted === null ? { status: 1 } : { stdout: JSON.stringify(a.adapted) };
     }
     return {};
   });

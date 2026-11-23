@@ -224,7 +224,10 @@ export function setUpMachine(
 
 // devsite's route file as an older devsite left it, so init rewrites it.
 export function staleRoute(m: Machine): Machine {
-  writeFileSync(join(m.dir, "devsite.d", NODE_ROUTE_FILE), "old\n");
+  writeFileSync(
+    join(m.dir, "devsite.d", NODE_ROUTE_FILE),
+    `# an older devsite\n${renderNodeRoute()}`,
+  );
   return m;
 }
 

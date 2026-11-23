@@ -2,7 +2,7 @@
  * devsite doctor — checks the node first, prints how this Mac is set up, then checks the outcomes devsite needs, whoever set them up. It writes nothing and runs no sudo, so it is safe to run any time; it exits 1 on any red check, so a script can use it as a gate.
  */
 import { sep } from "node:path";
-import { caddyChecks, nodeChecks, printSection, type Result } from "../checks";
+import { caddyChecks, certTarget, nodeChecks, printSection, type Result } from "../checks";
 import { type CliContext, processContext } from "../context";
 import { type DnsmasqProbe, describeDnsmasq, probeDnsmasq } from "../dnsmasq";
 import { type CaddyInstall, describeKind, findCaddy, unknownFix } from "../install";
@@ -13,7 +13,7 @@ import { discoverProjects, type RepoProject } from "../repo";
 import { readSettings } from "../settings";
 import { findStorage, type Storage } from "../storage";
 import { probeTailscale } from "../tailscale";
-import { certHostOf, refuseRoot } from "./init";
+import { refuseRoot } from "./init";
 
 const UNUSED_DAYS = 30;
 
@@ -123,7 +123,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
           },
         ]
       : await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx, {
-          certHost: certHostOf(node),
+          cert: certTarget(node),
         });
   printSection("Caddy", caddyResults, paint, ctx);
   results.push(...caddyResults);

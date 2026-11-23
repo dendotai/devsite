@@ -81,9 +81,10 @@ async function devsite(
   const { runCommand, calls } = runner(answers);
   const home = process.env.DEVSITE_USER_HOME ?? "";
   if (opts.settings !== undefined) writeSettings(home, opts.settings);
-  await useNodeWith(opts.node ?? { web: {} });
+  const cwd = makeRepo();
+  await useNodeWith(opts.node ?? { web: { folder: join(cwd, "apps", "web") } });
   const io = makeIo({
-    cwd: makeRepo(),
+    cwd,
     caddyfile,
     home,
     runCommand,

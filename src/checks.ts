@@ -148,14 +148,25 @@ function chainsTo(served: X509Certificate[], root: X509Certificate): boolean {
 const chainLabel = "the served certificate chains to the CA in Caddy's storage";
 const trustLabel = "that CA is trusted in the keychain";
 
+// The name the certificate checks open: Caddy signs a certificate at a name's first TLS handshake, only for a project the node knows, and makes its CA for the first one.
+export type CertTarget = { host: string } | { skip: string };
+
+export function certTarget(node: NodeAnswer): CertTarget {
+  if (!node.ok) return { skip: "the node does not answer" };
+  const name = Object.keys(node.status.projects).sort()[0];
+  return name === undefined
+    ? { skip: "no project has run on this Mac yet" }
+    : { host: `${name}.internal` };
+}
+
 async function certChecks(
-  host: string | undefined,
+  target: CertTarget,
   storage: Storage,
   ctx: CliContext,
 ): Promise<Result[]> {
-  // Caddy signs a certificate for a name at its first TLS handshake, only for a project the node knows, and makes its CA for the first one: a Mac where no project ran yet still needs the trust step.
-  if (host === undefined) {
-    const detail = "no project has run on this Mac yet";
+  // A Mac with no certificate yet still needs the trust step.
+  if ("skip" in target) {
+    const detail = target.skip;
     return [
       { state: "skipped", label: chainLabel, detail },
       { state: "skipped", label: trustLabel, detail, repair: "trust" },
@@ -164,7 +175,7 @@ async function certChecks(
   // doctor writes nothing that outlives the run, so the admin API's root goes to a temp file the check deletes.
   const temp = join(tmpdir(), `devsite-caddy-root-${process.pid}.crt`);
   try {
-    return await certChecksOf(host, await caRootFile(storage, temp), storage, ctx);
+    return await certChecksOf(target.host, await caRootFile(storage, temp), storage, ctx);
   } finally {
     rmSync(temp, { force: true });
   }
@@ -265,12 +276,12 @@ function installCheck(install: KnownInstall): Result {
   };
 }
 
-// certHost: a name of a project the node knows, for the certificate checks. jsonFix: the fix of a check a load would fix, for a Caddy config init cannot load.
+// cert: the name the certificate checks open, or why they are skipped. jsonFix: the fix of a check a load would fix, for a Caddy config init cannot load.
 export async function caddyChecks(
   install: KnownInstall,
   storage: Storage,
   ctx: CliContext,
-  { certHost, jsonFix = JSON_FIX }: { certHost?: string; jsonFix?: string } = {},
+  { cert, jsonFix = JSON_FIX }: { cert: CertTarget; jsonFix?: string },
 ): Promise<Result[]> {
   const results: Result[] = [installCheck(install)];
   const admin = await readServers();
@@ -281,7 +292,7 @@ export async function caddyChecks(
     results.push(adminDown(install, admin.why));
     results.push({ state: "skipped", label: "devsite's route", detail: "it needs the admin API" });
   }
-  results.push(...(await certChecks(certHost, storage, ctx)));
+  results.push(...(await certChecks(cert, storage, ctx)));
   // init loads only a Caddyfile: for any other config it prints the JSON to add, so a rerun alone fixes nothing.
   if (install.configKind === "caddyfile") return results;
   return results.map((r) =>

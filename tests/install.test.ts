@@ -57,7 +57,9 @@ function runner(a: Answers = {}) {
     }
     if (c.cmd === "openssl") return { stdout: pki.served };
     if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
-    if (c.cmd === "caddy" && c.args[0] === "adapt") return { stdout: "{}" };
+    if (c.cmd === "caddy" && c.args[0] === "adapt") {
+      return processRunner(c.cmd, c.args, { capture: c.capture });
+    }
     return {};
   });
 }
@@ -76,9 +78,10 @@ async function devsite(
   const home = makeHome();
   process.env.DEVSITE_USER_HOME = home;
   if (opts.settings !== undefined) writeSettings(home, opts.settings);
-  await useNodeWith({ web: {} });
+  const cwd = makeRepo();
+  await useNodeWith({ web: { folder: join(cwd, "apps", "web") } });
   const io = makeIo({
-    cwd: makeRepo(),
+    cwd,
     caddyfile: opts.caddyfile,
     home,
     runCommand,
@@ -192,7 +195,7 @@ test("a root Caddy: write, reload, and trust run in exactly one sudo call", asyn
     `&& caddy reload --config ${m.caddyfile} --adapter caddyfile && caddy trust`,
   );
   // The files go into place only through sudo.
-  expect(readFileSync(routeFile, "utf8")).toBe("old\n");
+  expect(readFileSync(routeFile, "utf8")).toStartWith("# an older devsite\n");
   expect(r.ran.filter((c) => c.startsWith("caddy ") && !c.startsWith("caddy adapt "))).toEqual([]);
   expect(r.status).toBe(0);
 });
