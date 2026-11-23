@@ -145,7 +145,7 @@ function chainsTo(served: X509Certificate[], root: X509Certificate): boolean {
   return last.fingerprint256 === root.fingerprint256 || last.verify(root.publicKey);
 }
 
-const chainLabel = "the served certificate chains to the CA in Caddy's storage";
+export const chainLabel = "the served certificate chains to the CA in Caddy's storage";
 const trustLabel = "that CA is trusted in the keychain";
 
 // The name the certificate checks open: Caddy signs a certificate at a name's first TLS handshake, only for a project the node knows, and makes its CA for the first one.

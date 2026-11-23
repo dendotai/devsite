@@ -68,7 +68,7 @@
     "check:commit-msg": "commitlint --edit",
     "check:pre-commit": "bun run lint",
     "check:pre-push": "bun run typecheck && bun run test",
-    "scenarios": "rm -f scenarios.md && DEVSITE_SCENARIOS_FILE=$PWD/scenarios.md bun test tests/init.test.ts tests/doctor.test.ts tests/dnsmasq.test.ts tests/install.test.ts tests/keep-settings.test.ts"
+    "scenarios": "rm -f scenarios.md && DEVSITE_SCENARIOS_FILE=$PWD/scenarios.md bun test tests/init.test.ts tests/ca.test.ts tests/doctor.test.ts tests/dnsmasq.test.ts tests/install.test.ts tests/keep-settings.test.ts"
   },
   "peerDependencies": {
     "vite": "^8.0.0"

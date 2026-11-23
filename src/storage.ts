@@ -97,6 +97,8 @@ const ADMIN_TIMEOUT_MS = 2000;
 
 export const rootCrtIn = (storageRoot: string) =>
   join(storageRoot, "pki", "authorities", "local", "root.crt");
+export const rootKeyIn = (storageRoot: string) =>
+  join(storageRoot, "pki", "authorities", "local", "root.key");
 
 // The CA root file of the storage; for a storage devsite cannot read, the running Caddy's root written to `fallback`, because `security verify-cert` and the phone both need a file.
 export async function caRootFile(storage: Storage, fallback: string): Promise<string | null> {

@@ -17,13 +17,16 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import { BlockList, isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { Readable } from "node:stream";
 // bun-types types every .html import as an HTMLBundle for Bun.serve; the text attribute gives the file's text, which `bun build` inlines into dist, so the package ships no asset file.
 import nodeDownPage from "../../assets/node-down.html" with { type: "text" };
+import { type CaRoot, currentRootCert, describeRoot, importCaRoot, parseCaRoot } from "../ca";
 import { adminBase, caddy } from "../caddy-admin";
 import {
   type CaddyRoute,
   caddyChecks,
   certTarget,
+  chainLabel,
   JSON_FIX_IN_INIT,
   nodeChecks,
   printSection,
@@ -75,10 +78,12 @@ const IMPORT_RE = /^import devsite\.d\/\*\.caddy(?:[ \t]+#.*)?$/m;
 const SUDO_NOTE = {
   init: "it calls sudo itself for the steps that need it",
   doctor: "it never needs sudo",
+  "ca export": "it never needs sudo",
 };
 
 // init: as root, `brew services` would install a root service for a Caddy that runs as the user by default (ADR 0002), and every write would be root-owned; a root Caddy the user chose gets sudo for its own steps.
 // doctor writes nothing, but as root it checks the wrong user: `security verify-cert` reads the trust settings of the user who runs it, and with no `storage` line the storage path comes from root's home. A script that runs doctor under sudo gets exit 1, not a gate on the wrong keychain.
+// ca export, as root, reads root's own Caddy storage when the Caddyfile has no `storage` line, and prints a root no device trusts.
 export function refuseRoot(command: keyof typeof SUDO_NOTE, ctx: CliContext): boolean {
   // Overridable so tests can exercise the root path without actually being root.
   // An empty export must not count: Number("") is 0, which would read as root.
@@ -319,8 +324,14 @@ type Step = { text: string; planNote?: string; details?: string[]; repair?: Repa
   | { manual: () => Promise<void>; run?: never; root?: never; handedToUser?: never }
 );
 
+// A CA root from `init --ca -` that differs from the one in Caddy's storage; replaces is the old root's description, null for a storage with none.
+type CaImport = { root: CaRoot; storageRoot: string; replaces: string | null };
+
 type StepPlan = {
   changes: Change[];
+  caImport: CaImport | null;
+  // `init --ca -` restarts a running Caddy after an import, and again on a rerun while Caddy still serves another root.
+  restartCaddy: boolean;
   install: KnownInstall;
   settings: Settings;
   removedBinds: string[];
@@ -497,6 +508,28 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
           },
     );
   }
+  const { caImport } = p;
+  if (caImport !== null) {
+    const name = describeRoot(caImport.root.cert);
+    const run = async () => importCaRoot(caImport.storageRoot, caImport.root);
+    steps.push(
+      caImport.replaces === null
+        ? {
+            text: "put the imported CA root into Caddy's storage",
+            details: [`${name}, in ${caImport.storageRoot}`],
+            run,
+          }
+        : {
+            text: "replace Caddy's CA root",
+            details: [
+              `replaces ${caImport.replaces} with ${name}, in ${caImport.storageRoot}`,
+              "deletes the intermediate and the certificates the old root signed; Caddy signs new ones at the next visit",
+              "a phone or browser that trusts only the old root needs the new one: init prints the phone's steps",
+            ],
+            run,
+          },
+    );
+  }
   if (repairs.has("start")) {
     // Caddy serves nothing while its admin API is down, so the start drops no live route; the new process reads the files written above.
     steps.push(
@@ -544,6 +577,20 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
         run: async () => runInTerminal("caddy", reload.slice(1), ctx),
       });
     }
+  }
+  // A reload makes a new intermediate but keeps serving the certificates Caddy holds in memory, so only a restart serves the imported root.
+  if (p.restartCaddy && install.running !== null && !repairs.has("start")) {
+    steps.push({
+      text: "restart Caddy, so it serves certificates from the imported root",
+      run: async () => {
+        runInTerminal("brew", ["services", "restart", "caddy"], ctx);
+        if (!(await waitForCaddyAdmin())) {
+          throw new Error(
+            `Caddy did not answer within ${ADMIN_WAIT_MS / 1000} s of its restart. See ${install.log ?? "Caddy's log"}, then pipe the root into \`bunx devsite init --ca -\` again: it restarts Caddy.`,
+          );
+        }
+      },
+    });
   }
   // Caddy's own auto-trust needs an interactive prompt it cannot get as a background service, so init runs `caddy trust`; it reads the CA from the admin API, which the steps above leave answering.
   if (repairs.has("trust")) {
@@ -938,10 +985,34 @@ function installAfter(settings: Settings, before: KnownInstall, ctx: CliContext)
 
 // No argv knowledge here — run.ts parses flags and passes options plus the io context. Fatal conditions return 1 (after explaining themselves); unexpected errors throw and run.ts turns them into an exit code.
 export async function init(
-  { dryRun }: { dryRun: boolean },
-  ctx: CliContext = processContext(),
+  { dryRun, ca }: { dryRun: boolean; ca?: string },
+  given: CliContext = processContext(),
 ): Promise<number> {
+  let ctx = given;
   if (refuseRoot("init", ctx)) return 1;
+  let imported: CaRoot | null = null;
+  if (ca !== undefined) {
+    if (ca !== "-") {
+      ctx.stderr.write("--ca takes only -, which reads the CA root from standard input\n");
+      return 1;
+    }
+    if (ctx.stdin.isTTY) {
+      ctx.stderr.write(
+        "--ca - reads the CA root from standard input: pipe it in, as `devsite ca export` on another Mac prints it\n",
+      );
+      return 1;
+    }
+    let text = "";
+    for await (const chunk of ctx.stdin) text += chunk;
+    const parsed = parseCaRoot(text);
+    if (typeof parsed === "string") {
+      ctx.stderr.write(`${parsed}; nothing changed.\n`);
+      return 1;
+    }
+    imported = parsed;
+    // stdin was the pipe, so the questions go to the terminal.
+    ctx = { ...ctx, stdin: ctx.terminal() ?? Object.assign(Readable.from([]), { isTTY: false }) };
+  }
 
   const read = readSettings(ctx);
   if (!read.ok) {
@@ -961,6 +1032,29 @@ export async function init(
   const caddyDir = dirname(install.devsiteDir);
   const devsiteDir = install.devsiteDir;
   const storage = await findStorage(install, ctx);
+  let caImport: CaImport | null = null;
+  if (imported !== null) {
+    const refusal =
+      storage.root === null
+        ? `devsite cannot read Caddy's storage (${storage.source})`
+        : install.user === "root"
+          ? "init --ca imports only into a Caddy that runs as you; this one runs as root"
+          : install.running !== null && install.manager !== "brew services"
+            ? `Caddy runs under ${install.manager}, which init cannot restart: stop Caddy, run init --ca - again, then start Caddy`
+            : null;
+    if (storage.root === null || refusal !== null) {
+      ctx.stderr.write(`${refusal}; nothing changed.\n`);
+      return 1;
+    }
+    const current = currentRootCert(storage.root);
+    if (current?.fingerprint256 !== imported.cert.fingerprint256) {
+      caImport = {
+        root: imported,
+        storageRoot: storage.root,
+        replaces: current === null ? null : describeRoot(current),
+      };
+    }
+  }
 
   const changes: Change[] = [];
   let removedBinds: string[] = [];
@@ -1017,6 +1111,17 @@ export async function init(
   ];
   printSection("Checks", checks, paint, ctx);
   const repairs = repairsOf(checks, install);
+  // The trust check above read the old root; the imported root decides the trust step.
+  if (caImport !== null) {
+    const cert = writeTmp(caImport.root.certPem);
+    const trusted = exec("security", ["verify-cert", "-c", cert, "-p", "ssl"], ctx, true);
+    rmSync(cert, { force: true });
+    if (trusted.status === 0) repairs.delete("trust");
+    else repairs.add("trust");
+  }
+  const restartCaddy =
+    imported !== null &&
+    (caImport !== null || checks.some((r) => r.state === "red" && r.label === chainLabel));
   const dnsPlan =
     repairs.has("run-dnsmasq") && dns.dnsmasq !== null ? planDnsmasq(dns.dnsmasq) : null;
   const dropped = loadsConfig(install, repairs, changes)
@@ -1025,6 +1130,8 @@ export async function init(
   const steps = planSteps(
     {
       changes,
+      caImport,
+      restartCaddy,
       install,
       settings,
       removedBinds,
@@ -1098,8 +1205,11 @@ export async function init(
       return 0;
     }
     ctx.stderr.write(
-      "stdin is not a TTY — cannot ask for confirmation; nothing changed. " +
-        "Run interactively, or use --dry-run to inspect the plan.\n",
+      imported === null
+        ? "stdin is not a TTY — cannot ask for confirmation; nothing changed. " +
+            "Run interactively, or use --dry-run to inspect the plan.\n"
+        : "no terminal to ask on — cannot ask for confirmation; nothing changed. " +
+            "Run `init --ca -` in a terminal, or add --dry-run to inspect the plan.\n",
     );
     return 1;
   }
@@ -1136,7 +1246,7 @@ export async function init(
   });
   printSection("Checks after this run", stillRed, paint, ctx);
   ctx.stdout.write(jsonHelp);
-  if (steps.some((s) => s.repair === "trust")) {
+  if (steps.some((s) => s.repair === "trust") || caImport?.replaces) {
     const phoneRoot = join(supportDir(ctx.env), "caddy-root.crt");
     printPhoneSteps(await caRootFile(storageAfter, phoneRoot), ctx);
   }
