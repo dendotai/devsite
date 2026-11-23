@@ -133,7 +133,8 @@ test("a name live on another Mac stops the dev server with the node's error, and
   const exitCode = process.exitCode;
   const { fake } = await start({ name: "web", devSite: { name: "web" } }, 54321);
   const stopExit = process.exitCode;
-  process.exitCode = exitCode;
+  // bun keeps 1 when the code is set back to undefined, so the run would exit 1.
+  process.exitCode = exitCode ?? 0;
   server.close();
   expect(fake.errors).toEqual(["devsite: web.internal runs on Mac mini from ~/Projects/acme-web"]);
   expect(fake.state.closed).toBe(true);
