@@ -1,5 +1,5 @@
 // A machine whose node is stopped passes a request to the main Mac (#110): two real Caddys run devsite's route on scratch ports, a DNS server on loopback stands in for Tailscale's, and a local server for the main Mac's node.
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -11,6 +11,9 @@ import { connect } from "node:tls";
 import { renderNodeRoute } from "../src/commands/init";
 import { serving } from "./serving";
 import { freePort } from "./two-macs";
+
+// Each test starts up to two Caddys.
+setDefaultTimeout(15_000);
 
 const PAGE = "<p>node not running</p>";
 
@@ -61,7 +64,13 @@ async function startCaddy(port: number, to: { node: number; main: number; dns: s
     join(dir, "Caddyfile"),
     `{\nadmin off\nauto_https disable_redirects\nskip_install_trust\nhttps_port ${port}\nstorage file_system ${dir}\n}\n${route}`,
   );
-  const child = spawn("caddy", ["run", "--config", join(dir, "Caddyfile")], { stdio: "ignore" });
+  const child = spawn("caddy", ["run", "--config", join(dir, "Caddyfile")], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let log = "";
+  child.stderr?.on("data", (d) => {
+    log += d;
+  });
   children.push(child);
   for (let i = 0; i < 200; i++) {
     const up = await new Promise<boolean>((resolve) => {
@@ -77,7 +86,7 @@ async function startCaddy(port: number, to: { node: number; main: number; dns: s
     if (up) return child;
     await Bun.sleep(50);
   }
-  throw new Error("Caddy did not start");
+  throw new Error(`Caddy did not start: ${log}`);
 }
 
 function send(
