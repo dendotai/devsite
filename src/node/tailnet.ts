@@ -14,10 +14,12 @@ export type Peer = { mac: string; ip: string };
 export type Tailnet = { ips: string[]; user: number; peers: Peer[] };
 
 // DEVSITE_TAILSCALE names the CLI the node runs, for a stand-in in tests. The Mac App Store and standalone Tailscale apps put no `tailscale` on PATH; their CLI sits inside the app.
+// That CLI, run with no terminal as launchd runs the node, starts the Tailscale GUI and prints no answer; TAILSCALE_BE_CLI=1 makes it act as the CLI.
 function tailscale(args: string[], env: TailnetEnv): Promise<string | null> {
   const run = (cmd: string) =>
     new Promise<{ out: string | null; missing: boolean }>((resolve) => {
-      execFile(cmd, args, { timeout: TAILSCALE_MS }, (err, stdout) => {
+      const cliEnv = { ...process.env, TAILSCALE_BE_CLI: "1" };
+      execFile(cmd, args, { timeout: TAILSCALE_MS, env: cliEnv }, (err, stdout) => {
         resolve({
           out: err ? null : stdout,
           missing: (err as { code?: unknown })?.code === "ENOENT",

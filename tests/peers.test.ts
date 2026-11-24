@@ -1,68 +1,11 @@
-// Nodes on two Macs of one tailnet (#66), as two real nodes on loopback: this Mac's Tailscale IP is 127.0.0.1 and the other Mac's is ::1, both on one peer port, as every Mac uses one fixed port. The fake tailscale gives each node its own `status --json` and `whois --json` answers.
+// Nodes on two Macs of one tailnet (#66): how they find each other, and the start a live name on another Mac refuses. tests/two-macs.ts sets up the two Macs.
 import { expect, test } from "bun:test";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { register, startDevServer, startTestNode, status, useNodes } from "./node-helpers";
+import { freePort, OTHER_MAC, SOMEONE_ELSE, statusJson, THIS_MAC, twoMacs } from "./two-macs";
 
 useNodes();
-
-const ME = 1001;
-const SOMEONE_ELSE = 2002;
-const THIS_MAC = { ip: "127.0.0.1", name: "MacBook Pro" };
-const OTHER_MAC = { ip: "::1", name: "Mac mini" };
-
-type Device = { ip: string; name: string };
-
-function statusJson(self: Device, peers: Array<Device & { os?: string; user?: number }>) {
-  return {
-    BackendState: "Running",
-    Self: { HostName: self.name, OS: "macOS", UserID: ME, TailscaleIPs: [self.ip] },
-    Peer: Object.fromEntries(
-      peers.map((p, i) => [
-        `nodekey:${i}`,
-        {
-          HostName: p.name,
-          OS: p.os ?? "macOS",
-          UserID: p.user ?? ME,
-          TailscaleIPs: [p.ip],
-          Online: true,
-        },
-      ]),
-    ),
-  };
-}
-
-const whois = (user: number) => ({ Node: { User: user }, UserProfile: { ID: user } });
-
-// A port free on both loopback addresses, for the peer port every node shares.
-async function freePort(): Promise<number> {
-  const s = createServer();
-  await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
-  const port = (s.address() as AddressInfo).port;
-  await new Promise((r) => s.close(r));
-  return port;
-}
-
-// This Mac's node and the other Mac's node, each of user ME, each seeing the other as a peer. On loopback a call comes from the address it goes to, so each node's whois answer is keyed by its own address. otherSeesCaller: the user the other Mac's whois names for every caller.
-async function twoMacs(opts: { otherSeesCaller?: number } = {}) {
-  const peerPort = await freePort();
-  const here = await startTestNode(undefined, {
-    peerPort,
-    tailnet: {
-      status: statusJson(THIS_MAC, [OTHER_MAC]),
-      whois: { [THIS_MAC.ip]: whois(ME) },
-    },
-  });
-  const there = await startTestNode(undefined, {
-    peerPort,
-    tailnet: {
-      status: statusJson(OTHER_MAC, [THIS_MAC]),
-      whois: { [OTHER_MAC.ip]: whois(opts.otherSeesCaller ?? ME) },
-    },
-  });
-  return { here, there, peerPort };
-}
 
 test("a start of a name live on another Mac is refused with that Mac and the project's folder there", async () => {
   const { here, there } = await twoMacs();
