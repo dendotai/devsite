@@ -15,7 +15,9 @@ import offlinePage from "../../assets/offline.html" with { type: "text" };
 import pkg from "../../package.json";
 import { NAME_RE } from "../names.mjs";
 import { type PathsEnv, stateFile, userHome } from "../paths";
+import { type MainMacEnv, makeMainMac, type RouteState } from "./main-mac";
 import { makeRelay, RELAYED_HEADER, type RelayEnv, requestHead } from "./relay";
+import { listenForSleep, type SleepEnv } from "./sleep";
 import {
   addressOf,
   askPeer,
@@ -49,6 +51,7 @@ export type Status = {
   projects: Record<string, Project>;
   // Absent from an older node.
   tailnetListeners?: TailnetListener[];
+  route?: RouteState;
 };
 
 type State = { projects: Record<string, Project> };
@@ -181,16 +184,21 @@ const today = () => new Date().toISOString().slice(0, 10);
 export type NodeOptions = {
   port: number;
   peerPort?: number;
-  env: PathsEnv & TailnetEnv & RelayEnv & { DEVSITE_TAILNET_REFRESH_MS?: string };
+  env: PathsEnv &
+    TailnetEnv &
+    RelayEnv &
+    MainMacEnv &
+    SleepEnv & { DEVSITE_TAILNET_REFRESH_MS?: string };
 };
 
 // How often the node reads its Tailscale IPs again and retries a taken port, as Tailscale can start after the node or get a new IP. DEVSITE_TAILNET_REFRESH_MS shortens it in tests.
 export const TAILNET_REFRESH_MS = 10_000;
 
-// The states askPeer names (src/node/tailnet.ts), with same-protocol for a node that answered.
-export type PeerState =
-  | { mac: string; state: "same-protocol" | "denied" | "refused" | "timeout" | "not-a-node" }
-  | { mac: string; state: "other-protocol"; protocol: number | null };
+// The states askPeer names (src/node/tailnet.ts), with same-protocol for a node that answered. ip is absent from an older node.
+export type PeerState = { mac: string; ip?: string } & (
+  | { state: "same-protocol" | "denied" | "refused" | "timeout" | "not-a-node" }
+  | { state: "other-protocol"; protocol: number | null }
+);
 
 // What a node tells another node about one of its projects; folder starts with `~` for a path in its home. project and lastUsed are absent from an older node.
 type PeerProject = { folder: string; live: boolean; project?: string; lastUsed?: string };
@@ -225,6 +233,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
   // The last tailnet read, for the check on each call from another node.
   let tailnet: Tailnet | null = null;
   const peerServers = new Map<string, Server>();
+  const mainMac = makeMainMac({ env, tailnet: () => tailnet, peersAt: () => peersAt });
   // A bind that fails is logged once per IP, as each refresh tries it again; the code stays for `GET /status`.
   const failedIps = new Map<string, string>();
 
@@ -416,6 +425,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
         const error = failedIps.get(ip);
         return error === undefined ? { address } : { address, error };
       }),
+      route: mainMac.state(),
     };
     sendJson(res, 200, body);
   };
@@ -426,10 +436,11 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       (tailnet?.peers ?? []).map(async (peer: Peer): Promise<PeerState> => {
         const answer = await askPeer(peer, peersAt, "/hello");
         if (answer.state === "other-protocol") {
-          return { mac: peer.mac, state: "other-protocol", protocol: answer.protocol };
+          return { mac: peer.mac, ip: peer.ip, state: "other-protocol", protocol: answer.protocol };
         }
         return {
           mac: peer.mac,
+          ip: peer.ip,
           state: answer.state === "answer" ? "same-protocol" : answer.state,
         };
       }),
@@ -442,6 +453,10 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     const name = parts[1]?.toLowerCase();
     if (req.method === "GET" && url.pathname === "/status") return status(res);
     if (req.method === "GET" && url.pathname === "/peers") return peers(res);
+    // init calls it once it stored the OAuth client secret, so the node reads the route at once.
+    if (req.method === "POST" && url.pathname === "/route") {
+      return sendJson(res, 200, await mainMac.settleNow());
+    }
     // Caddy asks here before it signs a certificate for a name at its first TLS handshake, so a LAN host cannot make it sign one per name it sends.
     if (req.method === "GET" && url.pathname === "/tls-allowed") {
       // A name another Mac knows passes too: the phone reaches every Mac's projects through the main Mac.
@@ -541,7 +556,10 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       return sendJson(res, 400, { error: `this node speaks protocol ${PROTOCOL}` });
     }
     const { url, parts } = routeOf(req);
-    if (req.method === "GET" && url.pathname === "/hello") return sendJson(res, 200, {});
+    if (req.method === "GET" && url.pathname === "/hello") {
+      return sendJson(res, 200, { routeWriter: await mainMac.canWrite() });
+    }
+    if (req.method === "GET" && url.pathname === "/signals") return mainMac.serveSignals(req, res);
     const name = parts[1]?.toLowerCase();
     if (
       req.method === "GET" &&
@@ -599,11 +617,14 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
           failedIps.set(ip, String((err as NodeJS.ErrnoException).code ?? "error"));
         }
       }
+      // After the listen, so another node's vote reaches this one.
+      mainMac.tick();
     } finally {
       refreshing = false;
     }
   };
   await refresh();
+  const sleepListener = listenForSleep(env, { sleep: mainMac.sleep, wake: mainMac.wake });
   const timer = setInterval(refresh, Number(env.DEVSITE_TAILNET_REFRESH_MS) || TAILNET_REFRESH_MS);
   timer.unref();
 
@@ -611,6 +632,8 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     port: boundPort,
     close: async () => {
       clearInterval(timer);
+      sleepListener.close();
+      await mainMac.close();
       for (const s of peerServers.values()) stopServer(s);
       await new Promise<void>((resolve) => {
         for (const s of tunnels) s.destroy();

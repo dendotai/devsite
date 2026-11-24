@@ -11,7 +11,8 @@ const PEER_MS = 1500;
 const TAILSCALE_MS = 3000;
 
 export type Peer = { mac: string; ip: string };
-export type Tailnet = { ips: string[]; user: number; peers: Peer[] };
+// name: this Mac's Tailscale device name. macs: every other Mac of this user; peers: those Tailscale lists as online.
+export type Tailnet = { ips: string[]; name: string; user: number; macs: Peer[]; peers: Peer[] };
 
 // DEVSITE_TAILSCALE names the CLI the node runs, for a stand-in in tests. The Mac App Store and standalone Tailscale apps put no `tailscale` on PATH; their CLI sits inside the app.
 // That CLI, run with no terminal as launchd runs the node, starts the Tailscale GUI and prints no answer; TAILSCALE_BE_CLI=1 makes it act as the CLI.
@@ -47,7 +48,7 @@ const ipsOf = (d: Device) =>
     ? d.TailscaleIPs.filter((a): a is string => typeof a === "string")
     : [];
 
-// This Mac's Tailscale IPs and user, and the Macs of the same user that Tailscale lists as online: a phone runs no node, and Tailscale's own online flag spares a wait on a Mac that sleeps. null when Tailscale is not running.
+// This Mac's Tailscale IPs and user, and the other Macs of the same user: a phone runs no node. A request asks only those Tailscale lists as online, which spares a wait on a Mac that sleeps; the takeover vote asks every Mac. null when Tailscale is not running.
 export async function readTailnet(env: TailnetEnv): Promise<Tailnet | null> {
   const out = await tailscale(["status", "--json"], env);
   if (out === null) return null;
@@ -59,13 +60,17 @@ export async function readTailnet(env: TailnetEnv): Promise<Tailnet | null> {
   }
   const user = s.Self?.UserID;
   if (s.BackendState !== "Running" || s.Self === undefined || typeof user !== "number") return null;
-  const peers = Object.values(s.Peer ?? {}).flatMap((d): Peer[] => {
-    if (d.OS !== "macOS" || d.UserID !== user || d.Online === false) return [];
+  const peerOf = (d: Device): Peer[] => {
+    if (d.OS !== "macOS" || d.UserID !== user) return [];
     const ips = ipsOf(d);
     const ip = ips.find((a) => IPV4.test(a)) ?? ips[0];
     return ip !== undefined && typeof d.HostName === "string" ? [{ mac: d.HostName, ip }] : [];
-  });
-  return { ips: ipsOf(s.Self), user, peers };
+  };
+  const devices = Object.values(s.Peer ?? {});
+  const macs = devices.flatMap(peerOf);
+  const peers = devices.filter((d) => d.Online !== false).flatMap(peerOf);
+  const name = typeof s.Self.HostName === "string" ? s.Self.HostName : "";
+  return { ips: ipsOf(s.Self), name, user, macs, peers };
 }
 
 // The Tailscale user who owns a tailnet IP; null for an address outside the tailnet.

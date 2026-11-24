@@ -139,7 +139,8 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   printSection("Caddy", caddyResults, paint, ctx);
   results.push(...caddyResults);
 
-  const tailscale = probeTailscale(dns.tailscale, ctx);
+  const peerStates = node.ok ? await readPeers() : [];
+  const tailscale = probeTailscale(dns.tailscale, peerStates, ctx);
   if (tailscale.checks.length > 0) {
     printSection("Tailscale", tailscale.checks, paint, ctx);
     results.push(...tailscale.checks);
@@ -150,7 +151,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   }
   const listener = node.ok ? node.status.tailnetListeners?.[0]?.address : undefined;
   const peerPort = listener === undefined ? NODE_PORT : portOf(listener);
-  const peers = node.ok ? peerChecks(await readPeers(), peerPort) : [];
+  const peers = node.ok ? peerChecks(peerStates, peerPort) : [];
   if (peers.length > 0) {
     printSection("Other Macs", peers, paint, ctx);
     results.push(...peers);

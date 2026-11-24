@@ -1,0 +1,8 @@
+#!/bin/sh
+# A stand-in for macOS's `security`, for the node's read of the Tailscale OAuth client secret: it prints the secret a test wrote into $DEVSITE_FAKE_SECURITY/secret, and fails as a Keychain with no such item does.
+f="$DEVSITE_FAKE_SECURITY/secret"
+if [ "$1" = find-generic-password ] && [ -f "$f" ]; then
+  exec cat "$f"
+fi
+echo "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." >&2
+exit 44

@@ -23,3 +23,16 @@ process.env.DEVSITE_FAKE_TAILSCALE = mkdtempSync(join(tmpdir(), "devsite-tailnet
 
 // A node tries a taken peer port again at each refresh; a short one lets a test see it take the port once freed.
 process.env.DEVSITE_TAILNET_REFRESH_MS = "200";
+
+// The node reads the Tailscale OAuth client secret from the login Keychain; this stand-in answers from a folder a test fills, and an empty one means no secret. The closed port keeps every suite off Tailscale's real API.
+process.env.DEVSITE_SECURITY = join(import.meta.dir, "bin", "security");
+process.env.DEVSITE_FAKE_SECURITY = mkdtempSync(join(tmpdir(), "devsite-keychain-none-"));
+process.env.DEVSITE_TAILSCALE_API = "http://127.0.0.1:9";
+
+// The node hears macOS sleep from a listener process; this stand-in prints what a test writes, so no suite starts the real one or hears this Mac sleep.
+process.env.DEVSITE_SLEEP_LISTENER = join(import.meta.dir, "bin", "sleep-listener");
+process.env.DEVSITE_FAKE_SLEEP = mkdtempSync(join(tmpdir(), "devsite-sleep-none-"));
+
+// Before a node takes the route it asks this Mac's dnsmasq and Caddy; closed ports keep every suite off the real ones. Suites that need a Mac that serves names re-point both (tests/serving.ts).
+process.env.DEVSITE_DNSMASQ_AT = "127.0.0.1:9";
+process.env.DEVSITE_CADDY_AT = "127.0.0.1:9";

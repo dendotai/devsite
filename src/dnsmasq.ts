@@ -6,11 +6,11 @@ import type { CliContext } from "./context";
 import { brewPrefix } from "./install";
 import { exec, type RootCommand, xml } from "./io";
 import { type Settings, settingsPath } from "./settings";
-import { type TailscaleIp, tailscaleIp } from "./tailscale";
+import { readSplitDns, type TailscaleIp, tailscaleIp } from "./tailscale";
 
 const LABEL = "ai.den.devsite.dnsmasq";
 // Any name answers: devsite's config answers every `.internal` name.
-const PROBE_NAME = "devsite-check.internal";
+export const PROBE_NAME = "devsite-check.internal";
 
 // about: what the file is, the line init prints in place of its diff, since devsite writes it whole.
 type DnsFile = { abs: string; about: string; current: string | null; next: string };
@@ -244,21 +244,23 @@ function answerCheck(d: Dnsmasq, answer: string | null, manual: string | null): 
   };
 }
 
-// With Tailscale on, the Mac asks through the split DNS route, which reaches the dnsmasq above: with no reply there, the lookup could only time out.
+// With Tailscale on, the Mac asks through the split DNS route, which reaches the main Mac's dnsmasq, and it answers with its own IP: this Mac's IP when this Mac is the main Mac. With no reply from the dnsmasq above, this Mac's lookup could only time out.
 function macCheck(d: Dnsmasq, answer: string | null, ctx: CliContext): Result {
-  const label = `this Mac resolves .internal to ${d.ip}`;
+  const split = readSplitDns(d.ip, ctx);
+  const main = split.state === "elsewhere" && split.ips.length === 1 ? split.ips[0] : d.ip;
+  const label = `this Mac resolves .internal to ${main}`;
   if (answer === null) {
     return { state: "skipped", label, detail: `nothing answers on ${d.ip} yet` };
   }
   const mac = macAnswer(ctx);
-  if (mac === d.ip) return { state: "green", label };
+  if (mac === main) return { state: "green", label };
   return {
     state: "red",
     label,
     detail: mac === null ? "no answer" : `resolves to ${mac}`,
     fix:
       answer === d.ip
-        ? `add a split DNS nameserver in the Tailscale admin console (https://login.tailscale.com/admin/dns): domain internal, nameserver ${d.ip}`
+        ? "the Tailscale split DNS route decides where this Mac asks: see the Tailscale checks"
         : "see the dnsmasq check above",
   };
 }

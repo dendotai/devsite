@@ -43,6 +43,9 @@ const GLOBAL_FLAGS: Record<string, FlagDef> = {
   },
 };
 
+// Wider than `  --tailscale-secret`, the longest name in the help.
+const HELP_COLUMN = 22;
+
 const COMMANDS: Record<string, Command> = {
   init: {
     summary: [
@@ -59,12 +62,18 @@ const COMMANDS: Record<string, Command> = {
         type: "string",
         help: "- reads a CA root from stdin (`devsite ca export` on another Mac) into Caddy.",
       },
+      "tailscale-secret": {
+        type: "string",
+        help: "- reads a Tailscale OAuth client secret (dns scope) from stdin into the login Keychain.",
+      },
     },
     run: (values, ctx) =>
       init(
         {
           dryRun: values["dry-run"] === true,
           ca: typeof values.ca === "string" ? values.ca : undefined,
+          tailscaleSecret:
+            typeof values["tailscale-secret"] === "string" ? values["tailscale-secret"] : undefined,
         },
         ctx,
       ),
@@ -123,14 +132,14 @@ function toParseArgsOptions(flags: Record<string, FlagDef>) {
 
 function flagLine(name: string, f: FlagDef): string {
   const invocation = `${f.short ? `-${f.short}, ` : ""}--${name}`;
-  return `  ${invocation.padEnd(14)}${f.help}`;
+  return `  ${invocation.padEnd(HELP_COLUMN)}${f.help}`;
 }
 
 function usage(): string {
   const lines = ["Usage: devsite <command> [flags]", "", "Commands:"];
   for (const [name, cmd] of Object.entries(COMMANDS)) {
-    lines.push(`  ${name.padEnd(14)}${cmd.summary[0] ?? ""}`);
-    for (const s of cmd.summary.slice(1)) lines.push(`  ${" ".repeat(14)}${s}`);
+    lines.push(`  ${name.padEnd(HELP_COLUMN)}${cmd.summary[0] ?? ""}`);
+    for (const s of cmd.summary.slice(1)) lines.push(`  ${" ".repeat(HELP_COLUMN)}${s}`);
     for (const [flagName, f] of Object.entries(cmd.flags)) {
       lines.push(`  ${flagLine(flagName, f)}`);
     }

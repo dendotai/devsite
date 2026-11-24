@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { startTestNode } from "./node-helpers";
 
-const ME = 1001;
+export const ME = 1001;
 export const SOMEONE_ELSE = 2002;
 export const THIS_MAC = { ip: "127.0.0.1", name: "MacBook Pro" };
 export const OTHER_MAC = { ip: "::1", name: "Mac mini" };

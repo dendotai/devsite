@@ -84,17 +84,17 @@ test("a Mac whose node speaks another protocol is listed with that protocol", as
       res.end();
     }),
   );
-  expect(list).toEqual([{ mac: "Mac mini", state: "other-protocol", protocol: 2 }]);
+  expect(list).toEqual([{ mac: "Mac mini", ip: "::1", state: "other-protocol", protocol: 2 }]);
 });
 
 test("a Mac with nothing on the peer port is listed as refused: no devsite, or its node stopped", async () => {
-  expect(await listedAs()).toEqual([{ mac: "Mac mini", state: "refused" }]);
+  expect(await listedAs()).toEqual([{ mac: "Mac mini", ip: "::1", state: "refused" }]);
 });
 
 test("a Mac that never replies is listed as timeout: it sleeps, is off, or drops the call", async () => {
   // Accepts the connection and sends nothing, as a dropped packet gives no reply.
   expect(await listedAs((s) => s.on("request", () => {}))).toEqual([
-    { mac: "Mac mini", state: "timeout" },
+    { mac: "Mac mini", ip: "::1", state: "timeout" },
   ]);
 });
 
@@ -104,7 +104,7 @@ test("a Mac where another program holds the peer port is listed as not-a-node", 
       res.end("hello");
     }),
   );
-  expect(list).toEqual([{ mac: "Mac mini", state: "not-a-node" }]);
+  expect(list).toEqual([{ mac: "Mac mini", ip: "::1", state: "not-a-node" }]);
 });
 
 test("a peer port taken on this Mac shows in the node's status, and the node takes it once it is free", async () => {
