@@ -123,7 +123,7 @@ function storagePinLines(root: string): string[] {
 }
 
 // Caddy signs a certificate for a devsite name at its first TLS handshake (`on_demand` in the route); it asks the node first, so a LAN host cannot make it sign one per name it sends.
-// Caddy reads it on every Mac: to-main on the pass through the Caddy's own route, passed on the request the main Mac gets, which is never passed again.
+// Caddy reads it on every machine: to-main on the pass through the Caddy's own route, passed on the request the main Mac gets, which is never passed again.
 const PASS_HEADER = "Devsite-Pass";
 
 const ASK_URL = `http://127.0.0.1:${NODE_PORT}/tls-allowed`;
@@ -177,8 +177,8 @@ function heredocLines(page: string, indent: string): string[] {
     .map((line) => (line === "" ? "" : `${indent}${line}`));
 }
 
-// Caddy's one route for every devsite name: the LAN guard, then the node; when the node does not answer, Caddy passes the request to the main Mac or answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile. The page closes the connection: a browser keeps an open one whatever the DNS now says, so a phone would stay on this Mac after another one took over (#110). Caddy closes HTTP/1.1 and HTTP/2 on that header but not HTTP/3, so Alt-Svc tells browsers not to use HTTP/3 for these names.
-// A phone keeps the old DNS answer for up to about 20 s, so a Mac whose node refused the connection passes the request to the Mac Tailscale's DNS names. The pass goes through this Caddy's own route (Devsite-Pass: to-main), because an error inside handle_errors shows no page. A request that may have run is not passed: Caddy itself sends only a safe one (a GET) to the node again, and passes it when that try is refused. A passed answer keeps the connection open, because Chrome loses modules of a page when each answer closes it.
+// Caddy's one route for every devsite name: the LAN guard, then the node; when the node does not answer, Caddy passes the request to the main Mac or answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile. The page closes the connection: a browser keeps an open one whatever the DNS now says, so a phone would stay on this machine after another one took over (#110). Caddy closes HTTP/1.1 and HTTP/2 on that header but not HTTP/3, so Alt-Svc tells browsers not to use HTTP/3 for these names.
+// A phone keeps the old DNS answer for up to about 20 s, so a machine whose node refused the connection passes the request to the machine Tailscale's DNS names. The pass goes through this Caddy's own route (Devsite-Pass: to-main), because an error inside handle_errors shows no page. A request that may have run is not passed: Caddy itself sends only a safe one (a GET) to the node again, and passes it when that try is refused. A passed answer keeps the connection open, because Chrome loses modules of a page when each answer closes it.
 export function renderNodeRoute(page: string | null = nodeDownPage as unknown as string): string {
   const down =
     page === null

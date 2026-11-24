@@ -1,4 +1,4 @@
-// A Mac whose node is stopped passes a request to the main Mac (#110): two real Caddys run devsite's route on scratch ports, a DNS server on loopback stands in for Tailscale's, and a local server for the main Mac's node.
+// A machine whose node is stopped passes a request to the main Mac (#110): two real Caddys run devsite's route on scratch ports, a DNS server on loopback stands in for Tailscale's, and a local server for the main Mac's node.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -127,7 +127,7 @@ test("a request goes to the main Mac with its body and host, and the connection 
   expect(seen).toEqual([{ method: "POST", host: "web.internal", body: "hello" }]);
 });
 
-test("a request another Mac's node relayed gets the page", async () => {
+test("a request another machine's node relayed gets the page", async () => {
   const { old } = await twoCaddys();
   expect(await send(old, { headers: { "devsite-relayed": "1" } })).toMatchObject({
     status: 502,
@@ -146,7 +146,7 @@ test("the main Mac's Caddy refuses the connection: the page", async () => {
   expect(await send(old)).toEqual({ status: 502, connection: "close", body: PAGE });
 });
 
-test("Tailscale's DNS names this Mac itself, or gives no answer: the page", async () => {
+test("Tailscale's DNS names this machine itself, or gives no answer: the page", async () => {
   const self = await freePort();
   const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT ?? "";
   await startCaddy(self, { node: deadPort, main: self, dns });
@@ -156,7 +156,7 @@ test("Tailscale's DNS names this Mac itself, or gives no answer: the page", asyn
   expect(await send(noDns)).toMatchObject({ status: 502, body: PAGE });
 });
 
-test("a *.localhost name belongs to this Mac: the page", async () => {
+test("a *.localhost name belongs to this machine: the page", async () => {
   const { old } = await twoCaddys();
   expect(await send(old, { host: "web.localhost" })).toMatchObject({ status: 502, body: PAGE });
   expect(seen).toEqual([]);
