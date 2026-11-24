@@ -264,24 +264,46 @@ async function readKey(question: string, ctx: CliContext): Promise<string> {
   return key;
 }
 
+const LAYOUT_HINT =
+  "Press y or n. A non-Latin layout types another letter, so switch to a Latin layout.";
+
+// y or n, read through the layout map, so the Y key answers on any layout; enter only when Enter has a meaning. Any other key asks again.
+async function readAnswer(
+  question: string,
+  ctx: CliContext,
+  enterAnswers: boolean,
+): Promise<"y" | "n" | "enter" | "stop"> {
+  // The lookup runs while the question waits for a key: its cold start is about a second.
+  const letters = ctx.latinLetters();
+  for (;;) {
+    const key = await readKey(question, ctx);
+    if (key.startsWith(CTRL_C)) return "stop";
+    if (enterAnswers && /^[\r\n]/.test(key)) return "enter";
+    const typed = ([...key][0] ?? "").toLowerCase();
+    const letter = (await letters).get(typed) ?? typed;
+    if (letter === "y" || letter === "n") return letter;
+    ctx.stdout.write(`\n${LAYOUT_HINT}\n`);
+  }
+}
+
 // Ctrl-C reads as "stop".
 async function confirm(question: string, ctx: CliContext): Promise<boolean> {
   // Y is the default, as in apt: Enter applies too.
-  const yes = /^(y|\r|\n)/i.test(await readKey(question, ctx));
+  const answer = await readAnswer(question, ctx, true);
+  const yes = answer === "y" || answer === "enter";
   ctx.stdout.write(`${yes ? "y" : "n"}\n`);
   return yes;
 }
 
-// A (y/n) prompt has no default: only y is a yes. null for Ctrl-C.
+// A (y/n) prompt has no default. null for Ctrl-C.
 async function yesNo(question: string, ctx: CliContext): Promise<boolean | null> {
-  const key = await readKey(question, ctx);
-  if (key.startsWith(CTRL_C)) {
+  const answer = await readAnswer(question, ctx, false);
+  if (answer === "stop") {
     ctx.stdout.write("^C\n");
     return null;
   }
-  const yes = /^y/i.test(key);
-  ctx.stdout.write(`${yes ? "y" : "n"}\n`);
-  return yes;
+  ctx.stdout.write(`${answer}\n`);
+  return answer === "y";
 }
 
 // Runs the command where the user sees it, sharing the terminal (a sudo password prompt needs it); a failure stops init.

@@ -64,6 +64,7 @@ async function init(
     stdin?: CliContext["stdin"];
     node?: false;
     env?: CliContext["env"];
+    latinLetters?: Record<string, string>;
   } = {},
 ) {
   if (opts.node !== false) await useNodeWith({ web: {} });
@@ -74,6 +75,7 @@ async function init(
     runCommand,
     stdin: opts.stdin ?? fakeStdin("y", true),
     env: opts.env,
+    latinLetters: opts.latinLetters,
   });
   const ran = calls.filter((c) => c.cmd !== "diff").map((c) => [c.cmd, ...c.args].join(" "));
   // The commands that act on Caddy, the keychain, or the node, in the order they ran.
@@ -332,6 +334,50 @@ test("Enter answers the prompt with its default, Y: the plan runs", async () => 
   await mockAdmin([nodeRoute()]);
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
   const r = await init(m.caddyfile, { answers: { trusted: false }, stdin: fakeStdin("\r", true) });
+  expect(r.stdout).toContain("Apply these changes? [Y/n] y");
+  expect(r.ran.filter((c) => c.startsWith("sudo"))).toHaveLength(1);
+  expect(r.status).toBe(0);
+});
+
+const RUSSIAN = { н: "y", т: "n" };
+
+test("on a Russian layout the Y key answers yes: the plan runs", async () => {
+  await mockAdmin([nodeRoute()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const r = await init(m.caddyfile, {
+    answers: { trusted: false },
+    stdin: fakeStdin("н", true),
+    latinLetters: RUSSIAN,
+  });
+  expect(r.stdout).toContain("Apply these changes? [Y/n] y");
+  expect(r.ran.filter((c) => c.startsWith("sudo"))).toHaveLength(1);
+  expect(r.status).toBe(0);
+});
+
+test("on a Russian layout the N key answers no: nothing runs", async () => {
+  await mockAdmin([nodeRoute()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const r = await init(m.caddyfile, {
+    answers: { trusted: false },
+    stdin: fakeStdin("т", true),
+    latinLetters: RUSSIAN,
+  });
+  expect(r.stdout).toContain("Apply these changes? [Y/n] n");
+  expect(r.ran.filter((c) => c.startsWith("sudo"))).toHaveLength(0);
+  expect(r.status).toBe(1);
+});
+
+test("a key that is neither y nor n asks again, with a hint on the layout", async () => {
+  await mockAdmin([nodeRoute()]);
+  const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE });
+  const r = await init(m.caddyfile, {
+    answers: { trusted: false },
+    stdin: fakeStdin(["ж", "y"], true),
+  });
+  expect(r.stdout).toContain(
+    "Press y or n. A non-Latin layout types another letter, so switch to a Latin layout.",
+  );
+  expect(r.stdout.match(/Apply these changes\? \[Y\/n\]/g)).toHaveLength(2);
   expect(r.stdout).toContain("Apply these changes? [Y/n] y");
   expect(r.ran.filter((c) => c.startsWith("sudo"))).toHaveLength(1);
   expect(r.status).toBe(0);

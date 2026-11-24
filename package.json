@@ -58,7 +58,7 @@
     "src"
   ],
   "scripts": {
-    "build": "bun build src/cli.ts --outdir dist --target=node --banner '#!/usr/bin/env node'",
+    "build": "bun build src/cli.ts --outdir dist --target=node --external koffi --banner '#!/usr/bin/env node'",
     "prepack": "bun run build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
@@ -80,5 +80,8 @@
     "@types/bun": "^1.2.21",
     "typescript": "^5.9.2",
     "vite": "^8.0.10"
+  },
+  "dependencies": {
+    "koffi": "^3.3.8"
   }
 }
