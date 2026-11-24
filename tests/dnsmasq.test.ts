@@ -593,6 +593,22 @@ test("a failed check asks again, and a skip leaves init exit 0 and doctor exit 1
   expect(d.status).toBe(1);
 });
 
+test("a key that is neither y nor n at the open prompt asks again, with a hint on the layout", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const r = await devsite(
+    ["init"],
+    m,
+    { ...SET_UP, route: [], routeAfterOpen: [IP] },
+    { keys: ["ж", "y", "y"] },
+  );
+  expect(r.stdout).toContain(
+    "Press y or n. A non-Latin layout types another letter, so switch to a Latin layout.",
+  );
+  expect(r.stdout.match(/in your browser\? \(y\/n\)/g)).toHaveLength(2);
+  expect(r.ran).toContain(`open ${ADMIN}`);
+  expect(r.status).toBe(0);
+});
+
 test("Ctrl-C at the open prompt skips the step", async () => {
   const m = await setUp({ dnsmasq: true, files: IP });
   const r = await devsite(["init"], m, { ...SET_UP, route: [] }, { keys: ["\x03"] });

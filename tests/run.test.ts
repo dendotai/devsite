@@ -142,7 +142,7 @@ test("a non-TTY run with a pending diff refuses and writes nothing", async () =>
 test("one key answers the prompt, with no Enter: the terminal is in raw mode while it waits", async () => {
   const caddyfile = scratchCaddyfile();
   const raw: boolean[] = [];
-  const stdin = Object.assign(fakeStdin("x", true), {
+  const stdin = Object.assign(fakeStdin("n", true), {
     setRawMode(on: boolean) {
       raw.push(on);
     },

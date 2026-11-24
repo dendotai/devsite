@@ -42,6 +42,8 @@ export type IoOpts = {
   terminal?: CliContext["stdin"] | null;
   runCommand?: CliContext["runCommand"];
   env?: CliContext["env"];
+  // The layout map a prompt reads: each letter the current layout types, to the Latin letter of the same key.
+  latinLetters?: Record<string, string>;
 };
 
 // A CliContext over in-memory io. The env holds only the scratch prefix and the home tests/setup.ts points at, so an ambient DEVSITE_UID can never leak in.
@@ -61,6 +63,7 @@ export function makeIo(opts: IoOpts = {}) {
       ...opts.env,
     },
     runCommand: opts.runCommand ?? quietRunner().runCommand,
+    latinLetters: async () => new Map(Object.entries(opts.latinLetters ?? {})),
   };
   return { ctx, stdout, stderr };
 }

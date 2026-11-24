@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { openSync } from "node:fs";
 import { ReadStream } from "node:tty";
+import { latinLettersOfThisMac } from "./keyboard-layout";
 
 export type Writer = { write(chunk: string): unknown };
 
@@ -35,6 +36,8 @@ export type CliContext = {
   };
   // Every external command the CLI runs goes through here, so a test scripts each answer and reads which commands ran.
   runCommand: CommandRunner;
+  // Each letter the current keyboard layout types, to the Latin letter of the same key (`н` → `y` on Russian); a one-key prompt reads it.
+  latinLetters: () => Promise<Map<string, string>>;
 };
 
 export const processRunner: CommandRunner = (cmd, args, { capture, timeoutMs }) => {
@@ -55,6 +58,7 @@ export function processContext(): CliContext {
     cwd: process.cwd(),
     env: process.env,
     runCommand: processRunner,
+    latinLetters: latinLettersOfThisMac,
   };
 }
 
