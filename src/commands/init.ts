@@ -56,6 +56,7 @@ import {
 import { SECRET_RE, storeSecret } from "../keychain";
 import { installNode, readNode, readPeers } from "../node/install";
 import type { RouteState } from "../node/main-mac";
+import { RELAYED_HEADER } from "../node/relay";
 import { nodeLog, supportDir } from "../paths";
 import { readSettings, type Settings, settingsPath } from "../settings";
 import { caRootFile, findStorage, rootCrtIn } from "../storage";
@@ -122,6 +123,9 @@ function storagePinLines(root: string): string[] {
 }
 
 // Caddy signs a certificate for a devsite name at its first TLS handshake (`on_demand` in the route); it asks the node first, so a LAN host cannot make it sign one per name it sends.
+// Caddy reads it on every Mac: to-main on the pass through the Caddy's own route, passed on the request the main Mac gets, which is never passed again.
+const PASS_HEADER = "Devsite-Pass";
+
 const ASK_URL = `http://127.0.0.1:${NODE_PORT}/tls-allowed`;
 const ASK_BLOCK_RE = /^[ \t]*on_demand_tls \{[\s\S]*?^[ \t]*\}\n?/m;
 function askLines(): string[] {
@@ -173,7 +177,8 @@ function heredocLines(page: string, indent: string): string[] {
     .map((line) => (line === "" ? "" : `${indent}${line}`));
 }
 
-// Caddy's one route for every devsite name: the LAN guard, then the node; a 502 means the node does not answer, and Caddy answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile. The 502 closes the connection: a browser keeps an open one whatever the DNS now says, so a phone would stay on this Mac after another one took over (#110). Caddy closes HTTP/1.1 and HTTP/2 on that header but not HTTP/3, so Alt-Svc tells browsers not to use HTTP/3 for these names.
+// Caddy's one route for every devsite name: the LAN guard, then the node; when the node does not answer, Caddy passes the request to the main Mac or answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile. The page closes the connection: a browser keeps an open one whatever the DNS now says, so a phone would stay on this Mac after another one took over (#110). Caddy closes HTTP/1.1 and HTTP/2 on that header but not HTTP/3, so Alt-Svc tells browsers not to use HTTP/3 for these names.
+// A phone keeps the old DNS answer for up to about 20 s, so a Mac whose node refused the connection passes the request to the Mac Tailscale's DNS names. The pass goes through this Caddy's own route (Devsite-Pass: to-main), because an error inside handle_errors shows no page. A request that may have run is not passed: Caddy itself sends only a safe one (a GET) to the node again, and passes it when that try is refused. A passed answer keeps the connection open, because Chrome loses modules of a page when each answer closes it.
 export function renderNodeRoute(page: string | null = nodeDownPage as unknown as string): string {
   const down =
     page === null
@@ -205,6 +210,25 @@ export function renderNodeRoute(page: string | null = nodeDownPage as unknown as
     "\t\ton_demand",
     "\t}",
     ...guardCaddyfileLines(),
+    `\t@to-main header ${PASS_HEADER} to-main`,
+    "\treverse_proxy @to-main {",
+    "\t\tdynamic a {",
+    // The dot at the end: with no search domains, a DNS server that never replies costs 10 s, not a minute.
+    "\t\t\tname {host}.",
+    "\t\t\tport 443",
+    "\t\t\tresolvers 100.100.100.100",
+    "\t\t\trefresh 1s",
+    "\t\t\tversions ipv4",
+    "\t\t}",
+    "\t\theader_up Host {host}",
+    `\t\theader_up ${PASS_HEADER} passed`,
+    "\t\ttransport http {",
+    "\t\t\ttls_server_name {host}",
+    "\t\t\tdial_timeout 1500ms",
+    "\t\t\ttls_timeout 1500ms",
+    "\t\t\tresponse_header_timeout 10s",
+    "\t\t}",
+    "\t}",
     // Inside reverse_proxy, because Caddy runs a bare header line before the guard. A 101 goes past it, so a WebSocket still opens.
     `\treverse_proxy 127.0.0.1:${NODE_PORT} {`,
     "\t\t@answer status 2xx 3xx 4xx 5xx",
@@ -213,8 +237,39 @@ export function renderNodeRoute(page: string | null = nodeDownPage as unknown as
     "\t\t\tcopy_response",
     "\t\t}",
     "\t}",
-    "\thandle_errors 502 {",
-    ...down,
+    "\thandle_errors 502 503 504 {",
+    "\t\t@pass {",
+    "\t\t\thost *.internal",
+    `\t\t\tnot header ${PASS_HEADER} *`,
+    `\t\t\tnot header ${RELAYED_HEADER} *`,
+    `\t\t\texpression \`{http.error.message}.startsWith("dial tcp 127.0.0.1:${NODE_PORT}")\``,
+    "\t\t}",
+    "\t\thandle @pass {",
+    "\t\t\treverse_proxy 127.0.0.1:443 {",
+    "\t\t\t\theader_up Host {host}",
+    `\t\t\t\theader_up ${PASS_HEADER} to-main`,
+    "\t\t\t\ttransport http {",
+    "\t\t\t\t\ttls_server_name {host}",
+    "\t\t\t\t\ttls_insecure_skip_verify",
+    "\t\t\t\t}",
+    "\t\t\t\t@down status 502",
+    "\t\t\t\thandle_response @down {",
+    "\t\t\t\t\theader {",
+    "\t\t\t\t\t\t>Alt-Svc clear",
+    "\t\t\t\t\t\t>Connection close",
+    "\t\t\t\t\t}",
+    "\t\t\t\t\tcopy_response",
+    "\t\t\t\t}",
+    "\t\t\t\t@answer status 2xx 3xx 4xx 5xx",
+    "\t\t\t\thandle_response @answer {",
+    "\t\t\t\t\theader >Alt-Svc clear",
+    "\t\t\t\t\tcopy_response",
+    "\t\t\t\t}",
+    "\t\t\t}",
+    "\t\t}",
+    "\t\thandle {",
+    ...down.map((l) => (l === "" ? l : `\t${l}`)),
+    "\t\t}",
     "\t}",
     "}",
     "",

@@ -31,5 +31,8 @@ What the main Mac's node sends every 2 seconds on the open connection from each 
 **Takeover**:
 Another Mac becomes the main Mac when the main Mac is gone.
 
+**Pass**:
+The Caddy of a Mac whose node is stopped sends a request to the main Mac.
+
 **Relay**:
 A node sends a request for a name live on another Mac over HTTPS to the Caddy of that Mac, not to its dev server.
