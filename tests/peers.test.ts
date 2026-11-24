@@ -1,9 +1,14 @@
 // Nodes on two Macs of one tailnet (#66): how they find each other, and the start a live name on another Mac refuses. tests/two-macs.ts sets up the two Macs.
 import { expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { register, startDevServer, startTestNode, status, useNodes } from "./node-helpers";
 import { freePort, OTHER_MAC, SOMEONE_ELSE, statusJson, THIS_MAC, twoMacs } from "./two-macs";
+
+const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
 useNodes();
 
@@ -156,4 +161,33 @@ test("only Macs of this Tailscale user are asked: a phone and another user's Mac
     },
   });
   expect(await (await fetch(`${here.url}/peers`)).json()).toEqual([]);
+});
+
+test("a node takes its first request only once it has read the tailnet, so it knows the other machines", async () => {
+  const answers = mkdtempSync(join(tmpdir(), "devsite-tailnet-"));
+  writeFileSync(join(answers, "status.json"), JSON.stringify(statusJson(THIS_MAC, [])));
+  writeFileSync(join(answers, "delay"), "1");
+  const port = await freePort();
+  const child = spawn(process.execPath, [CLI, "node", "--port", String(port)], {
+    env: {
+      ...process.env,
+      DEVSITE_USER_HOME: mkdtempSync(join(tmpdir(), "devsite-home-")),
+      DEVSITE_FAKE_TAILSCALE: answers,
+      DEVSITE_PEER_PORT: String(await freePort()),
+    },
+    stdio: "ignore",
+  });
+  try {
+    let first: { tailnetListeners?: unknown[] } | null = null;
+    for (let i = 0; i < 400 && first === null; i++) {
+      first = await fetch(`http://127.0.0.1:${port}/status`).then(
+        (r) => r.json() as Promise<{ tailnetListeners?: unknown[] }>,
+        () => null,
+      );
+      if (first === null) await Bun.sleep(10);
+    }
+    expect(first?.tailnetListeners).toHaveLength(1);
+  } finally {
+    child.kill();
+  }
 });

@@ -539,6 +539,8 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     socket.on("error", () => up.destroy());
   });
 
+  // Read before the first request: with no list of the other machines, a name live on one of them would get the offline page.
+  tailnet = await readTailnet(env);
   await listen(server, port, "127.0.0.1");
   const a = server.address();
   if (typeof a === "object" && a !== null) boundPort = a.port;
