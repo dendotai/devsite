@@ -65,8 +65,25 @@ test("one route takes every .internal and .localhost name, and guards it before 
     match: [{ not: [{ remote_ip: { ranges: ["127.0.0.1", "::1", "100.64.0.0/10"] } }] }],
     handle: [{ handler: "static_response", abort: true }],
   });
-  expect(proxy?.handle).toEqual([
+  expect(proxy?.handle).toMatchObject([
     { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:47380" }] },
+  ]);
+});
+
+test("every answer but a WebSocket's 101 tells the browser not to use HTTP/3", () => {
+  const proxy = server(adapt(PAGE)).routes[0]?.handle[0]?.routes[1]?.handle[0];
+  expect(proxy?.handle_response).toEqual([
+    {
+      match: { status_code: [2, 3, 4, 5] },
+      routes: [
+        {
+          handle: [
+            { handler: "headers", response: { deferred: true, set: { "Alt-Svc": ["clear"] } } },
+            { handler: "copy_response" },
+          ],
+        },
+      ],
+    },
   ]);
 });
 
@@ -89,7 +106,12 @@ test("a node that does not answer: Caddy answers the 'node not running' page as 
   expect(handlers[0]).toEqual({
     handler: "headers",
     response: {
-      set: { "Cache-Control": ["no-store"], "Content-Type": ["text/html; charset=utf-8"] },
+      set: {
+        "Alt-Svc": ["clear"],
+        "Cache-Control": ["no-store"],
+        Connection: ["close"],
+        "Content-Type": ["text/html; charset=utf-8"],
+      },
     },
   });
   expect(handlers[1]).toEqual({ handler: "static_response", status_code: 502, body: PAGE });
@@ -116,5 +138,6 @@ test("the JSON printed for a Caddy with no Caddyfile answers in one line of text
   expect(file).toContain(
     '\t\trespond "devsite: the node does not answer — run bunx devsite doctor" 502',
   );
+  expect(file).toContain("\t\t\tConnection close");
   expect(file).not.toContain("<html");
 });

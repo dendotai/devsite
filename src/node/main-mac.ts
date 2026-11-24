@@ -9,6 +9,8 @@ import { askPeer, type Peer, PROTOCOL, PROTOCOL_HEADER, type Tailnet } from "./t
 // The signal interval; 3 missed signals start a takeover. DEVSITE_SIGNAL_MS shortens it in tests.
 export const SIGNAL_MS = 2000;
 const MISSED = 3;
+// How often the main Mac reads the route again, in signal intervals: another Mac may have written it while this one restarted or had no network, and nothing then tells this Mac.
+const RECHECK = 15;
 // A sleep that macOS cancels may send no wake, so the node reads the route again after this long.
 const SLEEP_MS = 60_000;
 const BEAT = "beat\n";
@@ -27,10 +29,10 @@ export type RouteState =
 export type MainMac = {
   // Each tailnet refresh calls it; it reads the route when this node does not know it.
   tick: () => void;
-  // Reads the secret and the route again now, for `init` once it stored the secret.
+  // Reads the secret and the route again now, whatever the state, for `init` once it stored the secret.
   settleNow: () => Promise<RouteState>;
   state: () => RouteState;
-  // Whether this node can take the route, for another node's vote: it holds a secret, and its Mac serves `.internal` names. It reads the Keychain, so a node that just started answers right.
+  // Whether this node can take the route, for another node's vote: it holds a secret that Tailscale's API did not just refuse, and its Mac serves `.internal` names. A node that just started reads the Keychain first, so it answers right.
   canWrite: () => Promise<boolean>;
   // Another node's open connection for signals.
   serveSignals: (req: IncomingMessage, res: ServerResponse) => void;
@@ -45,13 +47,12 @@ type Deps = { env: MainMacEnv; tailnet: () => Tailnet | null; peersAt: () => num
 
 const sameList = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
 
-// The Tailscale device name decides which Mac takes over: the first in this order.
-const byName = (a: { mac: string }, b: { mac: string }) =>
-  a.mac.toLowerCase() < b.mac.toLowerCase()
-    ? -1
-    : a.mac.toLowerCase() > b.mac.toLowerCase()
-      ? 1
-      : 0;
+// The Tailscale device name decides which Mac takes over: the first in this order. Two Macs can have one name; then the IP decides, in an order every node computes alike.
+const byName = (a: Peer, b: Peer) => {
+  const [x, y] = [a.mac.toLowerCase(), b.mac.toLowerCase()];
+  if (x !== y) return x < y ? -1 : 1;
+  return a.ip > b.ip ? -1 : 1;
+};
 
 export const selfIp = (t: Tailnet) => t.ips.find((a) => IPV4.test(a)) ?? t.ips[0];
 
@@ -60,6 +61,8 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
   let state: RouteState = { role: "unknown", why: "the route is not read yet" };
   let secret: string | null = null;
   let api: SplitDnsApi | null = null;
+  // Whether Tailscale's API answered this node's last call.
+  let apiAnswered = true;
   let busy: Promise<void> | null = null;
   // A read of the route that found no main Mac waits this long before the next one, so a node does not call Tailscale's API each signal.
   let nextSettle = 0;
@@ -96,8 +99,15 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
     if (read !== secret) {
       secret = read;
       api = read === null ? null : makeSplitDnsApi(read, env);
+      apiAnswered = true;
     }
     return api;
+  };
+
+  const readRoute = async (a: SplitDnsApi): Promise<string[] | null> => {
+    const route = await a.read();
+    apiAnswered = route !== null;
+    return route;
   };
 
   // Only one read or write of the route runs at a time.
@@ -117,21 +127,22 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
       stopFollowing();
       return set({ role: "no-secret" });
     }
-    const route = await a.read();
+    const route = await readRoute(a);
     if (route === null) return set({ role: "unknown", why: "Tailscale's API gave no answer" });
     applyRoute(route, t);
     if (state.role === "unknown") await elect(null, route, t);
   };
 
-  // Set until a read of the route succeeds, so a read that failed runs again at the next tailnet refresh.
-  let recheckDue = false;
+  let nextRecheck = 0;
 
   const recheck = async () => {
     const t = tailnet();
-    const route = await api?.read();
-    if (t === null || route === null || route === undefined) return;
-    recheckDue = false;
-    applyRoute(route, t);
+    // Set before the read: a follower that leaves during it sets 0, so one more read follows.
+    nextRecheck = Date.now() + RECHECK * signalMs;
+    const route = api === null ? null : await readRoute(api);
+    if (t !== null && route !== null) return applyRoute(route, t);
+    // A read that failed runs again at the next tailnet refresh.
+    nextRecheck = 0;
   };
 
   // A route that names a device Tailscale does not list as a Mac of this user is followed like a Mac: it counts as gone only after missed signals, never by Tailscale's online flag.
@@ -182,10 +193,13 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
             : `${first.mac} takes over the split DNS route`,
       });
     }
-    const now = await api.read();
+    const now = await readRoute(api);
     if (now === null) return set({ role: "unknown", why: "Tailscale's API gave no answer" });
     if (!sameList(now, seen)) return applyRoute(now, t);
+    // This Mac went to sleep during the vote: a Mac that sleeps serves nothing.
+    if (Date.now() < sleepingUntil) return;
     if (!(await api.write(ip))) {
+      apiAnswered = false;
       nextSettle = Date.now() + 2 * signalMs;
       return set({ role: "unknown", why: "Tailscale's API did not take the new route" });
     }
@@ -291,22 +305,26 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
   return {
     tick: () => {
       if (busy !== null || Date.now() < sleepingUntil) return;
-      if (state.role === "main" && recheckDue) return void exclusive(recheck);
-      if (state.role === "main" || state.role === "follower") return;
+      if (state.role === "main") {
+        if (Date.now() >= nextRecheck) void exclusive(recheck);
+        return;
+      }
+      if (state.role === "follower") return;
       if (Date.now() < nextSettle) return;
       void exclusive(settle);
     },
     settleNow: async () => {
       await busy;
       nextSettle = 0;
-      if (state.role !== "main" && state.role !== "follower") await exclusive(settle);
+      await exclusive(settle);
       return state;
     },
     state: () => state,
     canWrite: async () => {
       const t = tailnet();
       const ip = t === null ? undefined : selfIp(t);
-      return ip !== undefined && (await loadApi()) !== null && (await servesNames(ip, env));
+      if (ip === undefined || (api ?? (await loadApi())) === null) return false;
+      return apiAnswered && (await servesNames(ip, env));
     },
     serveSignals: (req, res) => {
       res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
@@ -317,7 +335,7 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
       res.on("close", () => {
         signals.delete(res);
         if (state.role !== "main") return;
-        recheckDue = true;
+        nextRecheck = 0;
         void exclusive(recheck);
       });
     },

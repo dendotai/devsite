@@ -108,7 +108,7 @@ export function splitDnsDetail(split: Exclude<SplitDns, { state: "this-mac" }>):
   }
 }
 
-// The route may name this Mac or another Mac of this user whose node answers: that Mac is the main Mac, and its node relays to every other Mac (#66).
+// The route may name this Mac or another Mac of this user whose node answers, on any protocol: that Mac is the main Mac, and its node relays to every other Mac (#66).
 export function splitDnsCheck(
   ip: string,
   split: SplitDns,
@@ -121,13 +121,13 @@ export function splitDnsCheck(
   }
   const main =
     split.state === "elsewhere" && split.ips.length === 1
-      ? peers.find((p) => p.ip === split.ips[0] && p.state === "same-protocol")
+      ? peers.find((p) => p.ip === split.ips[0] && /-protocol$/.test(p.state))
       : undefined;
   if (main !== undefined) {
     return { state: "green", label: `${SPLIT_DNS_LABEL} (${main.mac}, ${main.ip})` };
   }
   const label = SPLIT_DNS_LABEL;
-  const detail = splitDnsDetail(split as Exclude<SplitDns, { state: "this-mac" }>);
+  const detail = splitDnsDetail(split);
   if (split.state === "unreadable") {
     return {
       state: "red",
@@ -168,46 +168,30 @@ export function secretCheck(ctx: CliContext): Result {
       };
 }
 
-// This Mac's Tailscale IP with the route as Tailscale lists it.
-export type SplitDnsRoute = { ip: string; split: SplitDns };
-
-// route is null with no Tailscale IP.
-export type TailscaleProbe = { route: SplitDnsRoute | null; checks: Result[] };
-
-// A Mac with no Tailscale gets no checks: devsite runs no dnsmasq there. peers: the other Macs' nodes, as this Mac's node reaches them.
-export function probeTailscale(
-  t: TailscaleIp,
-  peers: PeerState[],
-  ctx: CliContext,
-): TailscaleProbe {
+// A Mac with no Tailscale gets none: devsite runs no dnsmasq there. peers: the other Macs' nodes, as this Mac's node reaches them.
+export function tailscaleChecks(t: TailscaleIp, peers: PeerState[], ctx: CliContext): Result[] {
   const upLabel = "Tailscale is up";
-  if (t.state === "absent") return { route: null, checks: [] };
+  if (t.state === "absent") return [];
   if (t.state === "no-ip") {
-    return {
-      route: null,
-      checks: [
-        {
-          state: "red",
-          label: upLabel,
-          detail: "Tailscale is down (no IP)",
-          fix: "start Tailscale and log in",
-        },
-        {
-          state: "skipped",
-          label: SPLIT_DNS_LABEL,
-          detail: "Tailscale is down (no IP)",
-        },
-      ],
-    };
+    return [
+      {
+        state: "red",
+        label: upLabel,
+        detail: "Tailscale is down (no IP)",
+        fix: "start Tailscale and log in",
+      },
+      {
+        state: "skipped",
+        label: SPLIT_DNS_LABEL,
+        detail: "Tailscale is down (no IP)",
+      },
+    ];
   }
   const split = readSplitDns(t.ip, ctx);
   const secret = secretCheck(ctx);
-  return {
-    route: { ip: t.ip, split },
-    checks: [
-      { state: "green", label: `${upLabel}, with IP ${t.ip}` },
-      secret,
-      splitDnsCheck(t.ip, split, peers, secret.state === "green", ctx),
-    ],
-  };
+  return [
+    { state: "green", label: `${upLabel}, with IP ${t.ip}` },
+    secret,
+    splitDnsCheck(t.ip, split, peers, secret.state === "green", ctx),
+  ];
 }

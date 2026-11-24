@@ -181,7 +181,7 @@ Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
 
 ## DNS and certificates
 
-**How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Tailscale split DNS sends every `.internal` lookup on the tailnet to devsite's dnsmasq on this Mac's Tailscale IP, which answers with that IP. The Mac itself resolves `.internal` the same way, through Tailscale's DNS server. With Tailscale off, `.internal` lookups on the Mac fail at once, with no wait for a timeout; `.localhost` always works.
+**How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Tailscale split DNS sends every `.internal` lookup on the tailnet to devsite's dnsmasq on the main Mac's Tailscale IP, which answers with that IP. The Mac itself resolves `.internal` the same way, through Tailscale's DNS server. With Tailscale off, `.internal` lookups on the Mac fail at once, with no wait for a timeout; `.localhost` always works.
 
 **Why does the browser trust the certificate?** Caddy runs a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` adds that CA's root to your keychain and keeps the storage Caddy already uses, so a device that trusted the root once keeps trusting every certificate it issues. Other devices trust the same root file by hand (Step 2.4).
 

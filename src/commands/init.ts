@@ -59,7 +59,7 @@ import type { RouteState } from "../node/main-mac";
 import { nodeLog, supportDir } from "../paths";
 import { readSettings, type Settings, settingsPath } from "../settings";
 import { caRootFile, findStorage, rootCrtIn } from "../storage";
-import { probeTailscale, TRUST_CREDENTIALS_URL } from "../tailscale";
+import { readSplitDns, TRUST_CREDENTIALS_URL, tailscaleChecks } from "../tailscale";
 
 // Shorter than the 7-day intermediate, as Caddy's docs require (168h made each leaf end at the same second as its intermediate); 120h still outlasts a weekend with the Mac asleep.
 const LEAF_LIFETIME = "120h";
@@ -173,15 +173,23 @@ function heredocLines(page: string, indent: string): string[] {
     .map((line) => (line === "" ? "" : `${indent}${line}`));
 }
 
-// Caddy's one route for every devsite name: the LAN guard, then the node; a 502 means the node does not answer, and Caddy answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile.
+// Caddy's one route for every devsite name: the LAN guard, then the node; a 502 means the node does not answer, and Caddy answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile. The 502 closes the connection: a browser keeps an open one whatever the DNS now says, so a phone would stay on this Mac after another one took over (#110). Caddy closes HTTP/1.1 and HTTP/2 on that header but not HTTP/3, so Alt-Svc tells browsers not to use HTTP/3 for these names.
 export function renderNodeRoute(page: string | null = nodeDownPage as unknown as string): string {
   const down =
     page === null
-      ? ['\t\trespond "devsite: the node does not answer — run bunx devsite doctor" 502']
+      ? [
+          "\t\theader {",
+          "\t\t\tAlt-Svc clear",
+          "\t\t\tConnection close",
+          "\t\t}",
+          '\t\trespond "devsite: the node does not answer — run bunx devsite doctor" 502',
+        ]
       : [
           "\t\theader {",
           '\t\t\tContent-Type "text/html; charset=utf-8"',
           "\t\t\tCache-Control no-store",
+          "\t\t\tAlt-Svc clear",
+          "\t\t\tConnection close",
           "\t\t}",
           `\t\trespond <<${HEREDOC_END}`,
           ...heredocLines(page, "\t\t\t"),
@@ -197,7 +205,14 @@ export function renderNodeRoute(page: string | null = nodeDownPage as unknown as
     "\t\ton_demand",
     "\t}",
     ...guardCaddyfileLines(),
-    `\treverse_proxy 127.0.0.1:${NODE_PORT}`,
+    // Inside reverse_proxy, because Caddy runs a bare header line before the guard. A 101 goes past it, so a WebSocket still opens.
+    `\treverse_proxy 127.0.0.1:${NODE_PORT} {`,
+    "\t\t@answer status 2xx 3xx 4xx 5xx",
+    "\t\thandle_response @answer {",
+    "\t\t\theader >Alt-Svc clear",
+    "\t\t\tcopy_response",
+    "\t\t}",
+    "\t}",
     "\thandle_errors 502 {",
     ...down,
     "\t}",
@@ -623,6 +638,8 @@ function dnsmasqSteps(plan: DnsmasqPlan, ctx: CliContext): Step[] {
   return steps;
 }
 
+const ROUTE_WAIT_MS = 10_000;
+
 const SECRET_STEP =
   "store the Tailscale OAuth client secret in the login Keychain, so the node writes the split DNS route";
 
@@ -667,6 +684,14 @@ function secretStep(piped: string | null, ctx: CliContext): Step {
   };
 }
 
+// Tailscale hands a new route to each device within seconds, and the checks at the end of the run read it there.
+async function waitForRoute(ip: string, ctx: CliContext) {
+  const deadline = Date.now() + ROUTE_WAIT_MS;
+  while (readSplitDns(ip, ctx).state !== "this-mac" && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 // The node reads the route as soon as init asks, so init says at once which Mac it names.
 async function reportRoute(ctx: CliContext) {
   let route: RouteState;
@@ -679,6 +704,7 @@ async function reportRoute(ctx: CliContext) {
   }
   switch (route.role) {
     case "main":
+      await waitForRoute(route.ip, ctx);
       ctx.stdout.write(`  The split DNS route for .internal names this Mac (${route.ip}).\n`);
       return;
     case "follower": {
@@ -702,7 +728,7 @@ async function reportRoute(ctx: CliContext) {
   }
 }
 
-// A line typed with nothing shown, as a password prompt reads it; null for Ctrl-C.
+// A line typed with nothing shown, as a password prompt reads it; null for Ctrl-C or the end of the input.
 async function readHidden(question: string, ctx: CliContext): Promise<string | null> {
   ctx.stdout.write(question);
   const stdin = ctx.stdin as CliContext["stdin"] & { setRawMode?: (on: boolean) => unknown };
@@ -720,11 +746,13 @@ async function readHidden(question: string, ctx: CliContext): Promise<string | n
     };
     const finish = (value: string | null) => {
       stdin.off("data", onData);
+      stdin.off("end", onEnd);
       stdin.pause();
       resolve(value);
     };
+    const onEnd = () => finish(null);
     stdin.on("data", onData);
-    stdin.once("end", () => finish(line.trim()));
+    stdin.once("end", onEnd);
   });
   stdin.setRawMode?.(false);
   ctx.stdout.write("\n");
@@ -1191,20 +1219,20 @@ export async function init(
 
   const node = await readNode();
   const dns = probeDnsmasq(settings, ctx);
-  const tailscale = probeTailscale(dns.tailscale, node.ok ? await readPeers() : [], ctx);
+  const tailscale = tailscaleChecks(dns.tailscale, node.ok ? await readPeers() : [], ctx);
   const checks = [
     ...nodeChecks(node, ctx),
     ...(await caddyChecks(install, storage, ctx, {
       cert: certTarget(node),
       jsonFix: JSON_FIX_IN_INIT,
     })),
-    ...tailscale.checks,
+    ...tailscale,
     ...dns.checks,
   ];
   printSection("Checks", checks, paint, ctx);
   const repairs = repairsOf(checks, install);
   // A piped secret replaces the one in the Keychain, as for a secret made anew.
-  if (pipedSecret !== null && tailscale.route !== null) repairs.add("tailscale-secret");
+  if (pipedSecret !== null) repairs.add("tailscale-secret");
   // The trust check above read the old root; the imported root decides the trust step.
   if (caImport !== null) {
     const cert = writeTmp(caImport.root.certPem);
@@ -1298,12 +1326,13 @@ export async function init(
       ctx.stdout.write("\nRun `bunx devsite init` in a terminal to be guided through it.\n");
       return 0;
     }
+    const piped = imported !== null ? "--ca" : pipedSecret !== null ? "--tailscale-secret" : null;
     ctx.stderr.write(
-      imported === null
+      piped === null
         ? "stdin is not a TTY — cannot ask for confirmation; nothing changed. " +
             "Run interactively, or use --dry-run to inspect the plan.\n"
         : "no terminal to ask on — cannot ask for confirmation; nothing changed. " +
-            "Run `init --ca -` in a terminal, or add --dry-run to inspect the plan.\n",
+            `Run \`init ${piped} -\` in a terminal, or add --dry-run to inspect the plan.\n`,
     );
     return 1;
   }
@@ -1314,7 +1343,7 @@ export async function init(
   // The secret step lets the node send the phone to devsite's dnsmasq, so it waits until dnsmasq answers.
   await runSteps(steps, paint, ctx, async () => {
     if (dnsPlan !== null && dns.dnsmasq !== null) await waitForDnsmasq(dns.dnsmasq.ip, ctx);
-    if (pipedSecret !== null && repairs.has("tailscale-secret")) await reportRoute(ctx);
+    if (pipedSecret !== null) await reportRoute(ctx);
   });
   const after = installAfter(settings, install, ctx);
   const storageAfter = await findStorage(after, ctx);
@@ -1326,7 +1355,7 @@ export async function init(
       cert: certTarget(nodeAfter),
       jsonFix: JSON_FIX_IN_INIT,
     })),
-    ...probeTailscale(dnsAfter.tailscale, nodeAfter.ok ? await readPeers() : [], ctx).checks,
+    ...tailscaleChecks(dnsAfter.tailscale, nodeAfter.ok ? await readPeers() : [], ctx),
     ...dnsAfter.checks,
   ];
   // A check the run just tried to fix points at that step: its fix line would send the user back to this same run. A manual step that failed stopped the run, so one that is still red was skipped and keeps its fix.

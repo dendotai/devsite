@@ -686,6 +686,18 @@ test("--tailscale-secret - reads the secret from standard input and stores it, a
   expect(r.status).toBe(0);
 });
 
+test("--tailscale-secret - stores the secret while Tailscale is down", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    { ...SET_UP, tailscale: "no-ip" },
+    { piped: `${SECRET}\n`, keys: ["y"] },
+  );
+  expect(r.ran).toContain("security -i");
+  expect(r.stdout).toContain("Stored in the login Keychain.");
+});
+
 test("--tailscale-secret - with no secret on standard input, or with a terminal there, changes nothing", async () => {
   const m = await setUp({ dnsmasq: true, files: IP });
   const junk = await devsite(["init", "--tailscale-secret", "-"], m, SET_UP, { piped: "hello\n" });

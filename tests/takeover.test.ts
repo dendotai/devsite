@@ -67,6 +67,9 @@ async function until(check: () => boolean, ms: number): Promise<number> {
   return Date.now() - start;
 }
 
+const routeOf = async (node: { url: string }) =>
+  ((await (await fetch(`${node.url}/status`)).json()) as { route: { role: string } }).route;
+
 const routeIs = (api: { state: { route: Route } }, ip: string) => () =>
   api.state.route?.join() === ip;
 
@@ -129,6 +132,32 @@ test("a Mac with no secret in its Keychain never writes the route; the Mac that 
   expect(api.state.writes).toEqual([[THIS_MAC.ip]]);
 });
 
+test("a main Mac that no node follows finds out that the route moved", async () => {
+  const { api, here } = await startMacs([THIS_MAC.ip], { there: null });
+  await Bun.sleep(3 * SIGNAL_MS);
+  api.state.route = [OTHER_MAC.ip];
+  await Bun.sleep(18 * SIGNAL_MS);
+  expect((await routeOf(here)).role).toBe("follower");
+});
+
+test("a node reads a replaced secret at once when init asks it for the route", async () => {
+  const dir = keychain(SECRET);
+  const { here } = await startMacs([THIS_MAC.ip], {}, { DEVSITE_FAKE_SECURITY: dir });
+  await Bun.sleep(3 * SIGNAL_MS);
+  expect((await routeOf(here)).role).toBe("main");
+  writeFileSync(join(dir, "secret"), "tskey-client-k999CNTRL-wrong");
+  const res = await fetch(`${here.url}/route`, { method: "POST" });
+  expect(await res.json()).toEqual({ role: "unknown", why: "Tailscale's API gave no answer" });
+});
+
+test("a Mac whose secret Tailscale refuses does not hold up the takeover of another", async () => {
+  // The other Mac sorts first; its secret is refused.
+  const { api } = await startMacs(null, { there: "tskey-client-k999CNTRL-wrong" });
+  await until(routeIs(api, THIS_MAC.ip), 5000);
+  api.state.route = ["100.90.9.9"];
+  await until(routeIs(api, THIS_MAC.ip), 14_000);
+});
+
 // Two loopback addresses allow one real node and one more voter, so the other voter is a server that answers as a node holding a secret does.
 async function nodeBesideVoter(voter: { name: string; online: boolean }) {
   const api = fakeSplitDnsApi(null);
@@ -159,6 +188,10 @@ async function nodeBesideVoter(voter: { name: string; online: boolean }) {
 test("of the nodes that answer, only the Mac whose device name sorts first writes", async () => {
   expect(await nodeBesideVoter({ name: "Alpha Mac", online: true })).toEqual([]);
   expect(await nodeBesideVoter({ name: "Zulu Mac", online: true })).toEqual([[OTHER_MAC.ip]]);
+});
+
+test("of two Macs with one device name, one writes", async () => {
+  expect(await nodeBesideVoter({ name: OTHER_MAC.name, online: true })).toEqual([[OTHER_MAC.ip]]);
 });
 
 test("a Mac that Tailscale marks offline still votes when its node answers", async () => {

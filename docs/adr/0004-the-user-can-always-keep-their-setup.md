@@ -19,3 +19,4 @@ devsite changes things the user or other programs also use: the Caddyfile's glob
 
 - A root Caddy the user runs stays, with `sudo` on each reload (ADR 0002).
 - Each shared change adds a setting and a path through `init` to test.
+- The split DNS route is an exception, with no setting (#110): a node with no stored OAuth client secret never writes it, and `doctor` is red there, a route made by hand included.

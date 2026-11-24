@@ -22,7 +22,7 @@ import { nodeLog, settingsFile, supportDir } from "../paths";
 import { discoverProjects, type RepoProject } from "../repo";
 import { readSettings } from "../settings";
 import { findStorage, type Storage } from "../storage";
-import { probeTailscale } from "../tailscale";
+import { tailscaleChecks } from "../tailscale";
 import { refuseRoot } from "./init";
 
 const UNUSED_DAYS = 30;
@@ -140,10 +140,10 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   results.push(...caddyResults);
 
   const peerStates = node.ok ? await readPeers() : [];
-  const tailscale = probeTailscale(dns.tailscale, peerStates, ctx);
-  if (tailscale.checks.length > 0) {
-    printSection("Tailscale", tailscale.checks, paint, ctx);
-    results.push(...tailscale.checks);
+  const tailscale = tailscaleChecks(dns.tailscale, peerStates, ctx);
+  if (tailscale.length > 0) {
+    printSection("Tailscale", tailscale, paint, ctx);
+    results.push(...tailscale);
   }
   if (dns.checks.length > 0) {
     printSection("dnsmasq", dns.checks, paint, ctx);
