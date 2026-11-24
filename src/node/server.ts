@@ -15,6 +15,7 @@ import offlinePage from "../../assets/offline.html" with { type: "text" };
 import pkg from "../../package.json";
 import { NAME_RE } from "../names.mjs";
 import { type PathsEnv, stateFile, userHome } from "../paths";
+import { makeRelay, RELAYED_HEADER, type RelayEnv, requestHead } from "./relay";
 import {
   addressOf,
   askPeer,
@@ -93,9 +94,12 @@ function probe(port: number): Promise<boolean> {
 const html = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.codePointAt(0)};`);
 
 // 404: no project of that name has run on this Mac; 503: one has, and its dev server does not answer.
-const offlineStatus = (p: Project | undefined) => (p === undefined ? 404 : 503);
+const offlineStatus = (p: LastRun | undefined) => (p === undefined ? 404 : 503);
 
-export function renderOfflinePage(host: string, p: Project | undefined): string {
+// What the offline page shows of a project, from this Mac's state or another Mac's node.
+type LastRun = Pick<Project, "project" | "folder" | "mac" | "live" | "lastUsed">;
+
+export function renderOfflinePage(host: string, p: LastRun | undefined): string {
   const facts =
     p === undefined
       ? `<p>No project named <em class="host">${html(projectOf(host) ?? host)}</em> has run on this Mac.</p>`
@@ -177,7 +181,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 export type NodeOptions = {
   port: number;
   peerPort?: number;
-  env: PathsEnv & TailnetEnv & { DEVSITE_TAILNET_REFRESH_MS?: string };
+  env: PathsEnv & TailnetEnv & RelayEnv & { DEVSITE_TAILNET_REFRESH_MS?: string };
 };
 
 // How often the node reads its Tailscale IPs again and retries a taken port, as Tailscale can start after the node or get a new IP. DEVSITE_TAILNET_REFRESH_MS shortens it in tests.
@@ -188,8 +192,27 @@ export type PeerState =
   | { mac: string; state: "same-protocol" | "denied" | "refused" | "timeout" | "not-a-node" }
   | { mac: string; state: "other-protocol"; protocol: number | null };
 
-// What a node tells another node about one of its projects; folder starts with `~` for a path in its home.
-type PeerProject = { folder: string; live: boolean };
+// What a node tells another node about one of its projects; folder starts with `~` for a path in its home. project and lastUsed are absent from an older node.
+type PeerProject = { folder: string; live: boolean; project?: string; lastUsed?: string };
+
+type PeerRecord = { peer: Peer; project: PeerProject };
+
+function peerProjectOf(body: unknown): PeerProject | null {
+  type Sent = { folder?: unknown; live?: unknown; project?: unknown; lastUsed?: unknown };
+  const p = (body as { project?: Sent | null } | null)?.project;
+  if (typeof p !== "object" || p === null) return null;
+  if (typeof p.folder !== "string" || typeof p.live !== "boolean") return null;
+  return {
+    folder: p.folder,
+    live: p.live,
+    project: typeof p.project === "string" ? p.project : undefined,
+    lastUsed: typeof p.lastUsed === "string" ? p.lastUsed : undefined,
+  };
+}
+
+// A live name found on another Mac is kept this long, so a page's many requests do not each ask every Mac; a name live on no Mac is asked again at the next request, so a dev server started on any Mac opens at once.
+const LIVE_PEER_MS = 5000;
+
 export type RunningNode = { port: number; close: () => Promise<void> };
 
 export async function startNode({ port, peerPort, env }: NodeOptions): Promise<RunningNode> {
@@ -214,8 +237,60 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     }
   };
 
-  const offline = (res: ServerResponse, host: string, name: string) => {
-    const p = state.projects[name];
+  // Each other Mac's record of a name, until one says it is live: the relay needs no more, and a Mac that sleeps costs no wait then.
+  const askPeersUntilLive = async (
+    name: string,
+    peers: Peer[],
+  ): Promise<{ live: PeerRecord | null; records: PeerRecord[] }> => {
+    const records: PeerRecord[] = [];
+    const live = await new Promise<PeerRecord | null>((resolve) => {
+      let left = peers.length;
+      if (left === 0) resolve(null);
+      for (const peer of peers) {
+        askPeer(peer, peersAt, `/projects/${name}`).then((answer) => {
+          const project = answer.state === "answer" ? peerProjectOf(answer.body) : null;
+          if (project !== null) {
+            records.push({ peer, project });
+            if (project.live) resolve({ peer, project });
+          }
+          left -= 1;
+          if (left === 0) resolve(null);
+        });
+      }
+    });
+    return { live, records };
+  };
+
+  const livePeers = new Map<string, { peer: Peer; until: number }>();
+
+  // The Mac a request for a name not live here goes to; the peer list is the last refresh's, as this runs for each request of a page.
+  const findLive = async (name: string): Promise<{ live: Peer | null; records: PeerRecord[] }> => {
+    const kept = livePeers.get(name);
+    if (kept !== undefined && kept.until > Date.now()) return { live: kept.peer, records: [] };
+    const { live, records } = await askPeersUntilLive(name, tailnet?.peers ?? []);
+    if (live === null) return { live: null, records };
+    livePeers.set(name, { peer: live.peer, until: Date.now() + LIVE_PEER_MS });
+    return { live: live.peer, records };
+  };
+
+  const lastRun = (name: string, others: PeerRecord[]): LastRun | undefined => {
+    let newest: LastRun | undefined = state.projects[name];
+    for (const { peer, project: p } of others) {
+      const lastUsed = p.lastUsed ?? "";
+      if (newest !== undefined && newest.lastUsed >= lastUsed) continue;
+      newest = {
+        project: p.project ?? name,
+        folder: p.folder,
+        mac: peer.mac,
+        live: p.live,
+        lastUsed,
+      };
+    }
+    return newest;
+  };
+
+  const offline = (res: ServerResponse, host: string, name: string, others: PeerRecord[] = []) => {
+    const p = lastRun(name, others);
     res.writeHead(offlineStatus(p), {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
@@ -223,9 +298,26 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     res.end(renderOfflinePage(host, p));
   };
 
-  const proxy = (req: IncomingMessage, res: ServerResponse, name: string) => {
+  const relay = makeRelay(env);
+
+  const proxy = async (req: IncomingMessage, res: ServerResponse, name: string) => {
+    const host = req.headers.host ?? "";
     const p = state.projects[name];
-    if (p === undefined || !p.live) return offline(res, req.headers.host ?? "", name);
+    if (p?.live) return proxyHere(req, res, name, p);
+    if (req.headers[RELAYED_HEADER] !== undefined) return offline(res, host, name);
+    const { live, records } = await findLive(name);
+    if (live === null) return offline(res, host, name, records);
+    const failure = await relay.send(req, res, live);
+    if (failure === null) return;
+    livePeers.delete(name);
+    res.writeHead(502, {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    res.end(relay.explain(failure, host, live));
+  };
+
+  const proxyHere = (req: IncomingMessage, res: ServerResponse, name: string, p: Project) => {
     const target = p.port;
     const up = httpRequest({
       host: "127.0.0.1",
@@ -274,22 +366,12 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
 
   // The name alone decides, so two repos with one devSite name meet the same refusal as one repo on two Macs.
   const liveElsewhere = async (name: string): Promise<string | null> => {
-    const tailnet = await readTailnet(env);
-    if (tailnet === null) return null;
-    const answers = await Promise.all(
-      tailnet.peers.map(async (peer) => ({
-        peer,
-        answer: await askPeer(peer, peersAt, `/projects/${name}`),
-      })),
-    );
-    for (const { peer, answer } of answers) {
-      if (answer.state !== "answer") continue;
-      const p = (answer.body as { project?: Partial<PeerProject> | null }).project;
-      if (p?.live === true && typeof p.folder === "string") {
-        return `${name}.internal runs on ${peer.mac} from ${p.folder}`;
-      }
-    }
-    return null;
+    const fresh = await readTailnet(env);
+    if (fresh === null) return null;
+    const { live } = await askPeersUntilLive(name, fresh.peers);
+    return live === null
+      ? null
+      : `${name}.internal runs on ${live.peer.mac} from ${live.project.folder}`;
   };
 
   const register = async (req: IncomingMessage, res: ServerResponse, name: string) => {
@@ -362,8 +444,13 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     if (req.method === "GET" && url.pathname === "/peers") return peers(res);
     // Caddy asks here before it signs a certificate for a name at its first TLS handshake, so a LAN host cannot make it sign one per name it sends.
     if (req.method === "GET" && url.pathname === "/tls-allowed") {
+      // A name another Mac knows passes too: the phone reaches every Mac's projects through the main Mac.
       const asked = projectOf(url.searchParams.get("domain") ?? "");
-      res.writeHead(asked !== null && state.projects[asked] !== undefined ? 200 : 403);
+      const known =
+        asked !== null &&
+        (state.projects[asked] !== undefined ||
+          (await askPeersUntilLive(asked, tailnet?.peers ?? [])).records.length > 0);
+      res.writeHead(known ? 200 : 403);
       return res.end();
     }
     if (parts[0] === "projects" && name !== undefined && NAME_RE.test(name)) {
@@ -380,7 +467,13 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
 
   const server = createServer((req, res) => {
     const name = projectOf(req.headers.host);
-    if (name !== null) return proxy(req, res, name);
+    if (name !== null) {
+      proxy(req, res, name).catch((err) => {
+        console.error(`devsite node: ${req.headers.host}${req.url}: ${(err as Error).message}`);
+        if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
+      });
+      return;
+    }
     if (isApi(req, boundPort)) {
       api(req, res).catch((err) => {
         console.error(`devsite node: ${req.method} ${req.url}: ${(err as Error).message}`);
@@ -402,16 +495,25 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     const name = projectOf(req.headers.host);
     const p = name === null ? undefined : state.projects[name];
     if (name === null || p === undefined || !p.live) {
-      socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+      const refuse = () =>
+        socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+      if (name === null || req.headers[RELAYED_HEADER] !== undefined) return refuse();
+      findLive(name)
+        .then(async ({ live }) => {
+          if (live === null) return refuse();
+          const failure = await relay.tunnel(req, socket, head, live);
+          if (failure === null) return;
+          livePeers.delete(name);
+          // A browser shows no text for a refused WebSocket, so the reason goes to the log.
+          console.error(relay.explain(failure, req.headers.host ?? "", live).trimEnd());
+          refuse();
+        })
+        .catch(refuse);
       return;
     }
     const target = p.port;
     const up = connect({ host: "127.0.0.1", port: target }, () => {
-      const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
-      for (let i = 0; i < req.rawHeaders.length; i += 2) {
-        lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
-      }
-      up.write(`${lines.join("\r\n")}\r\n\r\n`);
+      up.write(requestHead(req));
       if (head.length > 0) up.write(head);
       socket.pipe(up).pipe(socket);
     });
@@ -449,7 +551,14 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     ) {
       const p = NAME_RE.test(name) ? state.projects[name] : undefined;
       const project: PeerProject | null =
-        p === undefined ? null : { folder: shownFolder(p.folder), live: await isLive(p) };
+        p === undefined
+          ? null
+          : {
+              folder: shownFolder(p.folder),
+              live: await isLive(p),
+              project: p.project,
+              lastUsed: p.lastUsed,
+            };
       return sendJson(res, 200, { project });
     }
     sendJson(res, 404, { error: `no ${req.method} ${url.pathname}` });

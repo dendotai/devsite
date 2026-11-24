@@ -4,7 +4,6 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import type { AddressInfo } from "node:net";
-import { connect } from "node:net";
 import { join } from "node:path";
 import pkg from "../package.json";
 import {
@@ -12,7 +11,7 @@ import {
   startDevServer,
   startTestNode,
   status,
-  type TestNode,
+  upgrade,
   useNodes,
   viaNode,
 } from "./node-helpers";
@@ -38,28 +37,6 @@ test("several projects run at once, each on its own port", async () => {
   expect((await viaNode(node, "web.internal")).body).toStartWith("web ");
   expect((await viaNode(node, "api.internal")).body).toStartWith("api ");
 });
-
-// A raw upgrade request, as Caddy forwards the browser's HMR WebSocket; returns what comes back after the bytes sent.
-function upgrade(node: TestNode, host: string, send: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const s = connect({ host: "127.0.0.1", port: node.port }, () => {
-      s.write(
-        `GET /hmr HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
-      );
-    });
-    let got = "";
-    s.on("data", (d) => {
-      got += d;
-      if (got.includes("\r\n\r\n") && !got.includes(send)) s.write(send);
-      if (got.includes(send)) {
-        s.destroy();
-        resolve(got);
-      }
-    });
-    s.on("error", reject);
-    s.on("close", () => resolve(got));
-  });
-}
 
 test("HMR: a WebSocket upgrade reaches the dev server and its bytes flow both ways", async () => {
   const node = await startTestNode();

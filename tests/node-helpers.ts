@@ -3,7 +3,7 @@ import { afterEach } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,11 +42,15 @@ function stopChild(child: ChildProcess): Promise<void> {
 // The answers the fake tailscale (tests/bin/tailscale) gives this node: `status --json`, and `whois --json <ip>` per IP.
 export type FakeTailnet = { status: object; whois?: Record<string, object> };
 
-export type TestNodeOptions = { tailnet?: FakeTailnet; peerPort?: number };
+export type TestNodeOptions = {
+  tailnet?: FakeTailnet;
+  peerPort?: number;
+  env?: Record<string, string>;
+};
 
 export async function startTestNode(
   home = mkdtempSync(join(tmpdir(), "devsite-home-")),
-  { tailnet, peerPort }: TestNodeOptions = {},
+  { tailnet, peerPort, env = {} }: TestNodeOptions = {},
 ) {
   const answers = mkdtempSync(join(tmpdir(), "devsite-tailnet-"));
   if (tailnet !== undefined) {
@@ -61,6 +65,7 @@ export async function startTestNode(
       DEVSITE_USER_HOME: home,
       DEVSITE_FAKE_TAILSCALE: answers,
       ...(peerPort === undefined ? {} : { DEVSITE_PEER_PORT: String(peerPort) }),
+      ...env,
     },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -114,17 +119,27 @@ export function viaNode(
   node: TestNode,
   host: string,
   path = "/",
+  send: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<{ status: number; body: string; headers: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: "127.0.0.1", port: node.port, path, headers: { host } }, (res) => {
-      let body = "";
-      res.on("data", (c) => {
-        body += c;
-      });
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
-    });
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port: node.port,
+        path,
+        method: send.method,
+        headers: { ...send.headers, host },
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (c) => {
+          body += c;
+        });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
+      },
+    );
     req.on("error", reject);
-    req.end();
+    req.end(send.body);
   });
 }
 
@@ -145,4 +160,26 @@ export async function status(node: TestNode) {
     version: string;
     projects: Record<string, { live: boolean; port: number; folder: string; lastUsed: string }>;
   };
+}
+
+// A raw upgrade request, as Caddy forwards the browser's HMR WebSocket; returns what comes back after the bytes sent.
+export function upgrade(node: TestNode, host: string, send: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const s = connect({ host: "127.0.0.1", port: node.port }, () => {
+      s.write(
+        `GET /hmr HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+      );
+    });
+    let got = "";
+    s.on("data", (d) => {
+      got += d;
+      if (got.includes("\r\n\r\n") && !got.includes(send)) s.write(send);
+      if (got.includes(send)) {
+        s.destroy();
+        resolve(got);
+      }
+    });
+    s.on("error", reject);
+    s.on("close", () => resolve(got));
+  });
 }

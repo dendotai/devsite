@@ -40,7 +40,9 @@ Browser ── https://myapp.internal ──▶ Caddy :443 (TLS from local CA, L
 
 The nodes on the Macs of one tailnet find each other through `tailscale status`, and each listens for the others on port **47380** of its Tailscale IPs, the port it uses on `127.0.0.1`. A node answers another node only when `tailscale whois` names your own Tailscale user; a device shared into your tailnet still reaches your dev servers through Caddy.
 
-A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not answer, Caddy shows a short "node not running" page.
+A request for a name that is not live on the Mac it reaches goes on to the Mac where the name is live: the node relays it over HTTPS to that Mac's Caddy, HMR included, and checks that Caddy's certificate against this Mac's CA root, read from Caddy's admin API. So the phone opens `https://<name>.internal` for a project on any of your Macs, and a dev server started on any Mac opens at once. The relay needs one CA root on every Mac (below); with another root, the page names that Mac and the `devsite ca export` / `devsite init --ca -` fix. A name live on no Mac shows the offline page with where the project last ran, on any of your Macs.
+
+A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it or another Mac's node knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not answer, Caddy shows a short "node not running" page.
 
 ## Quick start
 

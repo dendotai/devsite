@@ -24,3 +24,6 @@ _Avoid_: running, up
 **Main Mac**:
 The Mac the `internal` split DNS route names; the phone's requests reach it first.
 _Avoid_: route's Mac, primary
+
+**Relay**:
+A node sends a request for a name live on another Mac over HTTPS to the Caddy of that Mac, not to its dev server.
