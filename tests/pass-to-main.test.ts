@@ -58,9 +58,10 @@ async function startCaddy(port: number, to: { node: number; main: number; dns: s
   for (const [from, into] of [
     ["*.internal, *.localhost {", `*.internal:${port}, *.localhost:${port} {`],
     ["\t\ton_demand\n", ""],
+    // Whole tokens, before the node's port goes in: a port that starts with 443 holds "127.0.0.1:443".
+    ["127.0.0.1:443 {", `127.0.0.1:${port} {`],
+    ["port 443\n", `port ${to.main}\n`],
     ["127.0.0.1:47380", `127.0.0.1:${to.node}`],
-    ["127.0.0.1:443", `127.0.0.1:${port}`],
-    ["port 443", `port ${to.main}`],
     ["100.100.100.100", to.dns],
     ["dial_timeout", "tls_insecure_skip_verify\ndial_timeout"],
   ] as const) {
