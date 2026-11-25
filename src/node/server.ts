@@ -27,7 +27,7 @@ import {
   readTailnet,
   type Tailnet,
   type TailnetEnv,
-  whoisUser,
+  whois,
 } from "./tailnet";
 
 export type Project = {
@@ -96,14 +96,20 @@ function probe(port: number): Promise<boolean> {
 
 const html = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.codePointAt(0)};`);
 
-// 404: no project of that name has run on this Mac; 503: one has, and its dev server does not answer.
-const offlineStatus = (p: LastRun | undefined) => (p === undefined ? 404 : 503);
+// 404: no project of that name has run on this Mac; 503: one has, and its dev server does not answer, or the node cannot ask the other machines yet.
+const offlineStatus = (p: LastRun | undefined, noList: boolean) =>
+  p === undefined && !noList ? 404 : 503;
 
 // What the offline page shows of a project, from this Mac's state or another Mac's node.
 type LastRun = Pick<Project, "project" | "folder" | "mac" | "live" | "lastUsed">;
 
-export function renderOfflinePage(host: string, p: LastRun | undefined): string {
-  const facts =
+// noList: the node has no list of the other machines yet, so a name live on one of them cannot be found.
+export function renderOfflinePage(host: string, p: LastRun | undefined, noList = false): string {
+  const at = `<em class="host">${html(host)}</em>`;
+  const heading = noList
+    ? `devsite cannot look for ${at} on your other machines yet`
+    : `dev server for ${at} is not running`;
+  const lastRanFacts =
     p === undefined
       ? `<p>No project named <em class="host">${html(projectOf(host) ?? host)}</em> has run on this Mac.</p>`
       : [
@@ -114,11 +120,17 @@ export function renderOfflinePage(host: string, p: LastRun | undefined): string 
           `<dt>live</dt><dd>${p.live ? "yes" : "no"}</dd>`,
           "</dl>",
         ].join("\n    ");
+  const facts = noList
+    ? ["<p>Tailscale is not connected.</p>", ...(p === undefined ? [] : [lastRanFacts])].join(
+        "\n    ",
+      )
+    : lastRanFacts;
   return (offlinePage as unknown as string)
     .replace(/<!--[\s\S]*?-->\n?/, "")
     .replaceAll("__HOST__", html(host))
     .replaceAll("__PROJECT__", html(p?.project ?? ""))
-    .replaceAll("__STATUS_CODE__", String(offlineStatus(p)))
+    .replaceAll("__STATUS_CODE__", String(offlineStatus(p, noList)))
+    .replace("__HEADING__", heading)
     .replace("__FACTS__", facts);
 }
 
@@ -230,7 +242,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
   const save = () => writeState(file, state);
   // The port is known once the loopback server listens.
   let peersAt = peerPort ?? port;
-  // The last tailnet read, for the check on each call from another node.
+  // The last tailnet read.
   let tailnet: Tailnet | null = null;
   const peerServers = new Map<string, Server>();
   const mainMac = makeMainMac({ env, tailnet: () => tailnet, peersAt: () => peersAt });
@@ -300,11 +312,13 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
 
   const offline = (res: ServerResponse, host: string, name: string, others: PeerRecord[] = []) => {
     const p = lastRun(name, others);
-    res.writeHead(offlineStatus(p), {
+    // A .localhost name never goes to another machine, so a missing list changes nothing for it.
+    const noList = tailnet === null && /\.internal(:\d+)?$/i.test(host);
+    res.writeHead(offlineStatus(p, noList), {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
     });
-    res.end(renderOfflinePage(host, p));
+    res.end(renderOfflinePage(host, p, noList));
   };
 
   const relay = makeRelay(env);
@@ -550,8 +564,8 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
   const answerPeer = async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader(PROTOCOL_HEADER, String(PROTOCOL));
     const from = (req.socket.remoteAddress ?? "").replace(/^::ffff:/, "");
-    const user = await whoisUser(from, env);
-    if (tailnet === null || user !== tailnet.user) {
+    const caller = await whois(from, env);
+    if (tailnet === null || caller === null || caller.user !== tailnet.user) {
       return sendJson(res, 403, { error: "only a device of this Mac's Tailscale user" });
     }
     if (req.headers[PROTOCOL_HEADER] !== String(PROTOCOL)) {
@@ -561,7 +575,10 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     if (req.method === "GET" && url.pathname === "/hello") {
       return sendJson(res, 200, { routeWriter: await mainMac.canWrite() });
     }
-    if (req.method === "GET" && url.pathname === "/signals") return mainMac.serveSignals(req, res);
+    if (req.method === "GET" && url.pathname === "/heartbeats") {
+      res.on("close", () => relay.gone(caller.ips));
+      return mainMac.serveHeartbeats(req, res);
+    }
     const name = parts[1]?.toLowerCase();
     if (
       req.method === "GET" &&

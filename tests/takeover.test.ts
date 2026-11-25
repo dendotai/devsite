@@ -1,7 +1,7 @@
-// The split DNS route and takeover (#110): two real nodes on loopback (tests/two-macs.ts), a local fake of Tailscale's OAuth token and split DNS API, and a shorter signal interval. This Mac (MacBook Pro, 127.0.0.1) sorts after the other Mac (Mac mini, ::1).
-import { expect, setDefaultTimeout, test } from "bun:test";
+// The split DNS route and takeover (#110): two real nodes on loopback (tests/two-macs.ts), a local fake of Tailscale's OAuth token and split DNS API, and a shorter heartbeat interval. This Mac (MacBook Pro, 127.0.0.1) sorts after the other Mac (Mac mini, ::1).
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { createServer, get } from "node:http";
+import { createServer, get, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startTestNode, useNodes } from "./node-helpers";
@@ -10,10 +10,10 @@ import { fakeSplitDnsApi, type Route, SECRET } from "./split-dns-api";
 import { freePort, ME, OTHER_MAC, statusJson, THIS_MAC, twoMacs } from "./two-macs";
 
 useNodes();
-// Each test waits through several signal intervals.
+// Each test waits through several heartbeat intervals.
 setDefaultTimeout(15_000);
 
-const SIGNAL_MS = 400;
+const HEARTBEAT_MS = 400;
 
 function keychain(secret: string | null) {
   const dir = mkdtempSync(join(tmpdir(), "devsite-keychain-"));
@@ -31,7 +31,7 @@ async function startMacs(
   const api = fakeSplitDnsApi(route);
   const env = (secret: string | null) => ({
     DEVSITE_TAILSCALE_API: api.url,
-    DEVSITE_SIGNAL_MS: String(SIGNAL_MS),
+    DEVSITE_HEARTBEAT_MS: String(HEARTBEAT_MS),
     DEVSITE_FAKE_SECURITY: keychain(secret),
   });
   const macs = await twoMacs({
@@ -77,7 +77,7 @@ const routeIs = (api: { state: { route: Route } }, ip: string) => () =>
 test("with no route, the main Mac's node writes its own IP, and the Mac that starts later follows it", async () => {
   const { api, there } = await startMacs(null);
   await until(routeIs(api, THIS_MAC.ip), 5000);
-  await Bun.sleep(4 * SIGNAL_MS);
+  await Bun.sleep(4 * HEARTBEAT_MS);
   expect(api.state.writes).toEqual([[THIS_MAC.ip]]);
   const status = (await (await fetch(`${there.url}/status`)).json()) as { route: unknown };
   expect(status.route).toEqual({ role: "follower", mac: THIS_MAC.name, ip: THIS_MAC.ip });
@@ -85,7 +85,7 @@ test("with no route, the main Mac's node writes its own IP, and the Mac that sta
 
 test("a Mac that starts reads the route first: the main Mac it names keeps it, though it sorts last", async () => {
   const { api, here } = await startMacs([THIS_MAC.ip]);
-  await Bun.sleep(6 * SIGNAL_MS);
+  await Bun.sleep(6 * HEARTBEAT_MS);
   expect(api.state.writes).toEqual([]);
   const status = (await (await fetch(`${here.url}/status`)).json()) as { route: unknown };
   expect(status.route).toEqual({ role: "main", ip: THIS_MAC.ip });
@@ -93,24 +93,24 @@ test("a Mac that starts reads the route first: the main Mac it names keeps it, t
 
 test("a clean stop of the main Mac's node moves the route at once", async () => {
   const { api, here } = await startMacs([THIS_MAC.ip]);
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   const stopped = Date.now();
   await here.stop();
   await until(routeIs(api, OTHER_MAC.ip), 5000);
-  expect(Date.now() - stopped).toBeLessThan(2 * SIGNAL_MS);
+  expect(Date.now() - stopped).toBeLessThan(2 * HEARTBEAT_MS);
   expect(api.state.writes).toEqual([[OTHER_MAC.ip]]);
 });
 
-test("a main Mac that stops answering moves the route after 3 missed signals, and leaves it there when it comes back", async () => {
+test("a main Mac that stops answering moves the route after 3 missed heartbeats, and leaves it there when it comes back", async () => {
   const { api, here } = await startMacs([THIS_MAC.ip]);
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   const paused = Date.now();
   here.pause();
   await until(routeIs(api, OTHER_MAC.ip), 5000);
-  // The last signal came up to one interval before the pause.
-  expect(Date.now() - paused).toBeGreaterThanOrEqual(2 * SIGNAL_MS);
+  // The last heartbeat came up to one interval before the pause.
+  expect(Date.now() - paused).toBeGreaterThanOrEqual(2 * HEARTBEAT_MS);
   here.resume();
-  await Bun.sleep(6 * SIGNAL_MS);
+  await Bun.sleep(6 * HEARTBEAT_MS);
   expect(api.state.route).toEqual([OTHER_MAC.ip]);
   expect(api.state.writes).toEqual([[OTHER_MAC.ip]]);
   const status = (await (await fetch(`${here.url}/status`)).json()) as { route: unknown };
@@ -119,10 +119,10 @@ test("a main Mac that stops answering moves the route after 3 missed signals, an
 
 test("the Mac that takes over reads the route again and writes nothing when another Mac already moved it", async () => {
   const { api, here } = await startMacs([THIS_MAC.ip]);
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   api.state.route = [OTHER_MAC.ip];
   await here.stop();
-  await Bun.sleep(4 * SIGNAL_MS);
+  await Bun.sleep(4 * HEARTBEAT_MS);
   expect(api.state.writes).toEqual([]);
 });
 
@@ -134,16 +134,16 @@ test("a Mac with no secret in its Keychain never writes the route; the Mac that 
 
 test("a main Mac that no node follows finds out that the route moved", async () => {
   const { api, here } = await startMacs([THIS_MAC.ip], { there: null });
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   api.state.route = [OTHER_MAC.ip];
-  await Bun.sleep(18 * SIGNAL_MS);
+  await Bun.sleep(18 * HEARTBEAT_MS);
   expect((await routeOf(here)).role).toBe("follower");
 });
 
 test("a node reads a replaced secret at once when init asks it for the route", async () => {
   const dir = keychain(SECRET);
   const { here } = await startMacs([THIS_MAC.ip], {}, { DEVSITE_FAKE_SECURITY: dir });
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   expect((await routeOf(here)).role).toBe("main");
   writeFileSync(join(dir, "secret"), "tskey-client-k999CNTRL-wrong");
   const res = await fetch(`${here.url}/route`, { method: "POST" });
@@ -173,13 +173,13 @@ async function nodeBesideVoter(voter: { name: string; online: boolean }) {
     peerPort,
     env: {
       DEVSITE_TAILSCALE_API: api.url,
-      DEVSITE_SIGNAL_MS: String(SIGNAL_MS),
+      DEVSITE_HEARTBEAT_MS: String(HEARTBEAT_MS),
       DEVSITE_FAKE_SECURITY: keychain(SECRET),
       ...(await serving(OTHER_MAC.ip)),
     },
     tailnet: { status },
   });
-  await Bun.sleep(4 * SIGNAL_MS);
+  await Bun.sleep(4 * HEARTBEAT_MS);
   other.closeAllConnections();
   other.close();
   return api.state.writes;
@@ -199,30 +199,9 @@ test("a Mac that Tailscale marks offline still votes when its node answers", asy
 });
 
 test("a main Mac that loses a follower reads the route again, and once more after Tailscale's API gave no answer", async () => {
-  const api = fakeSplitDnsApi([THIS_MAC.ip]);
-  const peerPort = await freePort();
-  const here = await startTestNode(undefined, {
-    peerPort,
-    env: {
-      DEVSITE_TAILSCALE_API: api.url,
-      DEVSITE_SIGNAL_MS: "5000",
-      DEVSITE_FAKE_SECURITY: keychain(SECRET),
-      ...(await serving(THIS_MAC.ip)),
-    },
-    tailnet: {
-      status: statusJson(THIS_MAC, [OTHER_MAC]),
-      whois: { [THIS_MAC.ip]: { UserProfile: { ID: ME } } },
-    },
-  });
-  const role = async () =>
-    ((await (await fetch(`${here.url}/status`)).json()) as { route: { role: string } }).route.role;
-  while ((await role()) !== "main") await Bun.sleep(20);
-  const follower = await new Promise<import("node:http").IncomingMessage>((resolve, reject) => {
-    get(
-      { host: THIS_MAC.ip, port: peerPort, path: "/signals", headers: { "devsite-protocol": "1" } },
-      resolve,
-    ).on("error", reject);
-  });
+  const { api, here, ask } = await mainAlone({ DEVSITE_HEARTBEAT_MS: "5000" });
+  const role = async () => (await routeOf(here)).role;
+  const follower = await ask("/heartbeats");
   expect(follower.statusCode).toBe(200);
   api.state.route = [OTHER_MAC.ip];
   api.state.down = true;
@@ -238,14 +217,14 @@ test("a main Mac that loses a follower reads the route again, and once more afte
 test("a sleep of the main Mac moves the route at once, and after its wake the Mac follows the new main Mac", async () => {
   const events = sleepEvents();
   const { api, here } = await startMacs([THIS_MAC.ip], {}, events.env);
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   const slept = Date.now();
   events.send("sleep");
   await until(routeIs(api, OTHER_MAC.ip), 5000);
-  expect(Date.now() - slept).toBeLessThan(2 * SIGNAL_MS);
+  expect(Date.now() - slept).toBeLessThan(2 * HEARTBEAT_MS);
   await until(events.released, 1000);
   events.send("wake");
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   const status = (await (await fetch(`${here.url}/status`)).json()) as { route: unknown };
   expect(status.route).toEqual({ role: "follower", mac: OTHER_MAC.name, ip: OTHER_MAC.ip });
   expect(api.state.writes).toEqual([[OTHER_MAC.ip]]);
@@ -254,14 +233,189 @@ test("a sleep of the main Mac moves the route at once, and after its wake the Ma
 test("a main Mac that sleeps with no Mac to take over is the main Mac again after its wake", async () => {
   const events = sleepEvents();
   const { api, here } = await startMacs([THIS_MAC.ip], { there: null }, events.env);
-  await Bun.sleep(2 * SIGNAL_MS);
+  await Bun.sleep(2 * HEARTBEAT_MS);
   events.send("sleep");
   await until(events.released, 2000);
   events.send("wake");
-  await Bun.sleep(3 * SIGNAL_MS);
+  await Bun.sleep(3 * HEARTBEAT_MS);
   const status = (await (await fetch(`${here.url}/status`)).json()) as { route: unknown };
   expect(status.route).toEqual({ role: "main", ip: THIS_MAC.ip });
   expect(api.state.writes).toEqual([]);
+});
+
+const stops: (() => void)[] = [];
+afterEach(() => {
+  for (const stop of stops.splice(0)) stop();
+});
+
+// A stand-in for the main Mac's node, whose open connection the test cuts, and a real node that follows it.
+async function nodeBesideMain() {
+  const api = fakeSplitDnsApi([THIS_MAC.ip]);
+  const peerPort = await freePort();
+  const open = new Set<ServerResponse>();
+  let opened = 0;
+  const answer = (_req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(200, { "devsite-protocol": "1" });
+    res.write("heartbeat\n");
+    opened += 1;
+    open.add(res);
+    res.on("close", () => open.delete(res));
+  };
+  const listen = async () => {
+    const s = createServer(answer);
+    await new Promise<void>((r) => s.listen(peerPort, THIS_MAC.ip, r));
+    return s;
+  };
+  let main = await listen();
+  const heartbeats = setInterval(() => {
+    for (const res of open) res.write("heartbeat\n");
+  }, HEARTBEAT_MS);
+  const cut = () => {
+    main.closeAllConnections();
+    main.close();
+  };
+  stops.push(() => {
+    clearInterval(heartbeats);
+    cut();
+  });
+  const node = await startTestNode(undefined, {
+    peerPort,
+    env: {
+      DEVSITE_TAILSCALE_API: api.url,
+      DEVSITE_HEARTBEAT_MS: String(HEARTBEAT_MS),
+      DEVSITE_FAKE_SECURITY: keychain(SECRET),
+      ...(await serving(OTHER_MAC.ip)),
+    },
+    tailnet: { status: statusJson(OTHER_MAC, [THIS_MAC]) },
+  });
+  await until(() => opened === 1, 5000);
+  return {
+    api,
+    node,
+    cut,
+    // The newest heartbeat, sent as a whole before the test goes on.
+    heartbeat: async () => {
+      const at = Date.now();
+      for (const res of open) res.write("heartbeat\n");
+      await Bun.sleep(50);
+      return at;
+    },
+    going: () => {
+      for (const res of open) res.end("going\n");
+    },
+    opened: () => opened,
+    back: async () => {
+      main = await listen();
+    },
+  };
+}
+
+test("a cut connection to the main Mac moves the route after 3 missed heartbeats", async () => {
+  const m = await nodeBesideMain();
+  const lastHeartbeat = await m.heartbeat();
+  m.cut();
+  await until(routeIs(m.api, OTHER_MAC.ip), 5000);
+  expect(Date.now() - lastHeartbeat).toBeGreaterThanOrEqual(3 * HEARTBEAT_MS);
+  // The node counts once each interval, then asks for votes and writes.
+  expect(Date.now() - lastHeartbeat).toBeLessThan(6 * HEARTBEAT_MS);
+  expect(m.api.state.writes).toEqual([[OTHER_MAC.ip]]);
+});
+
+test("a connection to the main Mac that is cut and comes back at once moves nothing", async () => {
+  const m = await nodeBesideMain();
+  m.cut();
+  await m.back();
+  await until(() => m.opened() === 2, 3 * HEARTBEAT_MS);
+  await Bun.sleep(5 * HEARTBEAT_MS);
+  expect(m.api.state.writes).toEqual([]);
+});
+
+test("a node whose old main Mac still sends heartbeats finds out that the route moved, and takes over when the new main Mac is gone", async () => {
+  const m = await nodeBesideMain();
+  // A third machine took the route over, and no node answers there.
+  m.api.state.route = ["100.90.9.9"];
+  await until(routeIs(m.api, OTHER_MAC.ip), 14_000);
+  expect(m.api.state.writes).toEqual([[OTHER_MAC.ip]]);
+});
+
+test("a main Mac that goes while this node reads the route moves it at once", async () => {
+  const m = await nodeBesideMain();
+  m.api.state.delayMs = 300;
+  const read = fetch(`${m.node.url}/route`, { method: "POST" });
+  await Bun.sleep(100);
+  m.going();
+  const went = Date.now();
+  m.cut();
+  await until(routeIs(m.api, OTHER_MAC.ip), 5000);
+  // The read that runs, the read before the write, and the write.
+  expect(Date.now() - went).toBeLessThan(3 * 300 + HEARTBEAT_MS);
+  await read;
+});
+
+// The main Mac's node alone, and what it answers another node.
+async function mainAlone(env: Record<string, string>) {
+  const api = fakeSplitDnsApi([THIS_MAC.ip]);
+  const peerPort = await freePort();
+  const here = await startTestNode(undefined, {
+    peerPort,
+    env: {
+      DEVSITE_TAILSCALE_API: api.url,
+      DEVSITE_FAKE_SECURITY: keychain(SECRET),
+      ...(await serving(THIS_MAC.ip)),
+      ...env,
+    },
+    tailnet: {
+      status: statusJson(THIS_MAC, [OTHER_MAC]),
+      whois: { [THIS_MAC.ip]: { UserProfile: { ID: ME } } },
+    },
+  });
+  while ((await routeOf(here)).role !== "main") await Bun.sleep(20);
+  const ask = (path: string) =>
+    new Promise<IncomingMessage>((resolve, reject) => {
+      get(
+        { host: THIS_MAC.ip, port: peerPort, path, headers: { "devsite-protocol": "1" } },
+        resolve,
+      ).on("error", reject);
+    });
+  return { api, here, ask };
+}
+
+test("a main Mac that stalls for less than 3 heartbeats sends the next one at once", async () => {
+  const heartbeatMs = 1000;
+  const { here, ask } = await mainAlone({ DEVSITE_HEARTBEAT_MS: String(heartbeatMs) });
+  const heartbeats = await ask("/heartbeats");
+  let at = 0;
+  let count = 0;
+  heartbeats.on("data", () => {
+    at = Date.now();
+    count += 1;
+  });
+  await until(() => count >= 2, 5000);
+  const before = at;
+  const seen = count;
+  here.pause();
+  await Bun.sleep(2.5 * heartbeatMs);
+  here.resume();
+  await until(() => count > seen, 5000);
+  expect(at - before).toBeLessThan(3 * heartbeatMs);
+  heartbeats.destroy();
+});
+
+test("a Mac that goes to sleep does not vote for itself", async () => {
+  const events = sleepEvents();
+  const { ask } = await mainAlone(events.env);
+  const votes = async () => {
+    let body = "";
+    for await (const chunk of await ask("/hello")) body += chunk;
+    return (JSON.parse(body) as { routeWriter: boolean }).routeWriter;
+  };
+  expect(await votes()).toBe(true);
+  events.send("sleep");
+  await until(events.released, 2000);
+  expect(await votes()).toBe(false);
+  events.send("wake");
+  await Bun.sleep(500);
+  expect(await votes()).toBe(true);
 });
 
 test("a program on the main Mac's port that is no node does not count as a main Mac that answers", async () => {
@@ -273,7 +427,7 @@ test("a program on the main Mac's port that is no node does not count as a main 
     peerPort,
     env: {
       DEVSITE_TAILSCALE_API: api.url,
-      DEVSITE_SIGNAL_MS: String(SIGNAL_MS),
+      DEVSITE_HEARTBEAT_MS: String(HEARTBEAT_MS),
       DEVSITE_FAKE_SECURITY: keychain(SECRET),
       ...(await serving(OTHER_MAC.ip)),
     },
@@ -293,18 +447,16 @@ for (const [title, serves] of [
 ] as const) {
   test(`a Mac ${title} does not take over, so the route stays`, async () => {
     const { api, here, there } = await startMacs([THIS_MAC.ip], {}, {}, serves);
-    await Bun.sleep(3 * SIGNAL_MS);
-    const hello = async () =>
-      ((await (await fetch(`${there.url}/status`)).json()) as { route: { role: string } }).route;
-    expect((await hello()).role).toBe("follower");
+    await Bun.sleep(3 * HEARTBEAT_MS);
+    expect((await routeOf(there)).role).toBe("follower");
     await here.stop();
-    await Bun.sleep(6 * SIGNAL_MS);
+    await Bun.sleep(6 * HEARTBEAT_MS);
     expect(api.state.writes).toEqual([]);
   });
 }
 
 test("with no route, a Mac that cannot serve .internal names leaves it, and a later Mac that can writes it", async () => {
   const { api } = await startMacs(null, {}, await serving(THIS_MAC.ip, { dns: null }));
-  await Bun.sleep(4 * SIGNAL_MS);
+  await Bun.sleep(4 * HEARTBEAT_MS);
   expect(api.state.writes).toEqual([[OTHER_MAC.ip]]);
 });

@@ -29,7 +29,7 @@ function bytesOf(ip: string): Buffer {
 export async function serving(
   ip: string,
   { dns = ip, caddy = true }: { dns?: string | null; caddy?: boolean } = {},
-): Promise<Record<string, string>> {
+): Promise<{ DEVSITE_DNSMASQ_AT: string; DEVSITE_CADDY_AT: string }> {
   const udp = createSocket("udp4");
   udp.on("message", (q, from) => {
     if (dns === null) return;

@@ -4,10 +4,13 @@
 
   The node (src/node/server.ts) serves this file for a project whose dev
   server does not answer, and for a name no project has used on this Mac.
+  Before the node has a list of the other machines, it says so for a
+  .internal name.
   Substitution tokens:
     __HOST__         the visited host, e.g. myapp.localhost
     __PROJECT__      the project's package.json name
     __STATUS_CODE__  503 (a known project) or 404 (an unknown name)
+    __HEADING__      what the page says of the host, the host included
     __FACTS__        the project's state: where it last ran, whether it is live
 -->
 <html lang="en">
@@ -255,7 +258,7 @@
   <header class="brand"><b>devsite</b><span>__PROJECT__</span></header>
 
   <section>
-    <h1>dev server for <em class="host">__HOST__</em> is not running</h1>
+    <h1>__HEADING__</h1>
     __FACTS__
   </section>
 

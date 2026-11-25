@@ -59,11 +59,11 @@ test("a stopped project shows the offline page with where it last ran, and not l
     method: "POST",
     body: JSON.stringify({ port: dev.port }),
   });
-  const page = await viaNode(node, "web.internal");
+  const page = await viaNode(node, "web.localhost");
   expect(page.status).toBe(503);
   expect(page.headers["content-type"]).toBe("text/html; charset=utf-8");
   expect(page.headers["cache-control"]).toBe("no-store");
-  expect(page.body).toContain('<em class="host">web.internal</em> is not running');
+  expect(page.body).toContain('dev server for <em class="host">web.localhost</em> is not running');
   expect(page.body).toContain("<dt>last ran in</dt><dd>/Users/me/Projects/web</dd>");
   expect(page.body).toContain("<dt>live</dt><dd>no</dd>");
   expect(page.body).toContain("<span>@acme/web</span>");
@@ -140,6 +140,27 @@ test("a name no project used on this Mac: the offline page says so, with 404", a
   const page = await viaNode(node, "nope.localhost");
   expect(page.status).toBe(404);
   expect(page.body).toContain('No project named <em class="host">nope</em> has run on this Mac.');
+});
+
+// The default test setup gives the node no list of the other machines, as before Tailscale connects.
+test("with no list of the other machines, a .internal name not live here: the page says devsite cannot look for it yet, with 503", async () => {
+  const node = await startTestNode();
+  const dev = await startDevServer();
+  await register(node, "web", { port: dev.port, folder: "/Users/me/Projects/web" });
+  await dev.close();
+  const heading = (host: string) =>
+    `devsite cannot look for <em class="host">${host}</em> on your other machines yet`;
+  const never = await viaNode(node, "nope.internal");
+  expect(never.status).toBe(503);
+  expect(never.body).toContain(heading("nope.internal"));
+  expect(never.body).toContain("<p>Tailscale is not connected.</p>");
+  expect(never.body).not.toContain("No project named");
+  const ran = await viaNode(node, "web.internal");
+  expect(ran.status).toBe(503);
+  expect(ran.body).toContain(heading("web.internal"));
+  expect(ran.body).toContain("<p>Tailscale is not connected.</p>");
+  expect(ran.body).toContain("<dt>last ran in</dt><dd>/Users/me/Projects/web</dd>");
+  expect(ran.body).not.toContain("__");
 });
 
 test("the state lives in Application Support and outlives the node", async () => {

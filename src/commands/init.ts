@@ -122,10 +122,10 @@ function storagePinLines(root: string): string[] {
   ];
 }
 
-// Caddy signs a certificate for a devsite name at its first TLS handshake (`on_demand` in the route); it asks the node first, so a LAN host cannot make it sign one per name it sends.
 // Caddy reads it on every machine: to-main on the pass through the Caddy's own route, passed on the request the main Mac gets, which is never passed again.
 const PASS_HEADER = "Devsite-Pass";
 
+// Caddy signs a certificate for a devsite name at its first TLS handshake (`on_demand` in the route); it asks the node first, so a LAN host cannot make it sign one per name it sends.
 const ASK_URL = `http://127.0.0.1:${NODE_PORT}/tls-allowed`;
 const ASK_BLOCK_RE = /^[ \t]*on_demand_tls \{[\s\S]*?^[ \t]*\}\n?/m;
 function askLines(): string[] {
@@ -178,7 +178,7 @@ function heredocLines(page: string, indent: string): string[] {
 }
 
 // Caddy's one route for every devsite name: the LAN guard, then the node; when the node does not answer, Caddy passes the request to the main Mac or answers the "node not running" page itself. page null answers one line of text, for the JSON printed to a Caddy with no Caddyfile. The page closes the connection: a browser keeps an open one whatever the DNS now says, so a phone would stay on this machine after another one took over (#110). Caddy closes HTTP/1.1 and HTTP/2 on that header but not HTTP/3, so Alt-Svc tells browsers not to use HTTP/3 for these names.
-// A phone keeps the old DNS answer for up to about 20 s, so a machine whose node refused the connection passes the request to the machine Tailscale's DNS names. The pass goes through this Caddy's own route (Devsite-Pass: to-main), because an error inside handle_errors shows no page. A request that may have run is not passed: Caddy itself sends only a safe one (a GET) to the node again, and passes it when that try is refused. A passed answer keeps the connection open, because Chrome loses modules of a page when each answer closes it.
+// A phone keeps the old DNS answer for up to about 20 s, so a machine whose node refused the connection passes the request to the machine Tailscale's DNS names. The pass goes through this Caddy's own route (Devsite-Pass: to-main), because an error inside handle_errors shows no page. A request that may have run is not passed: Caddy itself sends only a safe one (a GET) to the node again, and passes it when that try is refused. A passed answer other than a 502 keeps the connection open, because Chrome loses modules of a page when each answer closes it.
 export function renderNodeRoute(page: string | null = nodeDownPage as unknown as string): string {
   const down =
     page === null
@@ -226,7 +226,6 @@ export function renderNodeRoute(page: string | null = nodeDownPage as unknown as
     "\t\t\ttls_server_name {host}",
     "\t\t\tdial_timeout 1500ms",
     "\t\t\ttls_timeout 1500ms",
-    "\t\t\tresponse_header_timeout 10s",
     "\t\t}",
     "\t}",
     // Inside reverse_proxy, because Caddy runs a bare header line before the guard. A 101 goes past it, so a WebSocket still opens.
@@ -330,18 +329,17 @@ async function readKey(question: string, ctx: CliContext): Promise<string> {
 const LAYOUT_HINT =
   "Press y or n. A non-Latin layout types another letter, so switch to a Latin layout.";
 
-// y or n, read through the layout map, so the Y key answers on any layout; enter only when Enter has a meaning. Any other key asks again.
+// y or n, read through the layout map, so the Y key answers on any layout. Any other key asks again.
 async function readAnswer(
   question: string,
   ctx: CliContext,
-  enterAnswers: boolean,
 ): Promise<"y" | "n" | "enter" | "stop"> {
   // The lookup runs while the question waits for a key: its cold start is about a second.
   const letters = ctx.latinLetters();
   for (;;) {
     const key = await readKey(question, ctx);
     if (key.startsWith(CTRL_C)) return "stop";
-    if (enterAnswers && /^[\r\n]/.test(key)) return "enter";
+    if (/^[\r\n]/.test(key)) return "enter";
     const typed = ([...key][0] ?? "").toLowerCase();
     const letter = (await letters).get(typed) ?? typed;
     if (letter === "y" || letter === "n") return letter;
@@ -352,7 +350,7 @@ async function readAnswer(
 // Ctrl-C reads as "stop".
 async function confirm(question: string, ctx: CliContext): Promise<boolean> {
   // Y is the default, as in apt: Enter applies too.
-  const answer = await readAnswer(question, ctx, true);
+  const answer = await readAnswer(question, ctx);
   const yes = answer === "y" || answer === "enter";
   ctx.stdout.write(`${yes ? "y" : "n"}\n`);
   return yes;
@@ -1395,7 +1393,7 @@ export async function init(
     ctx.stderr.write("Stopped — nothing changed.\n");
     return 1;
   }
-  // The secret step lets the node send the phone to devsite's dnsmasq, so it waits until dnsmasq answers.
+  // The node takes the route only when dnsmasq answers, so the secret prompt and the report on a piped secret wait for dnsmasq.
   await runSteps(steps, paint, ctx, async () => {
     if (dnsPlan !== null && dns.dnsmasq !== null) await waitForDnsmasq(dns.dnsmasq.ip, ctx);
     if (pipedSecret !== null) await reportRoute(ctx);

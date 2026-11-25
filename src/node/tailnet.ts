@@ -73,13 +73,20 @@ export async function readTailnet(env: TailnetEnv): Promise<Tailnet | null> {
   return { ips: ipsOf(s.Self), name, user, macs, peers };
 }
 
-// The Tailscale user who owns a tailnet IP; null for an address outside the tailnet.
-export async function whoisUser(ip: string, env: TailnetEnv): Promise<number | null> {
+// The Tailscale user who owns a tailnet IP, and every IP of that device; null for an address outside the tailnet.
+export async function whois(
+  ip: string,
+  env: TailnetEnv,
+): Promise<{ user: number; ips: string[] } | null> {
   const out = await tailscale(["whois", "--json", ip], env);
   if (out === null) return null;
   try {
-    const id = (JSON.parse(out) as { UserProfile?: { ID?: unknown } }).UserProfile?.ID;
-    return typeof id === "number" ? id : null;
+    const w = JSON.parse(out) as { Node?: { Addresses?: unknown }; UserProfile?: { ID?: unknown } };
+    const id = w.UserProfile?.ID;
+    if (typeof id !== "number") return null;
+    const addresses = Array.isArray(w.Node?.Addresses) ? w.Node.Addresses : [];
+    const ips = addresses.flatMap((a) => (typeof a === "string" ? [a.replace(/\/\d+$/, "")] : []));
+    return { user: id, ips };
   } catch {
     return null;
   }

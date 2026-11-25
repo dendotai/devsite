@@ -29,7 +29,11 @@ export function statusJson(self: Device, peers: Array<Device & { os?: string; us
   };
 }
 
-const whois = (user: number) => ({ Node: { User: user }, UserProfile: { ID: user } });
+// caller: the device a call comes from, as Tailscale names its addresses.
+const whois = (user: number, caller: Device) => ({
+  Node: { User: user, Addresses: [`${caller.ip}/${caller.ip.includes(":") ? 128 : 32}`] },
+  UserProfile: { ID: user },
+});
 
 // A port free on both loopback addresses, for a port every Mac shares.
 export async function freePort(): Promise<number> {
@@ -54,7 +58,7 @@ export async function twoMacs(
     env: opts.hereEnv,
     tailnet: {
       status: statusJson(THIS_MAC, [OTHER_MAC]),
-      whois: { [THIS_MAC.ip]: whois(ME) },
+      whois: { [THIS_MAC.ip]: whois(ME, OTHER_MAC) },
     },
   });
   const there = await startTestNode(undefined, {
@@ -62,7 +66,7 @@ export async function twoMacs(
     env: opts.thereEnv,
     tailnet: {
       status: statusJson(OTHER_MAC, [THIS_MAC]),
-      whois: { [OTHER_MAC.ip]: whois(opts.otherSeesCaller ?? ME) },
+      whois: { [OTHER_MAC.ip]: whois(opts.otherSeesCaller ?? ME, THIS_MAC) },
     },
   });
   return { here, there, peerPort };

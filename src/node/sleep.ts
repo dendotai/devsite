@@ -32,7 +32,7 @@ function run() {
 
 const RESTART_MS = 10_000;
 
-// sleep resolves once the other nodes are told; the Mac's sleep waits for it. DEVSITE_SLEEP_LISTENER names a stand-in for the listener in tests. Off macOS, nothing listens.
+// sleep resolves once the other nodes are told; the Mac's sleep waits for it. DEVSITE_SLEEP_LISTENER names a stand-in for the listener in tests.
 export function listenForSleep(
   env: SleepEnv,
   on: { sleep: () => Promise<void>; wake: () => void },

@@ -42,7 +42,7 @@ The nodes on the Macs of one tailnet find each other through `tailscale status`,
 
 A request for a name that is not live on the Mac it reaches goes on to the Mac where the name is live: the node relays it over HTTPS to that Mac's Caddy, HMR included, and checks that Caddy's certificate against this Mac's CA root, read from Caddy's admin API. So the phone opens `https://<name>.internal` for a project on any of your Macs, and a dev server started on any Mac opens at once. The relay needs one CA root on every Mac (below); with another root, the page names that Mac and the `devsite ca export` / `devsite init --ca -` fix. A name live on no Mac shows the offline page with where the project last ran, on any of your Macs.
 
-A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it or another Mac's node knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not answer, Caddy shows a short "node not running" page.
+A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it or another Mac's node knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not run, Caddy passes a `.internal` request to the main Mac, and shows a short "node not running" page when it cannot.
 
 ## Quick start
 
@@ -96,6 +96,9 @@ Each additional project needs only steps 1 to 3. Because no project declares a p
 
    ```text
    Step 3 of 3: store the Tailscale OAuth client secret in the login Keychain, so the node writes the split DNS route  [manual]
+     Create a Tailscale OAuth client: https://console.tailscale.com/admin/settings/trust-credentials
+     Choose Credential, then OAuth, then tick Write next to DNS.
+     Don't forget to back up the secret. Tailscale won't show it again.
    Tailscale OAuth client secret:
      Stored in the login Keychain.
      The split DNS route for .internal names this Mac (100.90.1.2).
@@ -115,7 +118,7 @@ Each additional project needs only steps 1 to 3. Because no project declares a p
 - **Plan.** For the red checks it can fix, it prints a numbered plan and the diff of each file it would change, except the files devsite writes whole (Caddy's route to the node and the dnsmasq files), which show as one line; `--dry-run` prints their diff too. A step that needs root is tagged `[sudo]`; a step only you can do is tagged `[manual]`.
 - **One prompt.** `Apply these changes? [Y/n]`. `--dry-run` stops before this prompt and writes nothing.
 - **One `sudo` call.** Every root step runs back to back in one `sudo` call, right after your `y`, so you type your password at most once per run. Your password goes only to `sudo`, never through devsite.
-- **Manual steps.** Each asks `Open <url> in your browser? (y/n)`, then `Done? Press y to check, n to skip`. Each prompt takes one key, with no Enter. A skipped step leaves `doctor` red; `init` still finishes.
+- **Manual steps.** Each says what to do and waits for your input. A skipped step leaves `doctor` red; `init` still finishes.
 - **Checks after this run.** The same checks again, with the fix for each one still red.
 
 On a set-up Mac `init` prints the checks, then `Nothing to do: init changed nothing.` It leaves Caddy and the node alone, so your running dev servers keep their routes. `init` is the only thing that installs or updates the node: it installs the devsite version it runs from when the node does not answer or runs an older devsite.

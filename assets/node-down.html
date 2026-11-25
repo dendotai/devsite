@@ -2,7 +2,8 @@
 <!--
   devsite "node not running" page — design source.
 
-  Caddy answers this page itself when the devsite node does not answer.
+  Caddy answers this page itself when the devsite node does not run and no
+  other machine takes the request.
   `devsite init` puts it into devsite.d/node.caddy as a Caddyfile heredoc,
   so no brace may be followed by a character other than a space or a
   newline: Caddy would read it as a placeholder.

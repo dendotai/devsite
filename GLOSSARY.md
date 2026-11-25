@@ -25,8 +25,11 @@ _Avoid_: running, up
 The Mac the `internal` split DNS route names; the phone's requests reach it first.
 _Avoid_: route's Mac, primary
 
-**Signal**:
-What the main Mac's node sends every 2 seconds on the open connection from each other node; 3 missed signals start a takeover.
+**Heartbeat**:
+What the main Mac's node sends every 2 seconds on the open connection from each other node; 3 missed heartbeats start a takeover.
+
+**Follower**:
+A node that listens for the main Mac's heartbeats.
 
 **Takeover**:
 Another Mac becomes the main Mac when the main Mac is gone.

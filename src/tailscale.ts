@@ -109,7 +109,7 @@ export function splitDnsDetail(split: Exclude<SplitDns, { state: "this-mac" }>):
 }
 
 // The route may name this Mac or another Mac of this user whose node answers, on any protocol: that Mac is the main Mac, and its node relays to every other Mac (#66).
-export function splitDnsCheck(
+function splitDnsCheck(
   ip: string,
   split: SplitDns,
   peers: PeerState[],
@@ -156,7 +156,7 @@ export function splitDnsCheck(
   };
 }
 
-export function secretCheck(ctx: CliContext): Result {
+function secretCheck(ctx: CliContext): Result {
   return hasSecret(ctx)
     ? { state: "green", label: SECRET_LABEL }
     : {

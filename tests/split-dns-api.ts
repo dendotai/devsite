@@ -11,12 +11,13 @@ afterEach(() => {
 });
 
 export function fakeSplitDnsApi(route: Route) {
-  // down: every call gets HTTP 503, as Tailscale's API out of reach.
-  const state = { route, writes: [] as string[][], down: false };
+  // down: every call gets HTTP 503, as Tailscale's API out of reach. delayMs: each call waits this long.
+  const state = { route, writes: [] as string[][], down: false, delayMs: 0 };
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
+      await Bun.sleep(state.delayMs);
       if (state.down) return new Response("", { status: 503 });
       const url = new URL(req.url);
       if (url.pathname === "/api/v2/oauth/token") {

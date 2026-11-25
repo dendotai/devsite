@@ -3,8 +3,8 @@ import { execFile } from "node:child_process";
 import type { CliContext } from "./context";
 import { exec } from "./io";
 
-export const KEYCHAIN_SERVICE = "devsite";
-export const KEYCHAIN_ACCOUNT = "tailscale-oauth-client-secret";
+const KEYCHAIN_SERVICE = "devsite";
+const KEYCHAIN_ACCOUNT = "tailscale-oauth-client-secret";
 const KEYCHAIN_LABEL = "devsite: Tailscale OAuth client secret (dns scope) for the split DNS route";
 
 // Tailscale prints an OAuth client secret as `tskey-client-<client ID>-<secret>`.

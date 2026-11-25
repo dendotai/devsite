@@ -39,6 +39,8 @@ beforeEach(async () => {
 afterEach(async () => {
   await Promise.all(
     children.map((c) => {
+      // A Caddy that did not start has ended already and sends no exit event again.
+      if (c.exitCode !== null || c.signalCode !== null) return Promise.resolve();
       const ended = new Promise((r) => c.once("exit", r));
       c.kill();
       return ended;
@@ -52,14 +54,20 @@ afterEach(async () => {
 // devsite's route on `port`. The private CA is in no trust store, so the test's Caddy does not check the main Mac's certificate.
 async function startCaddy(port: number, to: { node: number; main: number; dns: string }) {
   const dir = mkdtempSync(join(tmpdir(), "devsite-pass-"));
-  const route = renderNodeRoute(PAGE)
-    .replace("*.internal, *.localhost {", `*.internal:${port}, *.localhost:${port} {`)
-    .replace("\t\ton_demand\n", "")
-    .replaceAll("127.0.0.1:47380", `127.0.0.1:${to.node}`)
-    .replace("127.0.0.1:443", `127.0.0.1:${port}`)
-    .replace("port 443", `port ${to.main}`)
-    .replace("100.100.100.100", to.dns)
-    .replace("dial_timeout", "tls_insecure_skip_verify\ndial_timeout");
+  let route = renderNodeRoute(PAGE);
+  for (const [from, into] of [
+    ["*.internal, *.localhost {", `*.internal:${port}, *.localhost:${port} {`],
+    ["\t\ton_demand\n", ""],
+    ["127.0.0.1:47380", `127.0.0.1:${to.node}`],
+    ["127.0.0.1:443", `127.0.0.1:${port}`],
+    ["port 443", `port ${to.main}`],
+    ["100.100.100.100", to.dns],
+    ["dial_timeout", "tls_insecure_skip_verify\ndial_timeout"],
+  ] as const) {
+    // A route that changed must not reach this machine's real Caddy, node or DNS.
+    if (!route.includes(from)) throw new Error(`devsite's route holds no ${from}`);
+    route = route.replaceAll(from, into);
+  }
   writeFileSync(
     join(dir, "Caddyfile"),
     `{\nadmin off\nauto_https disable_redirects\nskip_install_trust\nhttps_port ${port}\nstorage file_system ${dir}\n}\n${route}`,
@@ -72,7 +80,7 @@ async function startCaddy(port: number, to: { node: number; main: number; dns: s
     log += d;
   });
   children.push(child);
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 200 && child.exitCode === null; i++) {
     const up = await new Promise<boolean>((resolve) => {
       const s = connect(
         { host: "127.0.0.1", port, servername: "web.internal", rejectUnauthorized: false },
@@ -94,36 +102,43 @@ function send(
   opts: { method?: string; body?: string; host?: string; headers?: Record<string, string> } = {},
 ) {
   const host = opts.host ?? "web.internal";
-  return new Promise<{ status?: number; connection?: string; body: string }>((resolve, reject) => {
-    const req = request(
-      {
-        host: "127.0.0.1",
-        port,
-        servername: host,
-        rejectUnauthorized: false,
-        agent: false,
-        method: opts.method,
-        headers: {
-          host,
-          connection: "keep-alive",
-          ...opts.headers,
+  return new Promise<{ status?: number; connection?: string; altSvc?: string; body: string }>(
+    (resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port,
+          servername: host,
+          rejectUnauthorized: false,
+          agent: false,
+          method: opts.method,
+          headers: {
+            host,
+            connection: "keep-alive",
+            ...opts.headers,
+          },
         },
-      },
-      async (res) => {
-        let body = "";
-        for await (const chunk of res) body += chunk;
-        resolve({ status: res.statusCode, connection: res.headers.connection, body });
-      },
-    );
-    req.on("error", reject);
-    req.end(opts.body);
-  });
+        async (res) => {
+          let body = "";
+          for await (const chunk of res) body += chunk;
+          resolve({
+            status: res.statusCode,
+            connection: res.headers.connection,
+            altSvc: res.headers["alt-svc"],
+            body,
+          });
+        },
+      );
+      req.on("error", reject);
+      req.end(opts.body);
+    },
+  );
 }
 
 // The old main Mac, whose node is stopped, and the main Mac.
 async function twoCaddys() {
   const [old, main] = [await freePort(), await freePort()];
-  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT ?? "";
+  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT;
   await startCaddy(old, { node: deadPort, main, dns });
   const mainCaddy = await startCaddy(main, { node: nodePort, main, dns });
   return { old, main, mainCaddy };
@@ -132,7 +147,7 @@ async function twoCaddys() {
 test("a request goes to the main Mac with its body and host, and the connection stays open", async () => {
   const { old } = await twoCaddys();
   const r = await send(old, { method: "POST", body: "hello" });
-  expect(r).toEqual({ status: 200, connection: undefined, body: "main" });
+  expect(r).toEqual({ status: 200, connection: undefined, altSvc: "clear", body: "main" });
   expect(seen).toEqual([{ method: "POST", host: "web.internal", body: "hello" }]);
 });
 
@@ -152,12 +167,17 @@ test("the main Mac's Caddy refuses the connection: the page", async () => {
     mainCaddy.once("exit", r);
     mainCaddy.kill();
   });
-  expect(await send(old)).toEqual({ status: 502, connection: "close", body: PAGE });
+  expect(await send(old)).toEqual({
+    status: 502,
+    connection: "close",
+    altSvc: "clear",
+    body: PAGE,
+  });
 });
 
 test("Tailscale's DNS names this machine itself, or gives no answer: the page", async () => {
   const self = await freePort();
-  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT ?? "";
+  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT;
   await startCaddy(self, { node: deadPort, main: self, dns });
   expect(await send(self)).toMatchObject({ status: 502, body: PAGE });
   const noDns = await freePort();
@@ -205,17 +225,18 @@ test("a main Mac that accepts the connection and then says nothing: the page aft
   const silent = createTcpServer();
   await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
   const old = await freePort();
-  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT ?? "";
+  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT;
   await startCaddy(old, { node: deadPort, main: (silent.address() as AddressInfo).port, dns });
   const start = Date.now();
   expect(await send(old)).toMatchObject({ status: 502, body: PAGE });
+  expect(Date.now() - start).toBeGreaterThanOrEqual(1400);
   expect(Date.now() - start).toBeLessThan(4000);
   silent.close();
 });
 
 test("a node that dies while it answers: the request is not sent a second time", async () => {
   const [old, main] = [await freePort(), await freePort()];
-  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT ?? "";
+  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT;
   const dying = createServer((req) => req.socket.destroy());
   await new Promise<void>((r) => dying.listen(0, "127.0.0.1", r));
   await startCaddy(old, { node: (dying.address() as AddressInfo).port, main, dns });
@@ -227,3 +248,12 @@ test("a node that dies while it answers: the request is not sent a second time",
   expect(seen).toEqual([]);
   dying.close();
 });
+
+test("an answer that takes 12 s comes through, as with no pass", async () => {
+  node.removeAllListeners("request");
+  node.on("request", (_req, res) => {
+    setTimeout(() => res.end("slow"), 12_000);
+  });
+  const { old } = await twoCaddys();
+  expect(await send(old)).toMatchObject({ status: 200, body: "slow" });
+}, 30_000);
