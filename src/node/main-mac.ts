@@ -4,7 +4,7 @@ import { readSecret } from "../keychain";
 import { IPV4 } from "../tailscale";
 import { type ServesEnv, servesNames } from "./serves";
 import { type ApiEnv, makeSplitDnsApi, type SplitDnsApi } from "./split-dns-api";
-import { askPeer, type Peer, PROTOCOL, PROTOCOL_HEADER, type Tailnet } from "./tailnet";
+import { type Peer, type PeerCaller, PROTOCOL, PROTOCOL_HEADER, type Tailnet } from "./tailnet";
 
 // The heartbeat interval; 3 missed heartbeats start a takeover. DEVSITE_HEARTBEAT_MS shortens it in tests.
 const HEARTBEAT_MS = 2000;
@@ -43,7 +43,7 @@ export type MainMac = {
   close: () => Promise<void>;
 };
 
-type Deps = { env: MainMacEnv; tailnet: () => Tailnet | null; peersAt: () => number };
+type Deps = { env: MainMacEnv; tailnet: () => Tailnet | null; caller: PeerCaller };
 
 const sameList = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
 
@@ -56,7 +56,7 @@ const byName = (a: Peer, b: Peer) => {
 
 export const selfIp = (t: Tailnet) => t.ips.find((a) => IPV4.test(a)) ?? t.ips[0];
 
-export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
+export function makeMainMac({ env, tailnet, caller }: Deps): MainMac {
   const heartbeatMs = Number(env.DEVSITE_HEARTBEAT_MS) || HEARTBEAT_MS;
   let state: RouteState = { role: "unknown", why: "the route is not read yet" };
   let secret: string | null = null;
@@ -173,7 +173,7 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
       t.macs
         .filter((p) => p.ip !== gone?.ip)
         .map(async (p) => {
-          const a = await askPeer(p, peersAt(), "/hello");
+          const a = await caller.ask(p, "/hello");
           const writes =
             a.state === "answer" && (a.body as { routeWriter?: unknown } | null)?.routeWriter;
           return writes === true ? [p] : [];
@@ -222,13 +222,18 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
     });
   };
 
+  // Another program, or nothing, at the port: the main Mac's node may listen on a fallback port, which the next connect then takes.
+  const relearnMainMacPort = () => {
+    if (follow !== null) void caller.ask(follow.peer, "/hello");
+  };
+
   const connect = () => {
     const f = follow;
     if (f === null || f.conn !== null || f.connecting) return;
     f.connecting = true;
     const req = request({
       host: f.peer.ip,
-      port: peersAt(),
+      port: caller.portOf(f.peer),
       path: "/heartbeats",
       headers: { [PROTOCOL_HEADER]: String(PROTOCOL) },
       timeout: heartbeatMs,
@@ -241,6 +246,7 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
       // A node that answers but sends no heartbeats (another protocol, an older devsite) does not count as gone; a program that is no node does.
       if (res.headers[PROTOCOL_HEADER] !== String(PROTOCOL) || res.statusCode !== 200) {
         if (res.headers[PROTOCOL_HEADER] !== undefined) f.lastHeartbeat = Date.now();
+        else relearnMainMacPort();
         res.resume();
         return;
       }
@@ -262,10 +268,15 @@ export function makeMainMac({ env, tailnet, peersAt }: Deps): MainMac {
       res.on("close", lost);
       res.on("error", lost);
     });
+    let noReply = false;
     // No answer: the next heartbeat interval tries again, and missed heartbeats start the takeover.
-    req.on("timeout", () => req.destroy());
+    req.on("timeout", () => {
+      noReply = true;
+      req.destroy();
+    });
     req.on("error", () => {
       f.connecting = false;
+      if (!noReply) relearnMainMacPort();
     });
     req.end();
   };

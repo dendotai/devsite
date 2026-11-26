@@ -27,6 +27,7 @@ import {
   useNodeWith,
 } from "./machine";
 import { register, startTestNode, useNodes } from "./node-helpers";
+import { freePort } from "./two-macs";
 
 useMachine();
 useNodes();
@@ -511,8 +512,8 @@ test("a Mac whose node refuses this Mac's calls is red, with one Tailscale user 
 test("a peer port another program holds on this Mac is red, naming that program", async () => {
   await mockAdmin([nodeRoute()]);
   const holder = createServer();
-  await new Promise<void>((r) => holder.listen(0, "::1", r));
-  const peerPort = (holder.address() as AddressInfo).port;
+  const peerPort = await freePort();
+  await new Promise<void>((r) => holder.listen(peerPort, "::1", r));
   const cwd = makeRepo();
   const node = await startTestNode(undefined, {
     peerPort,
@@ -532,7 +533,7 @@ test("a peer port another program holds on this Mac is red, naming that program"
   });
   await new Promise((done) => holder.close(done));
   expect(r.stdout).toContain(
-    `✗ the node listens for other Macs on [::1]:${peerPort} — syncthing (pid 4242) holds the port`,
+    `✗ the node listens for other Macs on [::1]:${peerPort} — syncthing (pid 4242) holds the port; the other Macs reach the node on [::1]:${peerPort + 1} meanwhile`,
   );
   expect(r.stdout).toContain("fix: stop syncthing; the node takes the port within 10 s");
   const lsof = r.calls.find((c) => c.cmd === "lsof");

@@ -14,6 +14,12 @@ A program that sends a request to the node and shows the answer: the command-lin
 **Peer**:
 The node on another Mac of your Tailscale user.
 
+**Peer port**:
+The port, 47380, on which each node listens for the other nodes on its Mac's Tailscale IPs.
+
+**Fallback port**:
+One of 47381–47384, where a node listens while another program holds the peer port on its Tailscale IP.
+
 **Protocol number**:
 The number each call between nodes carries; a node on another number shows in `doctor` and does not count as gone.
 
