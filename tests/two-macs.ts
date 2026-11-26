@@ -42,7 +42,7 @@ const isFree = (port: number, host: string) =>
     s.listen(port, host, () => s.close(() => resolve(true)));
   });
 
-// A port free on both loopback addresses, for a port every Mac shares, with its fallback ports free too. It lies below macOS's ephemeral range (49152 up), as 47380 does: the OS gives a port 0 server the ports after the last one in sequence, so a port in that range finds its fallback ports taken by the test's other servers.
+// A port free on both loopback addresses, for a port every Mac shares, with its fallback ports free too. It lies below macOS's ephemeral range (49152 up), as the node's peer port (NODE_PORT) does: the OS gives a port 0 server the ports after the last one in sequence, so a port in that range finds its fallback ports taken by the test's other servers.
 export async function freePort(): Promise<number> {
   for (;;) {
     const port = 20_000 + Math.floor(Math.random() * 25_000);
@@ -53,6 +53,24 @@ export async function freePort(): Promise<number> {
     if (free.every(Boolean)) return port;
   }
 }
+
+// Another program on a port at ip, which answers as no node does. Resolves to the call that stops it.
+export async function holdPort(port: number, ip: string) {
+  const holder = createServer((_req, res) => res.end("hello"));
+  await new Promise<void>((r) => holder.listen(port, ip, r));
+  return () =>
+    new Promise((r) => {
+      holder.closeAllConnections();
+      holder.close(r);
+    });
+}
+
+// Whether nothing listens on the port at ip.
+export const refused = (port: number, ip: string) =>
+  fetch(`http://${ip.includes(":") ? `[${ip}]` : ip}:${port}/hello`).then(
+    () => false,
+    () => true,
+  );
 
 // This Mac's node and the other Mac's node, each of user ME, each seeing the other as a peer. On loopback a call comes from the address it goes to, so each node's whois answer is keyed by its own address. otherSeesCaller: the user the other Mac's whois names for every caller. hereEnv, thereEnv: what each node's process gets on top. peerPort: a port the test set up first.
 export async function twoMacs(

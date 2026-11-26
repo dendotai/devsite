@@ -92,7 +92,7 @@ export async function whois(
   }
 }
 
-// denied: a node on this protocol refused the call (its whois named another user). refused: the Mac is reachable and nothing listens on the port (no devsite, or its node stopped). timeout: no reply (the Mac sleeps, is off, or its firewall drops the call). not-a-node: a server with no protocol header, another program on the port.
+// denied: a node on this protocol refused the call (its whois named another user). refused: the Mac is reachable and nothing listens on the port (no devsite, or its node stopped). timeout: no reply (the Mac sleeps, is off, or its firewall drops the call). not-a-node: another program on the port: an answer with no protocol header, one that is no HTTP, or a connection it closes.
 export type PeerAnswer =
   | { state: "answer"; body: unknown }
   | { state: "other-protocol"; protocol: number | null }
@@ -103,6 +103,9 @@ const codeOf = (err: unknown) => {
   const e = err as { code?: unknown; cause?: { code?: unknown } };
   return e.code ?? e.cause?.code;
 };
+
+// The Mac is out of reach, as a Mac that sleeps or is off.
+const NO_ROUTE = new Set(["EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN", "ETIMEDOUT"]);
 
 // An IPv6 address takes brackets before its port.
 export const addressOf = (ip: string, port: number) =>
@@ -130,21 +133,25 @@ export async function askPeer(peer: Peer, port: number, path: string): Promise<P
     }
     return { state: "answer", body: await res.json() };
   } catch (err) {
-    return codeOf(err) === "ECONNREFUSED" ? { state: "refused" } : { state: "timeout" };
+    const code = codeOf(err);
+    if (code === "ECONNREFUSED") return { state: "refused" };
+    const noReply = (err as Error).name === "TimeoutError" || NO_ROUTE.has(String(code));
+    return noReply ? { state: "timeout" } : { state: "not-a-node" };
   }
 }
 
 // A node whose peer port another program holds on its Tailscale IP listens on the first free port of these instead, so every node can find it with no lookup service.
 export const fallbackPorts = (port: number) => [1, 2, 3, 4].map((i) => port + i);
 
+// Nothing, or another program, at the port: the Mac's node may listen on a fallback port. A timeout is not one: the Mac sleeps or drops the call, and its fallback ports would wait as long.
+const nodeMayBeElsewhere = (a: PeerAnswer) => a.state === "refused" || a.state === "not-a-node";
 // A node answered: on this protocol or another, or with a refusal of its own.
-const fromNode = (a: PeerAnswer) =>
-  a.state !== "refused" && a.state !== "not-a-node" && a.state !== "timeout";
+const fromNode = (a: PeerAnswer) => !nodeMayBeElsewhere(a) && a.state !== "timeout";
 
 export type PeerCaller = {
   // askPeer at the peer port; after a refusal or another program's answer there, at the fallback ports, all at once.
   ask: (peer: Peer, path: string) => Promise<PeerAnswer>;
-  // The port the peer's node last answered on.
+  // The fallback port the peer's node last answered on, else the peer port.
   portOf: (peer: Peer) => number;
 };
 
@@ -155,11 +162,11 @@ export function makePeerCaller(peersAt: () => number): PeerCaller {
     const known = found.get(peer.ip);
     if (known !== undefined) {
       const a = await askPeer(peer, known, path);
-      if (a.state !== "refused" && a.state !== "not-a-node") return a;
+      if (!nodeMayBeElsewhere(a)) return a;
       found.delete(peer.ip);
     }
     const first = await askPeer(peer, peersAt(), path);
-    if (first.state !== "refused" && first.state !== "not-a-node") return first;
+    if (!nodeMayBeElsewhere(first)) return first;
     const tries = await Promise.all(
       fallbackPorts(peersAt()).map(async (port) => ({ port, a: await askPeer(peer, port, path) })),
     );

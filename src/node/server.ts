@@ -441,10 +441,10 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
         const address = addressOf(ip, peersAt);
         const error = failedIps.get(ip);
         if (error === undefined) return { address };
-        const at = peerServers.get(ip)?.port;
-        return at === undefined
+        const fallbackPort = peerServers.get(ip)?.port;
+        return fallbackPort === undefined
           ? { address, error }
-          : { address, error, fallback: addressOf(ip, at) };
+          : { address, error, fallback: addressOf(ip, fallbackPort) };
       }),
       route: mainMac.state(),
     };
@@ -625,18 +625,19 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       tailnet = await readTailnet(env);
       const wanted = new Set(tailnet?.ips ?? []);
       for (const ip of failedIps.keys()) if (!wanted.has(ip)) failedIps.delete(ip);
-      for (const [ip, p] of peerServers) {
+      for (const [ip, held] of peerServers) {
         if (wanted.has(ip)) continue;
-        stopServer(p.server);
+        stopServer(held.server);
         peerServers.delete(ip);
       }
       for (const ip of wanted) {
-        const now = peerServers.get(ip);
-        if (now?.port === peersAt) continue;
+        const held = peerServers.get(ip);
+        if (held?.port === peersAt) continue;
         const s = peerServer();
         try {
           await listen(s, peersAt, ip);
-          if (now !== undefined) stopServer(now.server);
+          // The fallback port takes no new call; the heartbeat connections on it stay, so the nodes that follow this one miss no heartbeat.
+          held?.server.close();
           peerServers.set(ip, { server: s, port: peersAt });
           failedIps.delete(ip);
           continue;
@@ -648,7 +649,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
           }
           failedIps.set(ip, String((err as NodeJS.ErrnoException).code ?? "error"));
         }
-        if (now !== undefined) continue;
+        if (held !== undefined) continue;
         for (const port of fallbackPorts(peersAt)) {
           try {
             await listen(s, port, ip);
@@ -675,7 +676,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       clearInterval(timer);
       sleepListener.close();
       await mainMac.close();
-      for (const p of peerServers.values()) stopServer(p.server);
+      for (const held of peerServers.values()) stopServer(held.server);
       await new Promise<void>((resolve) => {
         for (const s of tunnels) s.destroy();
         server.closeAllConnections();

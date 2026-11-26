@@ -223,7 +223,7 @@ export function makeMainMac({ env, tailnet, caller }: Deps): MainMac {
   };
 
   // Another program, or nothing, at the port: the main Mac's node may listen on a fallback port, which the next connect then takes.
-  const findNode = () => {
+  const relearnMainMacPort = () => {
     if (follow !== null) void caller.ask(follow.peer, "/hello");
   };
 
@@ -246,7 +246,7 @@ export function makeMainMac({ env, tailnet, caller }: Deps): MainMac {
       // A node that answers but sends no heartbeats (another protocol, an older devsite) does not count as gone; a program that is no node does.
       if (res.headers[PROTOCOL_HEADER] !== String(PROTOCOL) || res.statusCode !== 200) {
         if (res.headers[PROTOCOL_HEADER] !== undefined) f.lastHeartbeat = Date.now();
-        else findNode();
+        else relearnMainMacPort();
         res.resume();
         return;
       }
@@ -268,11 +268,15 @@ export function makeMainMac({ env, tailnet, caller }: Deps): MainMac {
       res.on("close", lost);
       res.on("error", lost);
     });
+    let noReply = false;
     // No answer: the next heartbeat interval tries again, and missed heartbeats start the takeover.
-    req.on("timeout", () => req.destroy());
-    req.on("error", (err) => {
+    req.on("timeout", () => {
+      noReply = true;
+      req.destroy();
+    });
+    req.on("error", () => {
       f.connecting = false;
-      if ((err as NodeJS.ErrnoException).code === "ECONNREFUSED") findNode();
+      if (!noReply) relearnMainMacPort();
     });
     req.end();
   };

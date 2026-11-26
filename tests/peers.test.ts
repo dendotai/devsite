@@ -3,10 +3,20 @@ import { expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { register, startDevServer, startTestNode, status, useNodes } from "./node-helpers";
-import { freePort, OTHER_MAC, SOMEONE_ELSE, statusJson, THIS_MAC, twoMacs } from "./two-macs";
+import {
+  freePort,
+  holdPort,
+  OTHER_MAC,
+  refused,
+  SOMEONE_ELSE,
+  statusJson,
+  THIS_MAC,
+  twoMacs,
+} from "./two-macs";
 
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -112,28 +122,11 @@ test("a Mac where another program holds the peer port is listed as not-a-node", 
   expect(list).toEqual([{ mac: "Mac mini", ip: "::1", state: "not-a-node" }]);
 });
 
-// Another program on the shared peer port at ip, which answers as no node does.
-async function holdPort(port: number, ip: string) {
-  const holder = createServer((_req, res) => res.end("hello"));
-  await new Promise<void>((r) => holder.listen(port, ip, r));
-  return () =>
-    new Promise((r) => {
-      holder.closeAllConnections();
-      holder.close(r);
-    });
-}
-
 // DEVSITE_TAILNET_REFRESH_MS is short in tests, so the next refresh comes within a few polls.
-async function until(check: () => Promise<boolean>) {
+async function eventually(check: () => Promise<boolean>) {
   const deadline = Date.now() + 3000;
   while (!(await check()) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
 }
-
-const refused = (port: number, ip: string) =>
-  fetch(`http://${ip.includes(":") ? `[${ip}]` : ip}:${port}/hello`).then(
-    () => false,
-    () => true,
-  );
 
 test("a peer port taken on this Mac shows in the node's status with the fallback port it listens on, and the node moves back once the port is free", async () => {
   const peerPort = await freePort();
@@ -153,7 +146,7 @@ test("a peer port taken on this Mac shows in the node's status with the fallback
   });
   expect(hello.headers.get("devsite-protocol")).toBe("1");
   await release();
-  await until(async () => !JSON.stringify(await listeners()).includes("EADDRINUSE"));
+  await eventually(async () => !JSON.stringify(await listeners()).includes("EADDRINUSE"));
   expect(await listeners()).toEqual([{ address: `[::1]:${peerPort}` }]);
   expect(await refused(peerPort + 1, "::1")).toBe(true);
 });
@@ -194,6 +187,18 @@ test("with the peer port taken on the other Mac's Tailscale IP, a start of a nam
   ]);
 });
 
+test("with a program on the other Mac's peer port that speaks no HTTP, a start of a name live there is still refused", async () => {
+  const peerPort = await freePort();
+  const holder = createNetServer((s) => s.end("SSH-2.0-OpenSSH\r\n"));
+  await new Promise<void>((r) => holder.listen(peerPort, OTHER_MAC.ip, r));
+  const { here, there } = await twoMacs({ peerPort });
+  const dev = await startDevServer();
+  await register(there, "web", { port: dev.port });
+  const res = await register(here, "web", { port: dev.port });
+  holder.close();
+  expect(res.status).toBe(409);
+});
+
 test("a node that moved back to the peer port from its fallback port is found there", async () => {
   const peerPort = await freePort();
   const release = await holdPort(peerPort, OTHER_MAC.ip);
@@ -202,7 +207,7 @@ test("a node that moved back to the peer port from its fallback port is found th
   await register(there, "web", { port: dev.port });
   expect((await register(here, "web", { port: dev.port })).status).toBe(409);
   await release();
-  await until(() => refused(peerPort + 1, OTHER_MAC.ip));
+  await eventually(() => refused(peerPort + 1, OTHER_MAC.ip));
   expect(await refused(peerPort + 1, OTHER_MAC.ip)).toBe(true);
   expect((await register(here, "web", { port: dev.port })).status).toBe(409);
 });

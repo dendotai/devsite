@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { startTestNode, useNodes } from "./node-helpers";
 import { serving } from "./serving";
 import { fakeSplitDnsApi, type Route, SECRET } from "./split-dns-api";
-import { freePort, ME, OTHER_MAC, statusJson, THIS_MAC, twoMacs } from "./two-macs";
+import { freePort, holdPort, ME, OTHER_MAC, statusJson, THIS_MAC, twoMacs } from "./two-macs";
 
 useNodes();
 // Each test waits through several heartbeat intervals.
@@ -24,11 +24,16 @@ function keychain(secret: string | null) {
 async function startMacs(
   route: Route,
   secrets: { here?: string | null; there?: string | null } = {},
-  hereEnv: Record<string, string> = {},
-  // What the other Mac can serve: everything, when left out.
-  thereServes: Parameters<typeof serving>[1] = {},
-  // A peer port the test set up first.
-  peerPort?: number,
+  // thereServes: what the other Mac can serve, everything when left out. peerPort: a port the test set up first.
+  {
+    hereEnv = {},
+    thereServes = {},
+    peerPort,
+  }: {
+    hereEnv?: Record<string, string>;
+    thereServes?: Parameters<typeof serving>[1];
+    peerPort?: number;
+  } = {},
 ) {
   const api = fakeSplitDnsApi(route);
   const env = (secret: string | null) => ({
@@ -129,14 +134,18 @@ test("the Mac that takes over reads the route again and writes nothing when anot
   expect(api.state.writes).toEqual([]);
 });
 
-test("a main Mac whose peer port another program holds sends its heartbeats from its fallback port, so the route stays", async () => {
+test("a main Mac whose peer port another program holds sends its heartbeats from its fallback port, and moves back to the peer port, so the route stays", async () => {
   const peerPort = await freePort();
-  const holder = createServer((_req, res) => res.end("hello"));
-  await new Promise<void>((r) => holder.listen(peerPort, THIS_MAC.ip, r));
-  const { api, there } = await startMacs([THIS_MAC.ip], {}, {}, {}, peerPort);
+  const release = await holdPort(peerPort, THIS_MAC.ip);
+  const { api, here, there } = await startMacs([THIS_MAC.ip], {}, { peerPort });
   await Bun.sleep(8 * HEARTBEAT_MS);
-  holder.closeAllConnections();
-  holder.close();
+  expect(api.state.writes).toEqual([]);
+  await release();
+  await Bun.sleep(8 * HEARTBEAT_MS);
+  const listeners = (
+    (await (await fetch(`${here.url}/status`)).json()) as { tailnetListeners: unknown }
+  ).tailnetListeners;
+  expect(listeners).toEqual([{ address: `${THIS_MAC.ip}:${peerPort}` }]);
   expect(api.state.writes).toEqual([]);
   expect((await routeOf(there)) as unknown).toEqual({
     role: "follower",
@@ -161,7 +170,7 @@ test("a main Mac that no node follows finds out that the route moved", async () 
 
 test("a node reads a replaced secret at once when init asks it for the route", async () => {
   const dir = keychain(SECRET);
-  const { here } = await startMacs([THIS_MAC.ip], {}, { DEVSITE_FAKE_SECURITY: dir });
+  const { here } = await startMacs([THIS_MAC.ip], {}, { hereEnv: { DEVSITE_FAKE_SECURITY: dir } });
   await Bun.sleep(3 * HEARTBEAT_MS);
   expect((await routeOf(here)).role).toBe("main");
   writeFileSync(join(dir, "secret"), "tskey-client-k999CNTRL-wrong");
@@ -235,7 +244,7 @@ test("a main Mac that loses a follower reads the route again, and once more afte
 
 test("a sleep of the main Mac moves the route at once, and after its wake the Mac follows the new main Mac", async () => {
   const events = sleepEvents();
-  const { api, here } = await startMacs([THIS_MAC.ip], {}, events.env);
+  const { api, here } = await startMacs([THIS_MAC.ip], {}, { hereEnv: events.env });
   await Bun.sleep(3 * HEARTBEAT_MS);
   const slept = Date.now();
   events.send("sleep");
@@ -251,7 +260,7 @@ test("a sleep of the main Mac moves the route at once, and after its wake the Ma
 
 test("a main Mac that sleeps with no Mac to take over is the main Mac again after its wake", async () => {
   const events = sleepEvents();
-  const { api, here } = await startMacs([THIS_MAC.ip], { there: null }, events.env);
+  const { api, here } = await startMacs([THIS_MAC.ip], { there: null }, { hereEnv: events.env });
   await Bun.sleep(2 * HEARTBEAT_MS);
   events.send("sleep");
   await until(events.released, 2000);
@@ -465,7 +474,7 @@ for (const [title, serves] of [
   ["whose Caddy accepts no connection", { caddy: false }],
 ] as const) {
   test(`a Mac ${title} does not take over, so the route stays`, async () => {
-    const { api, here, there } = await startMacs([THIS_MAC.ip], {}, {}, serves);
+    const { api, here, there } = await startMacs([THIS_MAC.ip], {}, { thereServes: serves });
     await Bun.sleep(3 * HEARTBEAT_MS);
     expect((await routeOf(there)).role).toBe("follower");
     await here.stop();
@@ -475,7 +484,7 @@ for (const [title, serves] of [
 }
 
 test("with no route, a Mac that cannot serve .internal names leaves it, and a later Mac that can writes it", async () => {
-  const { api } = await startMacs(null, {}, await serving(THIS_MAC.ip, { dns: null }));
+  const { api } = await startMacs(null, {}, { hereEnv: await serving(THIS_MAC.ip, { dns: null }) });
   await Bun.sleep(4 * HEARTBEAT_MS);
   expect(api.state.writes).toEqual([[OTHER_MAC.ip]]);
 });
