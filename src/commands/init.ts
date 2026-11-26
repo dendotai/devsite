@@ -213,7 +213,7 @@ export function renderNodeRoute(page: string | null = nodeDownPage as unknown as
     `\t@to-main header ${PASS_HEADER} to-main`,
     "\treverse_proxy @to-main {",
     "\t\tdynamic a {",
-    // The dot at the end: with no search domains, a DNS server that never replies costs 10 s, not a minute.
+    // The dot at the end: with no search domains, a DNS server that never replies costs 10 s for each nameserver in /etc/resolv.conf (20 s with Tailscale's two), not a minute.
     "\t\t\tname {host}.",
     "\t\t\tport 443",
     "\t\t\tresolvers 100.100.100.100",
