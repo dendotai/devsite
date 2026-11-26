@@ -1,6 +1,6 @@
 // The split DNS route and takeover (#110): two real nodes on loopback (tests/two-macs.ts), a local fake of Tailscale's OAuth token and split DNS API, and a shorter heartbeat interval. This Mac (MacBook Pro, 127.0.0.1) sorts after the other Mac (Mac mini, ::1).
 import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
-import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { createServer, get, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -276,18 +276,22 @@ afterEach(() => {
   for (const stop of stops.splice(0)) stop();
 });
 
-// A stand-in for the main Mac's node, whose open connection the test cuts, and a real node that follows it.
-async function nodeBesideMain() {
+// A stand-in for the main Mac's node, whose open connection the test cuts, and a real node that follows it, with env added to its own.
+async function nodeBesideMain(env: Record<string, string> = {}) {
   const api = fakeSplitDnsApi([THIS_MAC.ip]);
   const peerPort = await freePort();
   const open = new Set<ServerResponse>();
   let opened = 0;
+  let closedAt = 0;
   const answer = (_req: IncomingMessage, res: ServerResponse) => {
     res.writeHead(200, { "devsite-protocol": "1" });
     res.write("heartbeat\n");
     opened += 1;
     open.add(res);
-    res.on("close", () => open.delete(res));
+    res.on("close", () => {
+      open.delete(res);
+      closedAt = Date.now();
+    });
   };
   const listen = async () => {
     const s = createServer(answer);
@@ -313,6 +317,7 @@ async function nodeBesideMain() {
       DEVSITE_HEARTBEAT_MS: String(HEARTBEAT_MS),
       DEVSITE_FAKE_SECURITY: keychain(SECRET),
       ...(await serving(OTHER_MAC.ip)),
+      ...env,
     },
     tailnet: { status: statusJson(OTHER_MAC, [THIS_MAC]) },
   });
@@ -332,6 +337,8 @@ async function nodeBesideMain() {
       for (const res of open) res.end("going\n");
     },
     opened: () => opened,
+    // When the node last closed a connection for heartbeats.
+    closedAt: () => closedAt,
     back: async () => {
       main = await listen();
     },
@@ -378,6 +385,31 @@ test("a main Mac that goes while this node reads the route moves it at once", as
   // The read that runs, the read before the write, and the write.
   expect(Date.now() - went).toBeLessThan(3 * 300 + HEARTBEAT_MS);
   await read;
+});
+
+test("a Mac that goes to sleep while it takes over writes no route", async () => {
+  const events = sleepEvents();
+  const m = await nodeBesideMain(events.env);
+  m.api.state.delayMs = 400;
+  m.going();
+  m.cut();
+  // The vote reads the route again before it writes; the sleep comes during that read.
+  await Bun.sleep(200);
+  events.send("sleep");
+  await until(events.released, 2000);
+  await Bun.sleep(4 * HEARTBEAT_MS);
+  expect(m.api.state.writes).toEqual([]);
+  expect((await routeOf(m.node)).role).toBe("unknown");
+});
+
+test("a Mac that goes to sleep closes its connection for heartbeats to the main Mac before it lets the sleep go on", async () => {
+  const events = sleepEvents();
+  const m = await nodeBesideMain(events.env);
+  events.send("sleep");
+  await until(events.released, 2000);
+  const released = statSync(join(events.env.DEVSITE_FAKE_SLEEP, "released")).mtimeMs;
+  expect(m.closedAt()).toBeGreaterThan(0);
+  expect(m.closedAt()).toBeLessThanOrEqual(released);
 });
 
 // The main Mac's node alone, and what it answers another node.

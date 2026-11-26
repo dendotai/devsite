@@ -25,18 +25,19 @@ function bytesOf(ip: string): Buffer {
   return out;
 }
 
-// dns: the address the DNS server answers, or null for no reply. caddy: false closes the port. Returns what the node's process gets.
+// dns: the address the DNS server answers, or null for no reply; a function gives it per query. caddy: false closes the port. Returns what the node's process gets.
 export async function serving(
   ip: string,
-  { dns = ip, caddy = true }: { dns?: string | null; caddy?: boolean } = {},
+  { dns = ip, caddy = true }: { dns?: string | null | (() => string | null); caddy?: boolean } = {},
 ): Promise<{ DEVSITE_DNSMASQ_AT: string; DEVSITE_CADDY_AT: string }> {
   const udp = createSocket("udp4");
   udp.on("message", (q, from) => {
-    if (dns === null) return;
+    const address = typeof dns === "function" ? dns() : dns;
+    if (address === null) return;
     let end = 12;
     while (q[end] !== 0) end += (q[end] ?? 0) + 1;
     const question = q.subarray(12, end + 5);
-    const data = bytesOf(dns);
+    const data = bytesOf(address);
     const head = Buffer.from([q[0] ?? 0, q[1] ?? 0, 0x85, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
     const answer = Buffer.from([
       ...[0xc0, 0x0c, 0, data.length === 16 ? 28 : 1, 0, 1],
