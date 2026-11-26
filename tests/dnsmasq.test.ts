@@ -54,6 +54,10 @@ type Net = {
   noSecret?: boolean;
   keychain?: string;
   api?: { state: { route: string[] | null } };
+  // routeLagMs: `tailscale dns status` shows a route the API took only this long after it first could, as Tailscale hands it to each device within seconds.
+  routeLagMs?: number;
+  onSudo?: () => void;
+  onStore?: () => void;
 };
 
 type Mac = {
@@ -120,6 +124,9 @@ function dnsStatus(...nameservers: string[]): string {
 function runner(net: Net) {
   let sudoRan = false;
   let stored = false;
+  // The route `tailscale dns status` shows, and since when the API holds another one.
+  let shown: string[] | null = null;
+  let changedAt: number | null = null;
   return scriptedRunner((c: CommandCall) => {
     if (c.cmd === "diff") return processRunner(c.cmd, c.args, { capture: c.capture });
     if (c.cmd === "openssl") return { stdout: pki.served };
@@ -130,6 +137,7 @@ function runner(net: Net) {
       stored = true;
       const secret = c.input?.trim().split(" ").at(-1) ?? "";
       if (net.keychain !== undefined) writeFileSync(join(net.keychain, "secret"), secret);
+      net.onStore?.();
       return {};
     }
     if (c.cmd === "security") return {};
@@ -148,7 +156,7 @@ function runner(net: Net) {
       }
       if (c.args[0] === "status") return { stdout: net.devices ?? "" };
       if (c.args[0] === "dns") {
-        const route = net.api ? (net.api.state.route ?? []) : net.route;
+        const route = net.api ? lagged(net.api.state.route ?? []) : net.route;
         if (route === null) return { status: 1 };
         return { stdout: dnsStatus(...(route ?? [net.tailscale])) };
       }
@@ -173,9 +181,24 @@ function runner(net: Net) {
       return { stdout: net.mac == null ? "" : `name: x\nip_address: ${net.mac}\n\n` };
     }
     if (c.cmd === "launchctl") return { status: net.loaded ? 0 : 113 };
-    if (c.cmd === "sudo") sudoRan = true;
+    if (c.cmd === "sudo") {
+      sudoRan = true;
+      net.onSudo?.();
+    }
     return {};
   });
+
+  function lagged(route: string[]): string[] {
+    const lag = net.routeLagMs;
+    if (lag === undefined || shown === null) shown = route;
+    if (lag === undefined || route.join() === shown.join()) {
+      changedAt = null;
+      return shown;
+    }
+    changedAt ??= Date.now();
+    if (Date.now() - changedAt >= lag) shown = route;
+    return shown;
+  }
 }
 
 // noBrew: `brew --prefix` gives nothing, as on a Mac with no Homebrew. settings: the content of devsite's settings file.
@@ -581,8 +604,12 @@ afterEach(() => {
   for (const k of nodeEnvKeys) process.env[k] = savedNodeEnv[k];
 });
 
-// The node init talks to sees this Mac (MacBook Pro at IP) and `peers` in its tailnet, reads its secret from an empty Keychain folder that init's store fills, and calls a fake split DNS API with `route`.
-async function nodeTailnet(route: Route, peers: { name: string; ip: string }[] = []) {
+// The node init talks to sees this Mac (MacBook Pro at IP) and `peers` in its tailnet, reads its secret from an empty Keychain folder that init's store fills, and calls a fake split DNS API with `route`. dns: what this Mac's dnsmasq answers, IP when left out.
+async function nodeTailnet(
+  route: Route,
+  peers: { name: string; ip: string }[] = [],
+  dns?: () => string | null,
+) {
   const tailnet = mkdtempSync(join(tmpdir(), "devsite-tailnet-"));
   writeFileSync(
     join(tailnet, "status.json"),
@@ -593,7 +620,7 @@ async function nodeTailnet(route: Route, peers: { name: string; ip: string }[] =
   process.env.DEVSITE_FAKE_TAILSCALE = tailnet;
   process.env.DEVSITE_FAKE_SECURITY = keychain;
   process.env.DEVSITE_TAILSCALE_API = api.url;
-  Object.assign(process.env, await serving(IP));
+  Object.assign(process.env, await serving(IP, dns === undefined ? {} : { dns }));
   return { api, keychain };
 }
 
@@ -721,6 +748,141 @@ test("--tailscale-secret - with no secret on standard input, or with a terminal 
     [],
   );
 });
+
+const PIPE_SECRET_AND_APPLY = { piped: `${SECRET}\n`, keys: ["y"] };
+
+test("a piped secret while the route names another Mac: init names that Mac, and writes nothing", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const { api, keychain } = await nodeTailnet(["::1"], [{ name: "Mac mini", ip: "::1" }]);
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    { ...SET_UP, keychain, api },
+    { ...PIPE_SECRET_AND_APPLY, peerPort: await freePort() },
+  );
+  expect(r.stdout).toContain(
+    "  The split DNS route for .internal names Mac mini (::1); another Mac takes it over when Mac mini goes.\n",
+  );
+  expect(api.state.writes).toEqual([]);
+});
+
+test("a stored secret the node does not read: init says so and names the node's log", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  // The store lands in no folder the node reads.
+  const { api } = await nodeTailnet(null);
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    { ...SET_UP, api },
+    PIPE_SECRET_AND_APPLY,
+  );
+  expect(r.stdout).toContain("Stored in the login Keychain.");
+  expect(r.stdout).toMatch(/ {2}The node reads no secret from the login Keychain; its log: \S+\n/);
+  expect(api.state.writes).toEqual([]);
+});
+
+test("a node that does not answer after the store: init says so and names the node's log", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const { api, keychain } = await nodeTailnet(null);
+  const dead = await freePort();
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    {
+      ...SET_UP,
+      keychain,
+      api,
+      onStore: () => {
+        process.env.DEVSITE_NODE = `http://127.0.0.1:${dead}`;
+      },
+    },
+    PIPE_SECRET_AND_APPLY,
+  );
+  expect(r.stdout).toMatch(/ {2}The node did not answer; its log: \S+\n/);
+});
+
+test("Tailscale's API gives the node no answer: init names why the node did not write the route", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const { api, keychain } = await nodeTailnet(null);
+  api.state.down = true;
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    { ...SET_UP, keychain, api },
+    PIPE_SECRET_AND_APPLY,
+  );
+  expect(r.stdout).toMatch(
+    / {2}The node did not write the route: Tailscale's API gave no answer\. Its log: \S+\n/,
+  );
+});
+
+test("a piped secret on a fresh Mac: init reports the route after the sudo step that starts dnsmasq, so the node can take it", async () => {
+  const m = await setUp({ dnsmasq: true });
+  let dnsmasqRuns = false;
+  const { api, keychain } = await nodeTailnet(null, [], () => (dnsmasqRuns ? IP : null));
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    {
+      tailscale: IP,
+      dig: null,
+      digAfter: IP,
+      keychain,
+      api,
+      onSudo: () => {
+        dnsmasqRuns = true;
+      },
+    },
+    PIPE_SECRET_AND_APPLY,
+  );
+  const stored = r.stdout.indexOf("Stored in the login Keychain.");
+  const sudo = r.stdout.lastIndexOf(`run devsite's dnsmasq on ${IP}  [sudo]`);
+  expect(stored).toBeGreaterThan(-1);
+  expect(sudo).toBeGreaterThan(stored);
+  const reports = [...r.stdout.matchAll(/^ {2}The (?:split DNS route for|node ).*$/gm)];
+  expect(reports.map((match) => match[0])).toEqual([
+    `  The split DNS route for .internal names this Mac (${IP}).`,
+  ]);
+  expect(reports[0]?.index).toBeGreaterThan(sudo);
+  expect(api.state.writes).toEqual([[IP]]);
+});
+
+test("init waits for Tailscale to hand this Mac its new route before the checks after the run", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const { api, keychain } = await nodeTailnet(null);
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    { ...SET_UP, keychain, api, routeLagMs: 1500 },
+    PIPE_SECRET_AND_APPLY,
+  );
+  expect(api.state.writes).toEqual([[IP]]);
+  expect(r.stdout).toContain(`✓ ${ROUTE_LABEL} (this Mac, ${IP})`);
+});
+
+test("init waits at most 10 s for Tailscale to hand this Mac its new route", async () => {
+  const m = await setUp({ dnsmasq: true, files: IP });
+  const { api, keychain } = await nodeTailnet(null);
+  let stored = 0;
+  const r = await devsite(
+    ["init", "--tailscale-secret", "-"],
+    m,
+    {
+      ...SET_UP,
+      keychain,
+      api,
+      routeLagMs: 60_000,
+      onStore: () => {
+        stored = Date.now();
+      },
+    },
+    PIPE_SECRET_AND_APPLY,
+  );
+  expect(Date.now() - stored).toBeGreaterThanOrEqual(10_000);
+  expect(Date.now() - stored).toBeLessThan(12_000);
+  expect(r.stdout).toContain(`✗ ${ROUTE_LABEL}`);
+  expect(r.status).toBe(0);
+}, 20_000);
 
 test("the route names another Mac whose node answers: doctor is green on this Mac, and this Mac resolves .internal to that Mac", async () => {
   const m = await setUp({ dnsmasq: true, files: IP });

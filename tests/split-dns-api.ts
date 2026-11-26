@@ -11,8 +11,8 @@ afterEach(() => {
 });
 
 export function fakeSplitDnsApi(route: Route) {
-  // down: every call gets HTTP 503, as Tailscale's API out of reach. delayMs: each call waits this long.
-  const state = { route, writes: [] as string[][], down: false, delayMs: 0 };
+  // down: every call gets HTTP 503, as Tailscale's API out of reach. delayMs: each call waits this long. reads: the reads of the route it answered.
+  const state = { route, writes: [] as string[][], reads: 0, down: false, delayMs: 0 };
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -35,6 +35,7 @@ export function fakeSplitDnsApi(route: Route) {
       if (req.headers.get("authorization") !== "Bearer tskey-api-t") {
         return new Response("", { status: 401 });
       }
+      if (req.method === "GET") state.reads += 1;
       if (req.method === "PATCH") {
         const body = (await req.json()) as { internal?: string[] };
         if (body.internal) {

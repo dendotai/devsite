@@ -1,7 +1,7 @@
 // A machine whose node is stopped passes a request to the main Mac (#110): two real Caddys run devsite's route on scratch ports, a DNS server on loopback stands in for Tailscale's, and a local server for the main Mac's node.
 import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
-import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { request } from "node:https";
 import { type AddressInfo, createServer as createTcpServer } from "node:net";
@@ -51,9 +51,15 @@ afterEach(async () => {
   node.close();
 });
 
-// devsite's route on `port`. The private CA is in no trust store, so the test's Caddy does not check the main Mac's certificate.
-async function startCaddy(port: number, to: { node: number; main: number; dns: string }) {
-  const dir = mkdtempSync(join(tmpdir(), "devsite-pass-"));
+// devsite's route on `port`. The private CA is in no trust store, so the test's Caddy checks the main Mac's certificate only against the root file `trust` names. dir: Caddy's storage, which holds its CA.
+async function startCaddy(
+  port: number,
+  to: { node: number; main: number; dns: string },
+  {
+    dir = mkdtempSync(join(tmpdir(), "devsite-pass-")),
+    trust,
+  }: { dir?: string; trust?: string } = {},
+) {
   let route = renderNodeRoute(PAGE);
   for (const [from, into] of [
     ["*.internal, *.localhost {", `*.internal:${port}, *.localhost:${port} {`],
@@ -63,7 +69,10 @@ async function startCaddy(port: number, to: { node: number; main: number; dns: s
     ["port 443\n", `port ${to.main}\n`],
     ["127.0.0.1:47380", `127.0.0.1:${to.node}`],
     ["100.100.100.100", to.dns],
-    ["dial_timeout", "tls_insecure_skip_verify\ndial_timeout"],
+    [
+      "dial_timeout",
+      `${trust === undefined ? "tls_insecure_skip_verify" : `tls_trust_pool file ${trust}`}\ndial_timeout`,
+    ],
   ] as const) {
     // A route that changed must not reach this machine's real Caddy, node or DNS.
     if (!route.includes(from)) throw new Error(`devsite's route holds no ${from}`);
@@ -258,3 +267,45 @@ test("an answer that takes 12 s comes through, as with no pass", async () => {
   const { old } = await twoCaddys();
   expect(await send(old)).toMatchObject({ status: 200, body: "slow" });
 }, 30_000);
+
+// Every Mac serves from one CA root (#104), so the old main Mac's Caddy checks the main Mac's certificate against that root; the system's trust store holds it on a real Mac.
+test("the main Mac's certificate from the shared CA root passes the check; one from another root gets the page", async () => {
+  const dns = (await serving("127.0.0.1")).DEVSITE_DNSMASQ_AT;
+  const shared = mkdtempSync(join(tmpdir(), "devsite-pass-"));
+  const main = await freePort();
+  await startCaddy(main, { node: nodePort, main, dns }, { dir: shared });
+  const root = join(shared, "pki", "authorities", "local", "root.crt");
+  const old = await freePort();
+  await startCaddy(old, { node: deadPort, main, dns }, { trust: root });
+  expect(await send(old)).toMatchObject({ status: 200, body: "main" });
+
+  const otherRoot = join(mkdtempSync(join(tmpdir(), "devsite-pass-")), "other.crt");
+  const made = spawnSync("openssl", [
+    ...["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=Other Root"],
+    ...["-keyout", `${otherRoot}.key`, "-out", otherRoot],
+  ]);
+  expect(made.status).toBe(0);
+  const untrusting = await freePort();
+  await startCaddy(untrusting, { node: deadPort, main, dns }, { trust: otherRoot });
+  expect(await send(untrusting)).toMatchObject({ status: 502, body: PAGE });
+  expect(seen).toHaveLength(1);
+});
+
+// Go's resolver, which Caddy uses, tries each nameserver of /etc/resolv.conf `attempts` times (2 when unset), `timeout` seconds each (5 when unset), and Caddy sends every try to its one resolver.
+test("a DNS server that never replies: the page after 10 s for each nameserver of /etc/resolv.conf", async () => {
+  const conf = readFileSync("/etc/resolv.conf", "utf8");
+  const nameservers = conf.match(/^nameserver\s/gm)?.length ?? 1;
+  const option = (name: string, unset: number) =>
+    Math.max(
+      1,
+      Number(conf.match(new RegExp(`^options\\s.*\\b${name}:(\\d+)`, "m"))?.[1] ?? unset),
+    );
+  const expected = nameservers * option("attempts", 2) * option("timeout", 5) * 1000;
+  const old = await freePort();
+  const dns = (await serving("127.0.0.1", { dns: null })).DEVSITE_DNSMASQ_AT;
+  await startCaddy(old, { node: deadPort, main: await freePort(), dns });
+  const start = Date.now();
+  expect(await send(old)).toMatchObject({ status: 502, body: PAGE });
+  expect(Date.now() - start).toBeGreaterThanOrEqual(expected - 500);
+  expect(Date.now() - start).toBeLessThan(expected + 2000);
+}, 60_000);
