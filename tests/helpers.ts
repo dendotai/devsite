@@ -68,7 +68,13 @@ export function makeIo(opts: IoOpts = {}) {
   return { ctx, stdout, stderr };
 }
 
-export type CommandCall = { cmd: string; args: string[]; capture: boolean; timeoutMs?: number };
+export type CommandCall = {
+  cmd: string;
+  args: string[];
+  capture: boolean;
+  timeoutMs?: number;
+  input?: string;
+};
 
 // What spawnSync gives for a command that is not on PATH.
 export const MISSING: Partial<CommandResult> = {
@@ -91,8 +97,8 @@ export function quietRunner(
 // Runs nothing and records each call; a field the answer leaves out reads as exit 0 with empty stdout.
 export function scriptedRunner(answer: (call: CommandCall) => Partial<CommandResult>) {
   const calls: CommandCall[] = [];
-  const runCommand: CliContext["runCommand"] = (cmd, args, { capture, timeoutMs }) => {
-    const call = { cmd, args, capture, timeoutMs };
+  const runCommand: CliContext["runCommand"] = (cmd, args, { capture, timeoutMs, input }) => {
+    const call = { cmd, args, capture, timeoutMs, input };
     calls.push(call);
     return { status: 0, stdout: "", ...answer(call) };
   };
@@ -112,8 +118,9 @@ export async function runAndRecordScenario(argv: string[], ctx: CliContext): Pro
   const status = await run(argv, ctx);
   const out = process.env.DEVSITE_SCENARIOS_FILE;
   if (out && scenario) {
-    // With --ca, stdin carried a CA root, and the keys were pressed on the terminal.
-    const keyed = argv.includes("--ca") ? ctx.terminal() : ctx.stdin;
+    // With --ca or --tailscale-secret, stdin carried the value, and the keys were pressed on the terminal.
+    const piped = argv.includes("--ca") || argv.includes("--tailscale-secret");
+    const keyed = piped ? ctx.terminal() : ctx.stdin;
     const keys = (keyed as { keys?: string[] } | null)?.keys?.filter((k) => k !== "");
     const text = [
       `## ${scenario}`,

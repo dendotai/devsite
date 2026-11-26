@@ -15,6 +15,8 @@ const PAGE = [
 ].join("\n");
 
 type Handler = Record<string, unknown> & { handler: string };
+type ErrorRoute = { handle: { routes: { handle: Handler[] }[] }[] };
+
 type Config = {
   apps: {
     http: {
@@ -26,7 +28,7 @@ type Config = {
             handle: { routes: { match?: unknown[]; handle: Handler[] }[] }[];
           }[];
           errors: {
-            routes: { handle: { routes: { handle: { routes: { handle: Handler[] }[] }[] }[] }[] }[];
+            routes: { handle: { routes: { handle: { routes: ErrorRoute[] }[] }[] }[] }[];
           };
         }
       >;
@@ -50,9 +52,10 @@ function adapt(page?: string): Config {
   return JSON.parse(r.stdout);
 }
 
-// The handlers of the error route for a 502: the node did not answer.
+// The handlers of the last error route: the node did not answer, and the request went to no main Mac (tests/pass-to-main.test.ts).
 const downHandlers = (c: Config) =>
-  server(c).errors.routes[0]?.handle[0]?.routes[0]?.handle[0]?.routes[0]?.handle ?? [];
+  server(c).errors.routes[0]?.handle[0]?.routes[0]?.handle[0]?.routes.at(-1)?.handle[0]?.routes[0]
+    ?.handle ?? [];
 
 const server = (c: Config) =>
   Object.values(c.apps.http.servers)[0] as Config["apps"]["http"]["servers"][string];
@@ -60,13 +63,31 @@ const server = (c: Config) =>
 test("one route takes every .internal and .localhost name, and guards it before it proxies to the node", () => {
   const route = server(adapt(PAGE)).routes[0];
   expect(route?.match).toEqual([{ host: ["*.internal", "*.localhost"] }]);
-  const [guard, proxy] = route?.handle[0]?.routes ?? [];
+  const [guard, toMain, proxy] = route?.handle[0]?.routes ?? [];
   expect(guard).toEqual({
     match: [{ not: [{ remote_ip: { ranges: ["127.0.0.1", "::1", "100.64.0.0/10"] } }] }],
     handle: [{ handler: "static_response", abort: true }],
   });
-  expect(proxy?.handle).toEqual([
+  expect(toMain?.match).toEqual([{ header: { "Devsite-Pass": ["to-main"] } }]);
+  expect(proxy?.handle).toMatchObject([
     { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:47380" }] },
+  ]);
+});
+
+test("every answer but a WebSocket's 101 tells the browser not to use HTTP/3", () => {
+  const proxy = server(adapt(PAGE)).routes[0]?.handle[0]?.routes[2]?.handle[0];
+  expect(proxy?.handle_response).toEqual([
+    {
+      match: { status_code: [2, 3, 4, 5] },
+      routes: [
+        {
+          handle: [
+            { handler: "headers", response: { deferred: true, set: { "Alt-Svc": ["clear"] } } },
+            { handler: "copy_response" },
+          ],
+        },
+      ],
+    },
   ]);
 });
 
@@ -89,7 +110,12 @@ test("a node that does not answer: Caddy answers the 'node not running' page as 
   expect(handlers[0]).toEqual({
     handler: "headers",
     response: {
-      set: { "Cache-Control": ["no-store"], "Content-Type": ["text/html; charset=utf-8"] },
+      set: {
+        "Alt-Svc": ["clear"],
+        "Cache-Control": ["no-store"],
+        Connection: ["close"],
+        "Content-Type": ["text/html; charset=utf-8"],
+      },
     },
   });
   expect(handlers[1]).toEqual({ handler: "static_response", status_code: 502, body: PAGE });
@@ -116,5 +142,6 @@ test("the JSON printed for a Caddy with no Caddyfile answers in one line of text
   expect(file).toContain(
     '\t\trespond "devsite: the node does not answer — run bunx devsite doctor" 502',
   );
+  expect(file).toContain("\t\t\tConnection close");
   expect(file).not.toContain("<html");
 });

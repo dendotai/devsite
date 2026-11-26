@@ -25,5 +25,17 @@ _Avoid_: running, up
 The Mac the `internal` split DNS route names; the phone's requests reach it first.
 _Avoid_: route's Mac, primary
 
+**Heartbeat**:
+What the main Mac's node sends every 2 seconds on the open connection from each other node; 3 missed heartbeats start a takeover.
+
+**Follower**:
+A node that listens for the main Mac's heartbeats.
+
+**Takeover**:
+Another Mac becomes the main Mac when the main Mac is gone.
+
+**Pass**:
+The Caddy of a machine whose node is stopped sends a request to the main Mac.
+
 **Relay**:
 A node sends a request for a name live on another Mac over HTTPS to the Caddy of that Mac, not to its dev server.

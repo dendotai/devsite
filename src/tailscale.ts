@@ -1,14 +1,20 @@
-// Tailscale as devsite reads it: this Mac's Tailscale IP, and the split DNS route that sends the phone's `.internal` lookups to this Mac's dnsmasq. The route is set only in the Tailscale admin console, so devsite reads it and never writes it.
+// Tailscale as init and doctor read it: this Mac's Tailscale IP, and the split DNS route that sends the phone's `.internal` lookups to the main Mac's dnsmasq. The node writes the route (src/node/main-mac.ts); init and doctor only read it.
 import type { Result } from "./checks";
 import type { CliContext } from "./context";
 import { exec } from "./io";
+import { hasSecret } from "./keychain";
+import type { PeerState } from "./node/server";
+import { nodeLog } from "./paths";
 
 export const TAILSCALE_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 export const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
-export const ADMIN_DNS_URL = "https://login.tailscale.com/admin/dns";
 export const SPLIT_DNS_DOMAIN = "internal";
-export const TWO_MACS_ISSUE = "https://github.com/dendotai/devsite/issues/66";
-const SPLIT_DNS_LABEL = "the Tailscale split DNS route for .internal points to this Mac";
+export const TRUST_CREDENTIALS_URL =
+  "https://console.tailscale.com/admin/settings/trust-credentials";
+const SPLIT_DNS_LABEL =
+  "the Tailscale split DNS route for .internal points to a Mac whose node answers";
+const SECRET_LABEL =
+  "the login Keychain holds the Tailscale OAuth client secret, so the node can write the split DNS route";
 
 export type TailscaleIp = { state: "absent" } | { state: "no-ip" } | { state: "ip"; ip: string };
 
@@ -70,7 +76,7 @@ export type SplitDns =
   | { state: "none" }
   | { state: "unreadable" }
   // The route names nameservers that are not this Mac, each with its device's name when Tailscale lists it.
-  | { state: "elsewhere"; others: string[] };
+  | { state: "elsewhere"; ips: string[]; others: string[] };
 
 export function readSplitDns(ip: string, ctx: CliContext): SplitDns {
   const nameservers = splitDnsNameservers(ctx);
@@ -80,6 +86,7 @@ export function readSplitDns(ip: string, ctx: CliContext): SplitDns {
   if (others.length === 0) return { state: "this-mac" };
   return {
     state: "elsewhere",
+    ips: others,
     others: others.map((n) => {
       const name = deviceName(n, ctx);
       return name === null
@@ -88,11 +95,6 @@ export function readSplitDns(ip: string, ctx: CliContext): SplitDns {
     }),
   };
 }
-
-export const splitDnsValues = (ip: string) => [
-  `nameserver: ${ip}`,
-  `restrict to domain: ${SPLIT_DNS_DOMAIN}`,
-];
 
 // What `tailscale dns status` shows, for a route that is not this Mac's alone.
 export function splitDnsDetail(split: Exclude<SplitDns, { state: "this-mac" }>): string {
@@ -106,64 +108,90 @@ export function splitDnsDetail(split: Exclude<SplitDns, { state: "this-mac" }>):
   }
 }
 
-// Two Macs on one tailnet each want the route to point to themselves (#66): devsite names the other device and leaves the choice to the user.
-export function splitDnsCheck(ip: string, split: SplitDns): Result {
-  const label = `${SPLIT_DNS_LABEL} (${ip})`;
-  if (split.state === "this-mac") return { state: "green", label };
-  const detail = splitDnsDetail(split);
-  const add = `add a split DNS nameserver in the Tailscale admin console (${ADMIN_DNS_URL}): domain ${SPLIT_DNS_DOMAIN}, nameserver ${ip}`;
-  switch (split.state) {
-    case "none":
-      return { state: "red", label, detail, fix: add, repair: "split-dns" };
-    case "unreadable":
-      return {
-        state: "red",
-        label,
-        detail,
-        fix: "update Tailscale, so `tailscale dns status` lists the split DNS routes",
-      };
-    case "elsewhere":
-      return {
-        state: "red",
-        label,
-        detail,
-        fix: `change the nameserver of the domain ${SPLIT_DNS_DOMAIN} to ${ip} in the Tailscale admin console (${ADMIN_DNS_URL}), so the phone opens this Mac's projects: it opens one Mac's projects per tailnet (${TWO_MACS_ISSUE})`,
-        repair: "split-dns",
-      };
+// The route may name this Mac or another Mac of this user whose node answers, on any protocol: that Mac is the main Mac, and its node relays to every other Mac (#66).
+function splitDnsCheck(
+  ip: string,
+  split: SplitDns,
+  peers: PeerState[],
+  secretHeld: boolean,
+  ctx: CliContext,
+): Result {
+  if (split.state === "this-mac") {
+    return { state: "green", label: `${SPLIT_DNS_LABEL} (this Mac, ${ip})` };
   }
-}
-
-// This Mac's Tailscale IP with the route as Tailscale lists it.
-export type SplitDnsRoute = { ip: string; split: SplitDns };
-
-// route is null with no Tailscale IP.
-export type TailscaleProbe = { route: SplitDnsRoute | null; checks: Result[] };
-
-// A Mac with no Tailscale gets no checks: devsite runs no dnsmasq there.
-export function probeTailscale(t: TailscaleIp, ctx: CliContext): TailscaleProbe {
-  const upLabel = "Tailscale is up";
-  if (t.state === "absent") return { route: null, checks: [] };
-  if (t.state === "no-ip") {
+  const main =
+    split.state === "elsewhere" && split.ips.length === 1
+      ? peers.find((p) => p.ip === split.ips[0] && /-protocol$/.test(p.state))
+      : undefined;
+  if (main !== undefined) {
+    return { state: "green", label: `${SPLIT_DNS_LABEL} (${main.mac}, ${main.ip})` };
+  }
+  const label = SPLIT_DNS_LABEL;
+  const detail = splitDnsDetail(split);
+  if (split.state === "unreadable") {
     return {
-      route: null,
-      checks: [
-        {
-          state: "red",
-          label: upLabel,
-          detail: "Tailscale is down (no IP)",
-          fix: "start Tailscale and log in",
-        },
-        {
-          state: "skipped",
-          label: SPLIT_DNS_LABEL,
-          detail: "Tailscale is down (no IP)",
-        },
-      ],
+      state: "red",
+      label,
+      detail,
+      fix: "update Tailscale, so `tailscale dns status` lists the split DNS routes",
     };
   }
-  const split = readSplitDns(t.ip, ctx);
+  const log = nodeLog(ctx.env);
+  if (!secretHeld) {
+    return {
+      state: "red",
+      label,
+      detail,
+      fix: "the node writes the route once the login Keychain holds the OAuth client secret: see the check above",
+    };
+  }
   return {
-    route: { ip: t.ip, split },
-    checks: [{ state: "green", label: `${upLabel}, with IP ${t.ip}` }, splitDnsCheck(t.ip, split)],
+    state: "red",
+    label,
+    detail,
+    fix:
+      split.state === "none"
+        ? `the node writes the route within 10 s; its log says why it has not: ${log}`
+        : `the node takes the route over about 6 s after the Mac it names stops answering; its log says why it has not: ${log}`,
   };
+}
+
+function secretCheck(ctx: CliContext): Result {
+  return hasSecret(ctx)
+    ? { state: "green", label: SECRET_LABEL }
+    : {
+        state: "red",
+        label: SECRET_LABEL,
+        detail: "no secret",
+        fix: "run `bunx devsite init`. It asks for a Tailscale OAuth client secret and tells you where to create one.",
+        repair: "tailscale-secret",
+      };
+}
+
+// A Mac with no Tailscale gets none: devsite runs no dnsmasq there. peers: the other Macs' nodes, as this Mac's node reaches them.
+export function tailscaleChecks(t: TailscaleIp, peers: PeerState[], ctx: CliContext): Result[] {
+  const upLabel = "Tailscale is up";
+  if (t.state === "absent") return [];
+  if (t.state === "no-ip") {
+    return [
+      {
+        state: "red",
+        label: upLabel,
+        detail: "Tailscale is down (no IP)",
+        fix: "start Tailscale and log in",
+      },
+      {
+        state: "skipped",
+        label: SPLIT_DNS_LABEL,
+        detail: "Tailscale is down (no IP)",
+      },
+    ];
+  }
+  const split = readSplitDns(t.ip, ctx);
+  const secret = secretCheck(ctx);
+  return [
+    { state: "green", label: `${upLabel}, with IP ${t.ip}` },
+    secret,
+    splitDnsCheck(t.ip, split, peers, secret.state === "green", ctx),
+  ];
 }

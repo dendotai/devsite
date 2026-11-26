@@ -2,9 +2,9 @@
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer, request, type Server } from "node:http";
+import { createServer, get, type IncomingMessage, request, type Server } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { type AddressInfo, connect, type Socket } from "node:net";
+import { type AddressInfo, connect, createServer as createTcpServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RELAYED_HEADER, requestHead } from "../src/node/relay";
@@ -16,7 +16,7 @@ import {
   useNodes,
   viaNode,
 } from "./node-helpers";
-import { freePort, twoMacs } from "./two-macs";
+import { freePort, THIS_MAC, twoMacs } from "./two-macs";
 
 useNodes();
 
@@ -234,4 +234,67 @@ test("a POST body reaches the other Mac's dev server whole", async () => {
   const res = await viaNode(here, "web.internal", "/api", { method: "POST", body: sent });
   expect(res.status).toBe(200);
   expect(res.body).toBe(`POST ${sent}`);
+});
+
+test("an answer that takes 12 s comes through, also on a connection that an earlier request opened", async () => {
+  const { here, there } = await relayMacs();
+  const slow = createServer((req, res) => {
+    setTimeout(() => res.end("slow"), req.url === "/slow" ? 12_000 : 0);
+  });
+  servers.push(slow);
+  await new Promise<void>((r) => slow.listen(0, "127.0.0.1", r));
+  await register(there, "web", { port: (slow.address() as AddressInfo).port });
+  expect((await viaNode(here, "web.internal")).status).toBe(200);
+  expect(await viaNode(here, "web.internal", "/slow")).toMatchObject({ status: 200, body: "slow" });
+}, 30_000);
+
+test("the other Mac's Caddy accepts the connection and then says nothing: the answer names that Mac after 1.5 s", async () => {
+  const caddyPort = await freePort();
+  const env = { DEVSITE_PEER_CADDY_PORT: String(caddyPort) };
+  const { here, there } = await twoMacs({
+    hereEnv: { ...env, DEVSITE_CADDY_ADMIN: await adminWithRoot(cas.shared.root) },
+    thereEnv: env,
+  });
+  const silent = createTcpServer((s) => {
+    sockets.add(s);
+  });
+  await new Promise<void>((r) => silent.listen(caddyPort, "::1", r));
+  const dev = await startDevServer();
+  await register(there, "web", { port: dev.port });
+  const start = Date.now();
+  const res = await viaNode(here, "web.internal").finally(() => silent.close());
+  expect(Date.now() - start).toBeLessThan(5000);
+  expect(res.status).toBe(502);
+  expect(res.body).toContain("its Caddy does not answer at [::1]:");
+}, 30_000);
+
+test("the other machine closes its heartbeat connection, as before it sleeps: a relayed request that waits on it ends at once with the page that names it", async () => {
+  const { here, there, peerPort } = await relayMacs();
+  // A dev server that never answers.
+  const silent = createServer(() => {});
+  servers.push(silent);
+  await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
+  await register(there, "web", { port: (silent.address() as AddressInfo).port });
+  const heartbeats = await new Promise<IncomingMessage>((resolve, reject) => {
+    get(
+      {
+        host: THIS_MAC.ip,
+        port: peerPort,
+        path: "/heartbeats",
+        headers: { "devsite-protocol": "1" },
+      },
+      resolve,
+    ).on("error", reject);
+  });
+  expect(heartbeats.statusCode).toBe(200);
+  const page = viaNode(here, "web.internal");
+  await Bun.sleep(500);
+  const closed = Date.now();
+  heartbeats.destroy();
+  const res = await page;
+  expect(Date.now() - closed).toBeLessThan(1000);
+  expect(res.status).toBe(502);
+  expect(res.body).toBe(
+    "devsite: web.internal runs on Mac mini, which went to sleep or stopped its devsite node.\n",
+  );
 });

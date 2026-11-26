@@ -8,7 +8,8 @@ export type Writer = { write(chunk: string): unknown };
 
 // capture: the child's stdout comes back in `stdout` and its stderr is dropped; otherwise the child shares the terminal (a sudo password prompt needs it) and `stdout` is "".
 // timeoutMs: the child is stopped after it, and the run reads as failed.
-export type CommandOptions = { capture: boolean; timeoutMs?: number };
+// input: written to the child's stdin, for a value that must stay out of its arguments.
+export type CommandOptions = { capture: boolean; timeoutMs?: number; input?: string };
 // error is set when the command could not start at all (not on PATH); status is then 1.
 export type CommandResult = { status: number; stdout: string; error?: Error };
 export type CommandRunner = (cmd: string, args: string[], opts: CommandOptions) => CommandResult;
@@ -27,7 +28,6 @@ export type CliContext = {
     DEVSITE_BREW_PREFIX?: string;
     DEVSITE_USER_HOME?: string;
     DEVSITE_SYSTEM_ROOT?: string;
-    DEVSITE_SPLIT_DNS_WAIT_MS?: string;
     DEVSITE_NODE_WAIT_MS?: string;
     DEVSITE_PEER_PORT?: string;
     DEVSITE_TAILNET_REFRESH_MS?: string;
@@ -40,9 +40,10 @@ export type CliContext = {
   latinLetters: () => Promise<Map<string, string>>;
 };
 
-export const processRunner: CommandRunner = (cmd, args, { capture, timeoutMs }) => {
+export const processRunner: CommandRunner = (cmd, args, { capture, timeoutMs, input }) => {
   const r = spawnSync(cmd, args, {
-    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    stdio: capture ? [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] : "inherit",
+    input,
     encoding: "utf8",
     timeout: timeoutMs,
   });

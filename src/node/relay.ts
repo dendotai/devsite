@@ -1,5 +1,5 @@
 // The relay (#109): a request for a name live on another Mac goes over HTTPS to that Mac's Caddy, never to its dev server, which stays on 127.0.0.1 behind the LAN guard (ADR 0002). Every Mac serves from one CA root (#104), so this Mac's root checks the other Mac's certificate.
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ClientRequest, IncomingMessage, ServerResponse } from "node:http";
 import { Agent, request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
@@ -14,16 +14,15 @@ export type RelayEnv = { DEVSITE_PEER_CADDY_PORT?: string };
 const caddyPort = (env: RelayEnv) => Number(env.DEVSITE_PEER_CADDY_PORT) || 443;
 
 const ADMIN_MS = 2000;
-// A Mac that sleeps or left the tailnet drops the packets, so a relay with no answer gives up: the TLS handshake of a WebSocket after CONNECT_MS, a request with no response headers after RESPONSE_MS, which leaves a dev server time to build a large module.
+// A Mac that sleeps or left the tailnet drops the packets, so a relay whose TLS handshake does not end in this time gives up. The answer has no limit: a dev server can take long to build a page.
 const CONNECT_MS = 1500;
-const RESPONSE_MS = 10_000;
 
 // A page loads many modules, so the TLS connections to each Caddy stay open between requests.
 const agent = new Agent({ keepAlive: true });
 
-// root: another CA root signed the certificate. tls: the handshake failed for another reason (a name the certificate does not hold, an alert from that Caddy). unreachable: no answer.
+// root: another CA root signed the certificate. tls: the handshake failed for another reason (a name the certificate does not hold, an alert from that Caddy). unreachable: no answer. gone: that machine closed its heartbeat connection while the request waited.
 export type RelayFailure =
-  | { kind: "no-root" | "root" | "unreachable" }
+  | { kind: "no-root" | "root" | "unreachable" | "gone" }
   | { kind: "tls"; code: string };
 
 const ROOT_CODES = new Set([
@@ -62,6 +61,8 @@ function failureText(failure: RelayFailure, host: string, peer: Peer, port: numb
       return `devsite: ${name} runs on ${peer.mac}, whose Caddy serves a certificate this Mac's CA root does not sign. Run \`devsite ca export\` on this Mac, and pipe its output into \`devsite init --ca -\` on ${peer.mac}.\n`;
     case "tls":
       return `devsite: ${name} runs on ${peer.mac}, and the TLS handshake with its Caddy at ${at} failed (${failure.code}).\n`;
+    case "gone":
+      return `devsite: ${name} runs on ${peer.mac}, which went to sleep or stopped its devsite node.\n`;
     case "unreachable":
       return `devsite: ${name} runs on ${peer.mac}, and its Caddy does not answer at ${at}.\n`;
   }
@@ -84,7 +85,12 @@ export function makeRelay(env: RelayEnv) {
     }
   };
 
+  // The requests sent to each machine that have no answer yet, by its IP.
+  const waiting = new Map<string, Set<ClientRequest>>();
+  const GONE = new Error("the machine went to sleep or stopped its devsite node");
+
   const failureOf = (err: unknown): RelayFailure => {
+    if (err === GONE) return { kind: "gone" };
     const code = codeOf(err);
     if (ROOT_CODES.has(code)) {
       root = null;
@@ -113,9 +119,22 @@ export function makeRelay(env: RelayEnv) {
         path: req.url,
         headers: { ...req.headers, [RELAYED_HEADER]: "1" },
       });
-      const noAnswer = setTimeout(() => up.destroy(new Error("no response")), RESPONSE_MS);
+      const toPeer = waiting.get(peer.ip) ?? new Set();
+      waiting.set(peer.ip, toPeer.add(up));
+      const answered = () => {
+        toPeer.delete(up);
+        if (toPeer.size === 0 && waiting.get(peer.ip) === toPeer) waiting.delete(peer.ip);
+      };
+      let noAnswer: ReturnType<typeof setTimeout> | undefined;
+      up.on("socket", (s) => {
+        // A connection that an earlier request opened.
+        if (!s.connecting) return;
+        noAnswer = setTimeout(() => up.destroy(new Error("no handshake")), CONNECT_MS);
+        s.once("secureConnect", () => clearTimeout(noAnswer));
+      });
       up.on("response", (r) => {
         clearTimeout(noAnswer);
+        answered();
         res.writeHead(r.statusCode ?? 502, r.headers);
         r.pipe(res);
         r.on("error", () => res.destroy());
@@ -124,6 +143,7 @@ export function makeRelay(env: RelayEnv) {
       let browserLeft = false;
       up.on("error", (err) => {
         clearTimeout(noAnswer);
+        answered();
         if (browserLeft) return resolve(null);
         if (res.headersSent) {
           res.destroy();
@@ -180,5 +200,10 @@ export function makeRelay(env: RelayEnv) {
   const explain = (failure: RelayFailure, host: string, peer: Peer) =>
     failureText(failure, host, peer, caddyPort(env));
 
-  return { send, tunnel, explain };
+  // A machine whose devsite node closed its heartbeat connection, as it does before the machine sleeps: a request that waits on it would wait with no limit.
+  const gone = (ips: string[]) => {
+    for (const ip of ips) for (const up of waiting.get(ip) ?? []) up.destroy(GONE);
+  };
+
+  return { send, tunnel, explain, gone };
 }

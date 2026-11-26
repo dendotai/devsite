@@ -1,9 +1,14 @@
 // Nodes on two Macs of one tailnet (#66): how they find each other, and the start a live name on another Mac refuses. tests/two-macs.ts sets up the two Macs.
 import { expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { register, startDevServer, startTestNode, status, useNodes } from "./node-helpers";
 import { freePort, OTHER_MAC, SOMEONE_ELSE, statusJson, THIS_MAC, twoMacs } from "./two-macs";
+
+const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
 useNodes();
 
@@ -84,17 +89,17 @@ test("a Mac whose node speaks another protocol is listed with that protocol", as
       res.end();
     }),
   );
-  expect(list).toEqual([{ mac: "Mac mini", state: "other-protocol", protocol: 2 }]);
+  expect(list).toEqual([{ mac: "Mac mini", ip: "::1", state: "other-protocol", protocol: 2 }]);
 });
 
 test("a Mac with nothing on the peer port is listed as refused: no devsite, or its node stopped", async () => {
-  expect(await listedAs()).toEqual([{ mac: "Mac mini", state: "refused" }]);
+  expect(await listedAs()).toEqual([{ mac: "Mac mini", ip: "::1", state: "refused" }]);
 });
 
 test("a Mac that never replies is listed as timeout: it sleeps, is off, or drops the call", async () => {
   // Accepts the connection and sends nothing, as a dropped packet gives no reply.
   expect(await listedAs((s) => s.on("request", () => {}))).toEqual([
-    { mac: "Mac mini", state: "timeout" },
+    { mac: "Mac mini", ip: "::1", state: "timeout" },
   ]);
 });
 
@@ -104,7 +109,7 @@ test("a Mac where another program holds the peer port is listed as not-a-node", 
       res.end("hello");
     }),
   );
-  expect(list).toEqual([{ mac: "Mac mini", state: "not-a-node" }]);
+  expect(list).toEqual([{ mac: "Mac mini", ip: "::1", state: "not-a-node" }]);
 });
 
 test("a peer port taken on this Mac shows in the node's status, and the node takes it once it is free", async () => {
@@ -156,4 +161,33 @@ test("only Macs of this Tailscale user are asked: a phone and another user's Mac
     },
   });
   expect(await (await fetch(`${here.url}/peers`)).json()).toEqual([]);
+});
+
+test("a node takes its first request only once it has read the tailnet, so it knows the other machines", async () => {
+  const answers = mkdtempSync(join(tmpdir(), "devsite-tailnet-"));
+  writeFileSync(join(answers, "status.json"), JSON.stringify(statusJson(THIS_MAC, [])));
+  writeFileSync(join(answers, "delay"), "1");
+  const port = await freePort();
+  const child = spawn(process.execPath, [CLI, "node", "--port", String(port)], {
+    env: {
+      ...process.env,
+      DEVSITE_USER_HOME: mkdtempSync(join(tmpdir(), "devsite-home-")),
+      DEVSITE_FAKE_TAILSCALE: answers,
+      DEVSITE_PEER_PORT: String(await freePort()),
+    },
+    stdio: "ignore",
+  });
+  try {
+    let first: { tailnetListeners?: unknown[] } | null = null;
+    for (let i = 0; i < 400 && first === null; i++) {
+      first = await fetch(`http://127.0.0.1:${port}/status`).then(
+        (r) => r.json() as Promise<{ tailnetListeners?: unknown[] }>,
+        () => null,
+      );
+      if (first === null) await Bun.sleep(10);
+    }
+    expect(first?.tailnetListeners).toHaveLength(1);
+  } finally {
+    child.kill();
+  }
 });

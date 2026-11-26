@@ -265,9 +265,9 @@ test("a file devsite generates whole shows as one line in init, and in full with
   const m = setUpMachine({ caddyfile: SET_UP_CADDYFILE, devsiteFiles: false });
   const r = await init(m.caddyfile, { stdin: fakeStdin("n", true) });
   expect(r.stdout).toContain("devsite.d/node.caddy — devsite's route to the node, new");
-  expect(r.stdout).not.toContain("+\thandle_errors 502 {");
+  expect(r.stdout).not.toContain("+\thandle_errors 502 503 504 {");
   const dry = await init(m.caddyfile, { argv: ["init", "--dry-run"] });
-  expect(dry.stdout).toContain("+\thandle_errors 502 {");
+  expect(dry.stdout).toContain("+\thandle_errors 502 503 504 {");
 });
 
 test("a fresh Mac with no Caddy and no node: node, install, write, start Caddy, then the one sudo call", async () => {

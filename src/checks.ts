@@ -25,7 +25,7 @@ export type Repair =
   | "load"
   | "trust"
   | "run-dnsmasq"
-  | "split-dns"
+  | "tailscale-secret"
   | "node"
   | "write";
 

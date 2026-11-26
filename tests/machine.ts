@@ -176,11 +176,21 @@ const nodes: RunningNode[] = [];
 // A real node in this process, on a free port and the test's home, with each project registered as `bun dev` registers it. Its dev server ports answer nothing, so no project is live.
 export async function useNodeWith(
   projects: Record<string, { folder?: string; devsiteVersion?: string }> = {},
+  { peerPort }: { peerPort?: number } = {},
 ) {
   const home = process.env.DEVSITE_USER_HOME ?? "";
   const node = await startNode({
     port: 0,
-    env: { DEVSITE_USER_HOME: home, DEVSITE_TAILSCALE: process.env.DEVSITE_TAILSCALE },
+    peerPort,
+    env: {
+      DEVSITE_USER_HOME: home,
+      DEVSITE_TAILSCALE: process.env.DEVSITE_TAILSCALE,
+      DEVSITE_SECURITY: process.env.DEVSITE_SECURITY,
+      DEVSITE_TAILSCALE_API: process.env.DEVSITE_TAILSCALE_API,
+      DEVSITE_SLEEP_LISTENER: process.env.DEVSITE_SLEEP_LISTENER,
+      DEVSITE_DNSMASQ_AT: process.env.DEVSITE_DNSMASQ_AT,
+      DEVSITE_CADDY_AT: process.env.DEVSITE_CADDY_AT,
+    },
   });
   nodes.push(node);
   process.env.DEVSITE_NODE = `http://127.0.0.1:${node.port}`;

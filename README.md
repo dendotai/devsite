@@ -42,7 +42,7 @@ The nodes on the Macs of one tailnet find each other through `tailscale status`,
 
 A request for a name that is not live on the Mac it reaches goes on to the Mac where the name is live: the node relays it over HTTPS to that Mac's Caddy, HMR included, and checks that Caddy's certificate against this Mac's CA root, read from Caddy's admin API. So the phone opens `https://<name>.internal` for a project on any of your Macs, and a dev server started on any Mac opens at once. The relay needs one CA root on every Mac (below); with another root, the page names that Mac and the `devsite ca export` / `devsite init --ca -` fix. A name live on no Mac shows the offline page with where the project last ran, on any of your Macs.
 
-A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it or another Mac's node knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not answer, Caddy shows a short "node not running" page.
+A project's name is one DNS label (`myapp`, not `my.app`). Caddy signs each name's certificate from its local CA at the first visit, after the node confirms the name is a project it or another Mac's node knows. Every devsite request answers only this machine and your tailnet: a request from the LAN gets no response. When the node does not run, Caddy passes a `.internal` request to the main Mac, and shows a short "node not running" page when it cannot.
 
 ## Quick start
 
@@ -90,19 +90,23 @@ Each additional project needs only steps 1 to 3. Because no project declares a p
 
 1. **Install [Tailscale](https://tailscale.com)** on this Mac and on each device, and sign in to the same tailnet.
 
-2. **Run `bunx devsite init` again.** With Tailscale on the Mac, it installs dnsmasq and runs devsite's own dnsmasq on this Mac's Tailscale IP (one `sudo` prompt). Then it guides you through the split DNS route, the one step only the Tailscale admin console can do:
+2. **Create a Tailscale OAuth client** on the [Trust credentials page](https://console.tailscale.com/admin/settings/trust-credentials): choose Credential, then OAuth, then tick Write next to DNS. Don't forget to back up the secret. Tailscale won't show it again. The node writes the `internal` split DNS route with it, so you never edit the route in the admin console.
+
+3. **Run `bunx devsite init` again.** With Tailscale on the Mac, it installs dnsmasq and runs devsite's own dnsmasq on this Mac's Tailscale IP (one `sudo` prompt). Then it asks for the OAuth client secret, shows nothing you type, and stores it in the login Keychain, where the node reads it:
 
    ```text
-   Step 3 of 3: add the split DNS route for .internal in the Tailscale admin console, so the phone finds .internal names  [manual]
-     nameserver: 100.90.1.2
-     restrict to domain: internal
-   Open https://login.tailscale.com/admin/dns in your browser? (y/n)
-   Done? Press y to check, n to skip
+   Step 3 of 3: store the Tailscale OAuth client secret in the login Keychain, so the node writes the split DNS route  [manual]
+     Create a Tailscale OAuth client: https://console.tailscale.com/admin/settings/trust-credentials
+     Choose Credential, then OAuth, then tick Write next to DNS.
+     Don't forget to back up the secret. Tailscale won't show it again.
+   Tailscale OAuth client secret:
+     Stored in the login Keychain.
+     The split DNS route for .internal names this Mac (100.90.1.2).
    ```
 
-   `y` at "Done?" checks the route with `tailscale dns status` and asks again until it is there.
+   To pipe the secret in instead, for example with the 1Password CLI: `op read "op://<vault>/<item>/tailscale/client-secret" | bunx devsite init --tailscale-secret -`. Run it on each Mac, so any Mac can take over the route.
 
-3. **Trust the CA root on each device.** The `init` run that trusted the CA on this Mac printed the path of the root certificate at its end; `bunx devsite doctor` shows its path on the line "that CA is trusted in the keychain" when devsite can read Caddy's storage. Get it onto the phone (AirDrop works) and install it. On iOS, installing is not trusting: install the profile, then turn it on in Settings → General → About → Certificate Trust Settings.
+4. **Trust the CA root on each device.** The `init` run that trusted the CA on this Mac printed the path of the root certificate at its end; `bunx devsite doctor` shows its path on the line "that CA is trusted in the keychain" when devsite can read Caddy's storage. Get it onto the phone (AirDrop works) and install it. On iOS, installing is not trusting: install the profile, then turn it on in Settings → General → About → Certificate Trust Settings.
 
 `https://myapp.internal` now opens on this Mac and on the phone, including HMR.
 
@@ -114,7 +118,7 @@ Each additional project needs only steps 1 to 3. Because no project declares a p
 - **Plan.** For the red checks it can fix, it prints a numbered plan and the diff of each file it would change, except the files devsite writes whole (Caddy's route to the node and the dnsmasq files), which show as one line; `--dry-run` prints their diff too. A step that needs root is tagged `[sudo]`; a step only you can do is tagged `[manual]`.
 - **One prompt.** `Apply these changes? [Y/n]`. `--dry-run` stops before this prompt and writes nothing.
 - **One `sudo` call.** Every root step runs back to back in one `sudo` call, right after your `y`, so you type your password at most once per run. Your password goes only to `sudo`, never through devsite.
-- **Manual steps.** Each asks `Open <url> in your browser? (y/n)`, then `Done? Press y to check, n to skip`. Each prompt takes one key, with no Enter. A skipped step leaves `doctor` red; `init` still finishes.
+- **Manual steps.** Each says what to do and waits for your input. A skipped step leaves `doctor` red; `init` still finishes.
 - **Checks after this run.** The same checks again, with the fix for each one still red.
 
 On a set-up Mac `init` prints the checks, then `Nothing to do: init changed nothing.` It leaves Caddy and the node alone, so your running dev servers keep their routes. `init` is the only thing that installs or updates the node: it installs the devsite version it runs from when the node does not answer or runs an older devsite.
@@ -153,8 +157,8 @@ Then the checks. They check outcomes, not how they came about, so a setup you bu
 
 - **Node** — it answers on `127.0.0.1:47380`; it runs this devsite or newer; no project runs a devsite newer than it. When it does not answer, the fix names `bunx devsite init` and the node's log.
 - **Caddy** — installed; the admin API answers; devsite's route for `*.internal` and `*.localhost` exists and starts with the LAN guard; no route before it takes its names; the served certificate chains to the CA in Caddy's storage; that CA is trusted in the keychain.
-- **Tailscale** (when it is on the Mac) — up; the split DNS route for `internal` points to this Mac.
-- **dnsmasq** (when Tailscale is on the Mac) — something answers `.internal` with the Tailscale IP on the Tailscale IP; this Mac resolves `.internal` to the Tailscale IP.
+- **Tailscale** (when it is on the Mac) — up; the login Keychain holds the OAuth client secret; the split DNS route for `internal` points to this Mac or to another Mac whose node answers.
+- **dnsmasq** (when Tailscale is on the Mac) — something answers `.internal` with the Tailscale IP on the Tailscale IP; this Mac resolves `.internal` to the IP of the Mac the split DNS route names.
 - **Node on the tailnet** (with Tailscale up) — the node listens on port 47380 of each Tailscale IP. When another program holds the port, the red check names it, and the node takes the port within 10 s once it is free.
 - **Other Macs** (when another Mac of your Tailscale user answers on port 47380) — its node speaks this node's protocol number (a red check names the Mac to update: `update devsite on Mac mini`), it accepts this Mac's calls, and no other program holds the port there. A Mac with no devsite, a stopped node, or a Mac that sleeps gets no check.
 - **This repo** — every `devSite` name is valid and used by one project only, and the node holds no name of this repo for a folder outside it.
@@ -180,9 +184,9 @@ Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
 
 ## DNS and certificates
 
-**How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Tailscale split DNS sends every `.internal` lookup on the tailnet to devsite's dnsmasq on this Mac's Tailscale IP, which answers with that IP. The Mac itself resolves `.internal` the same way, through Tailscale's DNS server. With Tailscale off, `.internal` lookups on the Mac fail at once, with no wait for a timeout; `.localhost` always works.
+**How does `*.internal` resolve?** `.internal` is the TLD ICANN reserved for private use: no public DNS answers for it, and no public CA issues certificates for it. Tailscale split DNS sends every `.internal` lookup on the tailnet to devsite's dnsmasq on the main Mac's Tailscale IP, which answers with that IP. The Mac itself resolves `.internal` the same way, through Tailscale's DNS server. With Tailscale off, `.internal` lookups on the Mac fail at once, with no wait for a timeout; `.localhost` always works.
 
-**Why does the browser trust the certificate?** Caddy runs a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` adds that CA's root to your keychain and keeps the storage Caddy already uses, so a device that trusted the root once keeps trusting every certificate it issues. Other devices trust the same root file by hand (Step 2.3).
+**Why does the browser trust the certificate?** Caddy runs a local certificate authority and issues short-lived certificates for your hosts from it. `devsite init` adds that CA's root to your keychain and keeps the storage Caddy already uses, so a device that trusted the root once keeps trusting every certificate it issues. Other devices trust the same root file by hand (Step 2.4).
 
 **One CA root on several Macs.** Each Mac's Caddy makes its own root, so a phone would need one root per Mac. Give every Mac the same root instead: save it once in your secret store, then import it on each other Mac before you trust anything there. For example, with the 1Password CLI:
 
@@ -215,9 +219,9 @@ What `devsite init` changes (each changed file shows its diff first, except the 
 - `/opt/homebrew/etc/Caddyfile` — set up once: one `import devsite.d/*.caddy # devsite` line, the `on_demand_tls` ask that lets Caddy sign a certificate only for a name the node knows, and a `storage` pin only when the file has no `storage` line. Before any Caddyfile write, the previous file is copied to `Caddyfile.bak`; the very first write also saves `Caddyfile.pre-devsite`, which no later run touches. A `default_bind` line is deleted only when the file has no site blocks of your own.
 - `/opt/homebrew/etc/devsite.d/` — devsite's own directory: `node.caddy` (the one route to the node, with the "node not running" page) and `guard.caddy` (the LAN guard snippet).
 - `~/Library/Application Support/devsite/` — the node's program (`node/cli.js`), its state (`state.json`: each project's port, folder, last-used date, and whether it is live), and the settings (`config.json`).
-- `~/Library/LaunchAgents/ai.den.devsite.node.plist` — starts the node as you; its log is `~/Library/Logs/devsite/node.log`.
+- `~/Library/LaunchAgents/ai.den.devsite.node.plist` — starts the node as you; its log is `~/Library/Logs/devsite/node.log`. The node runs one `osascript` process, which tells it when this Mac goes to sleep.
 - The Caddy service — installed and started with Homebrew only when Caddy is missing or stopped.
-- Your keychain — Caddy's local CA root is added with `sudo caddy trust`.
+- Your keychain — Caddy's local CA root is added with `sudo caddy trust`; the Tailscale OAuth client secret is a generic password in the login Keychain (service `devsite`, account `tailscale-oauth-client-secret`).
 - With Tailscale on the Mac: dnsmasq from Homebrew, plus devsite's own `/Library/Application Support/devsite/` (`dnsmasq.conf` and `dnsmasq-watcher.zsh`) and `/Library/LaunchDaemons/ai.den.devsite.dnsmasq.plist`.
 
 What the Vite plugin changes: nothing on disk. It tells the node the project's name, port and folder.
@@ -234,9 +238,10 @@ rm ~/Library/LaunchAgents/ai.den.devsite.node.plist
 rm -rf /opt/homebrew/etc/devsite.d      # devsite's own Caddy directory
 # then remove the import line and the on_demand_tls block from /opt/homebrew/etc/Caddyfile, or restore Caddyfile.pre-devsite
 rm -rf ~/Library/Application\ Support/devsite ~/Library/Logs/devsite   # the node, its state, settings, logs
+security delete-generic-password -s devsite -a tailscale-oauth-client-secret   # the OAuth client secret
 ```
 
-Also delete the `internal` split DNS nameserver in the [Tailscale admin console](https://login.tailscale.com/admin/dns).
+Also delete the `internal` split DNS nameserver in the [Tailscale admin console](https://login.tailscale.com/admin/dns), and the OAuth client on the [Trust credentials page](https://console.tailscale.com/admin/settings/trust-credentials).
 
 Note: a renamed or deleted project stays in the node's state, and its old name keeps answering the offline page. `devsite doctor` lists projects unused for 30+ days.
 

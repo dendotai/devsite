@@ -9,7 +9,15 @@ import { join } from "node:path";
 
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
-export type TestNode = { url: string; port: number; home: string; stop: () => Promise<void> };
+// pause: SIGSTOP, as a Mac that hangs or loses its network: its sockets stay open and it sends nothing. resume: SIGCONT, as that Mac coming back.
+export type TestNode = {
+  url: string;
+  port: number;
+  home: string;
+  stop: () => Promise<void>;
+  pause: () => void;
+  resume: () => void;
+};
 
 const children: ChildProcess[] = [];
 const servers: Server[] = [];
@@ -35,6 +43,8 @@ function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return Promise.resolve();
   return new Promise((resolve) => {
     child.once("exit", () => resolve());
+    // A paused node handles SIGTERM only once it runs again.
+    child.kill("SIGCONT");
     child.kill("SIGTERM");
   });
 }
@@ -84,6 +94,8 @@ export async function startTestNode(
     port,
     home,
     stop: () => stopChild(child),
+    pause: () => child.kill("SIGSTOP"),
+    resume: () => child.kill("SIGCONT"),
   };
   return node;
 }

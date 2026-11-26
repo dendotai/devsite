@@ -22,7 +22,7 @@ import { nodeLog, settingsFile, supportDir } from "../paths";
 import { discoverProjects, type RepoProject } from "../repo";
 import { readSettings } from "../settings";
 import { findStorage, type Storage } from "../storage";
-import { probeTailscale } from "../tailscale";
+import { tailscaleChecks } from "../tailscale";
 import { refuseRoot } from "./init";
 
 const UNUSED_DAYS = 30;
@@ -139,10 +139,11 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   printSection("Caddy", caddyResults, paint, ctx);
   results.push(...caddyResults);
 
-  const tailscale = probeTailscale(dns.tailscale, ctx);
-  if (tailscale.checks.length > 0) {
-    printSection("Tailscale", tailscale.checks, paint, ctx);
-    results.push(...tailscale.checks);
+  const peerStates = node.ok ? await readPeers() : [];
+  const tailscale = tailscaleChecks(dns.tailscale, peerStates, ctx);
+  if (tailscale.length > 0) {
+    printSection("Tailscale", tailscale, paint, ctx);
+    results.push(...tailscale);
   }
   if (dns.checks.length > 0) {
     printSection("dnsmasq", dns.checks, paint, ctx);
@@ -150,7 +151,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
   }
   const listener = node.ok ? node.status.tailnetListeners?.[0]?.address : undefined;
   const peerPort = listener === undefined ? NODE_PORT : portOf(listener);
-  const peers = node.ok ? peerChecks(await readPeers(), peerPort) : [];
+  const peers = node.ok ? peerChecks(peerStates, peerPort) : [];
   if (peers.length > 0) {
     printSection("Other Macs", peers, paint, ctx);
     results.push(...peers);
