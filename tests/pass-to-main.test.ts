@@ -291,11 +291,16 @@ test("the main Mac's certificate from the shared CA root passes the check; one f
   expect(seen).toHaveLength(1);
 });
 
-// Go's resolver, which Caddy uses, tries each nameserver of /etc/resolv.conf twice, 5 s each, and Caddy sends every try to its one resolver.
+// Go's resolver, which Caddy uses, tries each nameserver of /etc/resolv.conf `attempts` times (2 when unset), `timeout` seconds each (5 when unset), and Caddy sends every try to its one resolver.
 test("a DNS server that never replies: the page after 10 s for each nameserver of /etc/resolv.conf", async () => {
-  const nameservers =
-    readFileSync("/etc/resolv.conf", "utf8").match(/^nameserver\s/gm)?.length ?? 1;
-  const expected = nameservers * 2 * 5000;
+  const conf = readFileSync("/etc/resolv.conf", "utf8");
+  const nameservers = conf.match(/^nameserver\s/gm)?.length ?? 1;
+  const option = (name: string, unset: number) =>
+    Math.max(
+      1,
+      Number(conf.match(new RegExp(`^options\\s.*\\b${name}:(\\d+)`, "m"))?.[1] ?? unset),
+    );
+  const expected = nameservers * option("attempts", 2) * option("timeout", 5) * 1000;
   const old = await freePort();
   const dns = (await serving("127.0.0.1", { dns: null })).DEVSITE_DNSMASQ_AT;
   await startCaddy(old, { node: deadPort, main: await freePort(), dns });

@@ -337,7 +337,7 @@ async function nodeBesideMain(env: Record<string, string> = {}) {
       for (const res of open) res.end("going\n");
     },
     opened: () => opened,
-    // When the node last closed a connection for heartbeats.
+    // When a connection for heartbeats last closed.
     closedAt: () => closedAt,
     back: async () => {
       main = await listen();
@@ -390,7 +390,8 @@ test("a main Mac that goes while this node reads the route moves it at once", as
 test("a Mac that goes to sleep while it takes over writes no route", async () => {
   const events = sleepEvents();
   const m = await nodeBesideMain(events.env);
-  m.api.state.delayMs = 400;
+  m.api.state.delayMs = 1000;
+  const reads = m.api.state.reads;
   m.going();
   m.cut();
   // The vote reads the route again before it writes; the sleep comes during that read.
@@ -398,6 +399,7 @@ test("a Mac that goes to sleep while it takes over writes no route", async () =>
   events.send("sleep");
   await until(events.released, 2000);
   await Bun.sleep(4 * HEARTBEAT_MS);
+  expect(m.api.state.reads).toBeGreaterThan(reads);
   expect(m.api.state.writes).toEqual([]);
   expect((await routeOf(m.node)).role).toBe("unknown");
 });
