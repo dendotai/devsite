@@ -1,13 +1,6 @@
 # Known gaps and risks
 
-Open: waits for a fix, in its issue. Accepted: stays as it is, with the reason. A change that closes an entry deletes it.
-
-## Open
-
-- **Parts of the split DNS takeover with no test** (#125).
-- **Two machines that cannot reach each other.** Each takes the route in turn, about every 30 s, so the phone changes machines (#126).
-
-## Accepted
+Each entry is accepted, with its reason; a gap that waits for a fix is its issue instead. A change that closes an entry deletes it.
 
 - **The stored secret and the CA root key.** A program that runs as the user can read the Tailscale OAuth client secret from the login Keychain with no prompt, and change every DNS setting of the tailnet with it. The same program can read the key of Caddy's CA root, which the phone trusts. With both, it can send the phone to a false copy of a site that the phone accepts as real. Accepted because the node reads the secret with no one present. Looked at again when the node is a signed app (#112), because macOS can then limit the secret to that app.
 - **An HTTP/3 connection from before `Alt-Svc: clear`.** A browser that holds one stays on its machine until that connection ends. Accepted because it happens once per browser.

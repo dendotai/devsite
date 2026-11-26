@@ -104,7 +104,7 @@ Each additional project needs only steps 1 to 3. Because no project declares a p
      The split DNS route for .internal names this Mac (100.90.1.2).
    ```
 
-   To pipe the secret in instead, for example with the 1Password CLI: `op read "op://<vault>/<item>/credential" | bunx devsite init --tailscale-secret -`. Run it on each Mac, so any Mac can take over the route.
+   To pipe the secret in instead, for example with the 1Password CLI: `op read "op://<vault>/<item>/tailscale/client-secret" | bunx devsite init --tailscale-secret -`. Run it on each Mac, so any Mac can take over the route.
 
 4. **Trust the CA root on each device.** The `init` run that trusted the CA on this Mac printed the path of the root certificate at its end; `bunx devsite doctor` shows its path on the line "that CA is trusted in the keychain" when devsite can read Caddy's storage. Get it onto the phone (AirDrop works) and install it. On iOS, installing is not trusting: install the profile, then turn it on in Settings → General → About → Certificate Trust Settings.
 
