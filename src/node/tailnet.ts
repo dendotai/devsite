@@ -133,3 +133,40 @@ export async function askPeer(peer: Peer, port: number, path: string): Promise<P
     return codeOf(err) === "ECONNREFUSED" ? { state: "refused" } : { state: "timeout" };
   }
 }
+
+// A node whose peer port another program holds on its Tailscale IP listens on the first free port of these instead, so every node can find it with no lookup service.
+export const fallbackPorts = (port: number) => [1, 2, 3, 4].map((i) => port + i);
+
+// A node answered: on this protocol or another, or with a refusal of its own.
+const fromNode = (a: PeerAnswer) =>
+  a.state !== "refused" && a.state !== "not-a-node" && a.state !== "timeout";
+
+export type PeerCaller = {
+  // askPeer at the peer port; after a refusal or another program's answer there, at the fallback ports, all at once.
+  ask: (peer: Peer, path: string) => Promise<PeerAnswer>;
+  // The port the peer's node last answered on.
+  portOf: (peer: Peer) => number;
+};
+
+export function makePeerCaller(peersAt: () => number): PeerCaller {
+  // Peer IP → the fallback port its node answered on.
+  const found = new Map<string, number>();
+  const ask = async (peer: Peer, path: string): Promise<PeerAnswer> => {
+    const known = found.get(peer.ip);
+    if (known !== undefined) {
+      const a = await askPeer(peer, known, path);
+      if (a.state !== "refused" && a.state !== "not-a-node") return a;
+      found.delete(peer.ip);
+    }
+    const first = await askPeer(peer, peersAt(), path);
+    if (first.state !== "refused" && first.state !== "not-a-node") return first;
+    const tries = await Promise.all(
+      fallbackPorts(peersAt()).map(async (port) => ({ port, a: await askPeer(peer, port, path) })),
+    );
+    const hit = tries.find((t) => fromNode(t.a));
+    if (hit === undefined) return first;
+    found.set(peer.ip, hit.port);
+    return hit.a;
+  };
+  return { ask, portOf: (peer) => found.get(peer.ip) ?? peersAt() };
+}

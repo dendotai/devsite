@@ -20,7 +20,8 @@ import { makeRelay, RELAYED_HEADER, type RelayEnv, requestHead } from "./relay";
 import { listenForSleep, type SleepEnv } from "./sleep";
 import {
   addressOf,
-  askPeer,
+  fallbackPorts,
+  makePeerCaller,
   type Peer,
   PROTOCOL,
   PROTOCOL_HEADER,
@@ -42,8 +43,8 @@ export type Project = {
   devsiteVersion: string;
 };
 
-// One per Tailscale IP of this Mac: the address the node listens on for other Macs, with the error code while another program holds the port.
-export type TailnetListener = { address: string; error?: string };
+// One per Tailscale IP of this Mac: the address the node listens on for other Macs, with the error code while another program holds the port, and the fallback address it listens on meanwhile.
+export type TailnetListener = { address: string; error?: string; fallback?: string };
 
 export type Status = {
   version: string;
@@ -244,8 +245,10 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
   let peersAt = peerPort ?? port;
   // The last tailnet read.
   let tailnet: Tailnet | null = null;
-  const peerServers = new Map<string, Server>();
-  const mainMac = makeMainMac({ env, tailnet: () => tailnet, peersAt: () => peersAt });
+  // port: peersAt, or a fallback port while another program holds peersAt.
+  const peerServers = new Map<string, { server: Server; port: number }>();
+  const caller = makePeerCaller(() => peersAt);
+  const mainMac = makeMainMac({ env, tailnet: () => tailnet, caller });
   // A bind that fails is logged once per IP, as each refresh tries it again; the code stays for `GET /status`.
   const failedIps = new Map<string, string>();
 
@@ -268,7 +271,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       let left = peers.length;
       if (left === 0) resolve(null);
       for (const peer of peers) {
-        askPeer(peer, peersAt, `/projects/${name}`).then((answer) => {
+        caller.ask(peer, `/projects/${name}`).then((answer) => {
           const project = answer.state === "answer" ? peerProjectOf(answer.body) : null;
           if (project !== null) {
             records.push({ peer, project });
@@ -437,7 +440,11 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       tailnetListeners: (tailnet?.ips ?? []).map((ip) => {
         const address = addressOf(ip, peersAt);
         const error = failedIps.get(ip);
-        return error === undefined ? { address } : { address, error };
+        if (error === undefined) return { address };
+        const at = peerServers.get(ip)?.port;
+        return at === undefined
+          ? { address, error }
+          : { address, error, fallback: addressOf(ip, at) };
       }),
       route: mainMac.state(),
     };
@@ -448,7 +455,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
     const tailnet = await readTailnet(env);
     const list = await Promise.all(
       (tailnet?.peers ?? []).map(async (peer: Peer): Promise<PeerState> => {
-        const answer = await askPeer(peer, peersAt, "/hello");
+        const answer = await caller.ask(peer, "/hello");
         if (answer.state === "other-protocol") {
           return { mac: peer.mac, ip: peer.ip, state: "other-protocol", protocol: answer.protocol };
         }
@@ -603,6 +610,14 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
 
   let refreshing = false;
 
+  const peerServer = () =>
+    createServer((req, res) => {
+      answerPeer(req, res).catch((err) => {
+        console.error(`devsite node: peer ${req.method} ${req.url}: ${(err as Error).message}`);
+        if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
+      });
+    });
+
   const refresh = async () => {
     if (refreshing) return;
     refreshing = true;
@@ -610,23 +625,21 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       tailnet = await readTailnet(env);
       const wanted = new Set(tailnet?.ips ?? []);
       for (const ip of failedIps.keys()) if (!wanted.has(ip)) failedIps.delete(ip);
-      for (const [ip, s] of peerServers) {
+      for (const [ip, p] of peerServers) {
         if (wanted.has(ip)) continue;
-        stopServer(s);
+        stopServer(p.server);
         peerServers.delete(ip);
       }
       for (const ip of wanted) {
-        if (peerServers.has(ip)) continue;
-        const s = createServer((req, res) => {
-          answerPeer(req, res).catch((err) => {
-            console.error(`devsite node: peer ${req.method} ${req.url}: ${(err as Error).message}`);
-            if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
-          });
-        });
+        const now = peerServers.get(ip);
+        if (now?.port === peersAt) continue;
+        const s = peerServer();
         try {
           await listen(s, peersAt, ip);
-          peerServers.set(ip, s);
+          if (now !== undefined) stopServer(now.server);
+          peerServers.set(ip, { server: s, port: peersAt });
           failedIps.delete(ip);
+          continue;
         } catch (err) {
           if (!failedIps.has(ip)) {
             console.error(
@@ -634,6 +647,15 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
             );
           }
           failedIps.set(ip, String((err as NodeJS.ErrnoException).code ?? "error"));
+        }
+        if (now !== undefined) continue;
+        for (const port of fallbackPorts(peersAt)) {
+          try {
+            await listen(s, port, ip);
+            peerServers.set(ip, { server: s, port });
+            console.error(`devsite node: the other Macs reach this node on ${addressOf(ip, port)}`);
+            break;
+          } catch {}
         }
       }
       // After the listen, so another node's vote reaches this one.
@@ -653,7 +675,7 @@ export async function startNode({ port, peerPort, env }: NodeOptions): Promise<R
       clearInterval(timer);
       sleepListener.close();
       await mainMac.close();
-      for (const s of peerServers.values()) stopServer(s);
+      for (const p of peerServers.values()) stopServer(p.server);
       await new Promise<void>((resolve) => {
         for (const s of tunnels) s.destroy();
         server.closeAllConnections();

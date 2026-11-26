@@ -112,10 +112,32 @@ test("a Mac where another program holds the peer port is listed as not-a-node", 
   expect(list).toEqual([{ mac: "Mac mini", ip: "::1", state: "not-a-node" }]);
 });
 
-test("a peer port taken on this Mac shows in the node's status, and the node takes it once it is free", async () => {
+// Another program on the shared peer port at ip, which answers as no node does.
+async function holdPort(port: number, ip: string) {
+  const holder = createServer((_req, res) => res.end("hello"));
+  await new Promise<void>((r) => holder.listen(port, ip, r));
+  return () =>
+    new Promise((r) => {
+      holder.closeAllConnections();
+      holder.close(r);
+    });
+}
+
+// DEVSITE_TAILNET_REFRESH_MS is short in tests, so the next refresh comes within a few polls.
+async function until(check: () => Promise<boolean>) {
+  const deadline = Date.now() + 3000;
+  while (!(await check()) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+}
+
+const refused = (port: number, ip: string) =>
+  fetch(`http://${ip.includes(":") ? `[${ip}]` : ip}:${port}/hello`).then(
+    () => false,
+    () => true,
+  );
+
+test("a peer port taken on this Mac shows in the node's status with the fallback port it listens on, and the node moves back once the port is free", async () => {
   const peerPort = await freePort();
-  const holder = createServer();
-  await new Promise<void>((r) => holder.listen(peerPort, "::1", r));
+  const release = await holdPort(peerPort, "::1");
   const here = await startTestNode(undefined, {
     peerPort,
     tailnet: { status: statusJson(OTHER_MAC, []) },
@@ -123,14 +145,66 @@ test("a peer port taken on this Mac shows in the node's status, and the node tak
   const listeners = async () =>
     ((await (await fetch(`${here.url}/status`)).json()) as { tailnetListeners: unknown })
       .tailnetListeners;
-  expect(await listeners()).toEqual([{ address: `[::1]:${peerPort}`, error: "EADDRINUSE" }]);
-  await new Promise((r) => holder.close(r));
-  // DEVSITE_TAILNET_REFRESH_MS is short in tests, so the next refresh comes within a few polls.
-  const deadline = Date.now() + 3000;
-  while (JSON.stringify(await listeners()).includes("EADDRINUSE") && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  expect(await listeners()).toEqual([
+    { address: `[::1]:${peerPort}`, error: "EADDRINUSE", fallback: `[::1]:${peerPort + 1}` },
+  ]);
+  const hello = await fetch(`http://[::1]:${peerPort + 1}/hello`, {
+    headers: { "devsite-protocol": "1" },
+  });
+  expect(hello.headers.get("devsite-protocol")).toBe("1");
+  await release();
+  await until(async () => !JSON.stringify(await listeners()).includes("EADDRINUSE"));
   expect(await listeners()).toEqual([{ address: `[::1]:${peerPort}` }]);
+  expect(await refused(peerPort + 1, "::1")).toBe(true);
+});
+
+test("a fallback port another program also holds is skipped for the next one", async () => {
+  const peerPort = await freePort();
+  const releases = [await holdPort(peerPort, "::1"), await holdPort(peerPort + 1, "::1")];
+  const here = await startTestNode(undefined, {
+    peerPort,
+    tailnet: { status: statusJson(OTHER_MAC, []) },
+  });
+  const status = (await (await fetch(`${here.url}/status`)).json()) as {
+    tailnetListeners: unknown;
+  };
+  for (const release of releases) await release();
+  expect(status.tailnetListeners).toEqual([
+    { address: `[::1]:${peerPort}`, error: "EADDRINUSE", fallback: `[::1]:${peerPort + 2}` },
+  ]);
+});
+
+test("with the peer port taken on the other Mac's Tailscale IP, a start of a name live there is still refused", async () => {
+  const peerPort = await freePort();
+  const release = await holdPort(peerPort, OTHER_MAC.ip);
+  const { here, there } = await twoMacs({ peerPort });
+  const dev = await startDevServer();
+  await register(there, "web", {
+    port: dev.port,
+    folder: join(there.home, "Projects", "acme-web"),
+  });
+  const res = await register(here, "web", { port: dev.port });
+  await release();
+  expect(res.status).toBe(409);
+  expect(await res.json()).toEqual({
+    error: "web.internal runs on Mac mini from ~/Projects/acme-web",
+  });
+  expect(await (await fetch(`${here.url}/peers`)).json()).toEqual([
+    { mac: "Mac mini", ip: "::1", state: "same-protocol" },
+  ]);
+});
+
+test("a node that moved back to the peer port from its fallback port is found there", async () => {
+  const peerPort = await freePort();
+  const release = await holdPort(peerPort, OTHER_MAC.ip);
+  const { here, there } = await twoMacs({ peerPort });
+  const dev = await startDevServer();
+  await register(there, "web", { port: dev.port });
+  expect((await register(here, "web", { port: dev.port })).status).toBe(409);
+  await release();
+  await until(() => refused(peerPort + 1, OTHER_MAC.ip));
+  expect(await refused(peerPort + 1, OTHER_MAC.ip)).toBe(true);
+  expect((await register(here, "web", { port: dev.port })).status).toBe(409);
 });
 
 test("a node on another protocol does not block a start", async () => {

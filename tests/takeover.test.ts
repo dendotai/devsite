@@ -27,6 +27,8 @@ async function startMacs(
   hereEnv: Record<string, string> = {},
   // What the other Mac can serve: everything, when left out.
   thereServes: Parameters<typeof serving>[1] = {},
+  // A peer port the test set up first.
+  peerPort?: number,
 ) {
   const api = fakeSplitDnsApi(route);
   const env = (secret: string | null) => ({
@@ -35,6 +37,7 @@ async function startMacs(
     DEVSITE_FAKE_SECURITY: keychain(secret),
   });
   const macs = await twoMacs({
+    peerPort,
     hereEnv: {
       ...env(secrets.here === undefined ? SECRET : secrets.here),
       ...(await serving(THIS_MAC.ip)),
@@ -124,6 +127,22 @@ test("the Mac that takes over reads the route again and writes nothing when anot
   await here.stop();
   await Bun.sleep(4 * HEARTBEAT_MS);
   expect(api.state.writes).toEqual([]);
+});
+
+test("a main Mac whose peer port another program holds sends its heartbeats from its fallback port, so the route stays", async () => {
+  const peerPort = await freePort();
+  const holder = createServer((_req, res) => res.end("hello"));
+  await new Promise<void>((r) => holder.listen(peerPort, THIS_MAC.ip, r));
+  const { api, there } = await startMacs([THIS_MAC.ip], {}, {}, {}, peerPort);
+  await Bun.sleep(8 * HEARTBEAT_MS);
+  holder.closeAllConnections();
+  holder.close();
+  expect(api.state.writes).toEqual([]);
+  expect((await routeOf(there)) as unknown).toEqual({
+    role: "follower",
+    mac: THIS_MAC.name,
+    ip: THIS_MAC.ip,
+  });
 });
 
 test("a Mac with no secret in its Keychain never writes the route; the Mac that has one takes it over", async () => {

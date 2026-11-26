@@ -418,24 +418,26 @@ function holderOf(port: number, ctx: CliContext): { name: string; command: strin
     : { name: `${command} (pid ${pid})`, command };
 }
 
-// The other Macs reach this node only on its Tailscale IPs; a port another program holds there leaves it unheard, and the node takes the port at its next refresh once it is free.
+// The other Macs reach this node only on its Tailscale IPs; while another program holds the port there, they reach it on a fallback port if one was free, and the node takes the port at its next refresh once it is free.
 export function tailnetListenerChecks(listeners: TailnetListener[], ctx: CliContext): Result[] {
   return listeners.map((l): Result => {
     const label = `the node listens for other Macs on ${l.address}`;
     if (l.error === undefined) return { state: "green", label };
     const port = portOf(l.address);
     const holder = l.error === "EADDRINUSE" ? holderOf(port, ctx) : null;
+    const meanwhile =
+      l.fallback === undefined ? "" : `; the other Macs reach the node on ${l.fallback} meanwhile`;
     return holder === null
       ? {
           state: "red",
           label,
-          detail: `the listen failed (${l.error})`,
+          detail: `the listen failed (${l.error})${meanwhile}`,
           fix: `\`lsof -nP -iTCP:${port} -sTCP:LISTEN\` names the program that holds the port; stop it, and the node takes the port within ${TAILNET_REFRESH_MS / 1000} s`,
         }
       : {
           state: "red",
           label,
-          detail: `${holder.name} holds the port`,
+          detail: `${holder.name} holds the port${meanwhile}`,
           fix: `stop ${holder.command}; the node takes the port within ${TAILNET_REFRESH_MS / 1000} s`,
         };
   });
