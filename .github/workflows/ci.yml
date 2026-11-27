@@ -29,14 +29,14 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint
-      # The reload test adapts devsite's Caddyfile with a real caddy binary: the prebuilt release from Caddy's authors that tests/CADDY_VERSION names.
+      # The reload test adapts devsite's Caddyfile with a real caddy binary.
       - run: gh release download "$(cat tests/CADDY_VERSION)" --repo caddyserver/caddy --pattern 'caddy_*_linux_amd64.tar.gz' --dir "$RUNNER_TEMP" && sudo tar -xzf "$RUNNER_TEMP"/caddy_*_linux_amd64.tar.gz -C /usr/local/bin caddy
         env:
           GH_TOKEN: ${{ github.token }}
       # The dnsmasq watcher tests run devsite's zsh script, and Ubuntu's runner image has no zsh.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - run: bun test
-      # The published CLI must run under plain Node (engines.node floor), not just under bun — build it and smoke-run the artifact.
+      # The published CLI must run under plain Node 22 (engines.node is >=22), not just under bun — build it and smoke-run the artifact.
       # One node version on purpose: only fs.glob is version-sensitive today. If the CLI grows more node-API surface, promote this to a small matrix (floor + current, e.g. [22, 24]).
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
