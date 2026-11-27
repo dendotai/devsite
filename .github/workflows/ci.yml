@@ -5,13 +5,16 @@ on:
   pull_request:
   push:
     branches: [dev, main]
+  # publish.yml runs this workflow as its gate, so a release runs the same checks as a PR.
+  workflow_call:
 
 permissions:
   contents: read
 
 # A superseded push to the same ref only wastes runner minutes — cancel it.
+# github.workflow is the caller's name in a called run, so the gate inside a publish run never cancels, or is cancelled by, the CI run of the same push.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

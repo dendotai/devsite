@@ -1,7 +1,7 @@
 # Releases @den-ai/devsite from main. semantic-release computes the version from the commits since the last release tag (fix -> patch, feat -> minor, BREAKING CHANGE -> major), pushes the tag, writes GitHub release notes, and publishes to npm — or exits without releasing when nothing releasable landed.
 # package.json stays at 0.0.0 on purpose: the real version lives in git tags and on npm, so no release commits ever land on main.
 # Auth is trusted publishing (OIDC): npmjs.com trusts this exact workflow file in this repo, so no token or secret exists anywhere. Provenance is automatic.
-# The full CI gate runs again here: a push to main may merge commits CI judged separately, so the release must not trust green PRs alone.
+# The publish job waits for ci.yml, run here as the gate: a push to main can carry commits no green PR run judged. One workflow holds the checks, so the gate cannot miss a CI step.
 name: Publish
 
 on:
@@ -19,7 +19,11 @@ permissions:
   pull-requests: write # the retitle step edits the merged PR's title
 
 jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,15 +31,6 @@ jobs:
           fetch-depth: 0 # semantic-release reads the full tag + commit history
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run lint
-      # The reload test adapts devsite's Caddyfile with a real caddy binary: the latest prebuilt release from Caddy's authors.
-      - run: gh release download --repo caddyserver/caddy --pattern 'caddy_*_linux_amd64.tar.gz' --dir "$RUNNER_TEMP" && sudo tar -xzf "$RUNNER_TEMP"/caddy_*_linux_amd64.tar.gz -C /usr/local/bin caddy
-        env:
-          GH_TOKEN: ${{ github.token }}
-      # The dnsmasq watcher tests run devsite's zsh script, and Ubuntu's runner image has no zsh.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
-      - run: bun test
       # npm (not bun) publishes: trusted publishing needs npm >= 11.5.1, which node 24 ships. bun cannot publish via OIDC or emit provenance.
       - uses: actions/setup-node@v4
         with:
