@@ -153,7 +153,7 @@ export async function mockAdmin(
       const op = { method: req.method, path: req.url ?? "", body: JSON.parse(body) };
       adminWrites.push(op);
       try {
-        liveConfig = applyOp(liveConfig, { ...op, shown: "" } as AdminOp);
+        liveConfig = applyOp(liveConfig, { ...op, planLine: "" } as AdminOp);
       } catch (e) {
         res.statusCode = 404;
         json(res, { error: (e as Error).message });

@@ -1,4 +1,4 @@
-// devsite's objects in a Caddy JSON config (#86): which admin API requests init plans for a config, and what they leave. The requests themselves were checked against Caddy 2.11.7's admin API.
+// devsite's objects in a Caddy JSON config (#86): which admin API requests init plans for a config, and what they leave.
 import { expect, test } from "bun:test";
 import {
   type AdminOp,
@@ -84,7 +84,7 @@ test("no server on 443: init adds a server devsite that listens on :443", () => 
       routes: [{ "@id": "devsite.node.devsite", ...objects.route }],
       errors: { routes: [{ "@id": "devsite.errors.devsite", ...objects.errors }] },
     },
-    shown: "adds a server devsite that listens on :443, with devsite's route",
+    planLine: "adds a server devsite that listens on :443, with devsite's route",
   });
 });
 
@@ -146,6 +146,14 @@ test("a route of the user's that looks like devsite's has no tag: it stays, and 
   expect(after.apps.http.servers.mine.routes).toEqual([
     { "@id": "devsite.node.mine", ...objects.route },
     objects.route,
+  ]);
+});
+
+test("a server devsite the user moved off 443 keeps devsite's route; init adds no second server", () => {
+  const config = { apps: { http: { servers: { devsite: { listen: [":8443"] } } } } };
+  expect(requests(planOps(config, objects)).filter((r) => r.includes("/servers/"))).toEqual([
+    "PUT /config/apps/http/servers/devsite/routes",
+    "PUT /config/apps/http/servers/devsite/errors",
   ]);
 });
 

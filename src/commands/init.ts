@@ -472,7 +472,11 @@ function repairsOf(checks: Result[], install: KnownInstall, printsJson: boolean)
 }
 
 // A start reads the files written before it, so a run that starts Caddy needs no load.
-function loadsConfig(userFile: string | null, repairs: Set<Repair>, changes: Change[]): boolean {
+function loadsConfig(
+  userFile: string | null,
+  repairs: Set<Repair>,
+  changes: Change[],
+): userFile is string {
   return userFile !== null && !repairs.has("start") && (changes.length > 0 || repairs.has("load"));
 }
 
@@ -481,7 +485,7 @@ function reloadCommand(install: KnownInstall, userFile: string): string[] {
   return ["caddy", "reload", "--config", userFile, ...adapter];
 }
 
-// The live config, for the admin API requests planned against it; null when the admin API does not answer.
+// The live config, for the admin API requests planned against it: null for a Caddy with no config yet, undefined when the admin API does not answer.
 async function readLiveConfig(): Promise<CaddyConfig | null | undefined> {
   try {
     const res = await caddy("/config/", { signal: AbortSignal.timeout(2000) });
@@ -676,7 +680,7 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
             },
           },
     );
-  } else if (userFile !== null && loadsConfig(userFile, repairs, p.changes)) {
+  } else if (loadsConfig(userFile, repairs, p.changes)) {
     // `caddy reload` adapts a Caddyfile and posts the config to the running Caddy's admin API, whatever service manager runs Caddy.
     const reload = reloadCommand(install, userFile);
     const text = "load the Caddy config through Caddy's admin API";
@@ -701,12 +705,14 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
     }
   }
   if (p.adminOps.length > 0) {
-    const ops = p.adminOps;
     steps.push({
       text: "add devsite's route to Caddy through its admin API",
-      details: [...ops.map((o) => o.shown), ...(p.restartNote === null ? [] : [p.restartNote])],
+      details: [
+        ...p.adminOps.map((o) => o.planLine),
+        ...(p.restartNote === null ? [] : [p.restartNote]),
+      ],
       repair: "load",
-      run: () => sendOps(ops),
+      run: () => sendOps(p.adminOps),
     });
   }
   // A reload makes a new intermediate but keeps serving the certificates Caddy holds in memory, so only a restart serves the imported root.
@@ -1145,8 +1151,10 @@ function defaultBindStop(binds: string[], sites: UnguardedSite[], ctx: CliContex
 }
 
 // devsite's files as Caddy's adapter makes them into JSON: one server for the route and its error route, one TLS policy for its `issuer internal`, and the ask from the global block.
-function adaptDevsite(page: string | null | undefined, ctx: CliContext): unknown {
-  const files = [["{", ...askLines(), "}"].join("\n"), renderGuardFile(), renderNodeRoute(page)];
+// withPage false answers one line of text in place of the "node not running" page.
+function adaptDevsite(withPage: boolean, ctx: CliContext): unknown {
+  const route = withPage ? renderNodeRoute() : renderNodeRoute(null);
+  const files = [["{", ...askLines(), "}"].join("\n"), renderGuardFile(), route];
   const r = exec(
     "caddy",
     ["adapt", "--config", writeTmp(files.join("\n")), "--adapter", "caddyfile"],
@@ -1159,7 +1167,7 @@ function adaptDevsite(page: string | null | undefined, ctx: CliContext): unknown
 
 // For a Caddy init cannot put devsite's objects into, init prints them; the page is one line of text, because the "node not running" page would add several KB to the printout.
 function adaptedJson(ctx: CliContext): string {
-  const config = adaptDevsite(null, ctx) as {
+  const config = adaptDevsite(false, ctx) as {
     apps?: {
       http?: { servers?: unknown };
       tls?: { automation?: { policies?: unknown; on_demand?: unknown } };
@@ -1332,15 +1340,14 @@ export async function init(
   }
 
   // A Caddy with no Caddyfile takes devsite's objects into its JSON file, or through its admin API when it has no file.
-  const printsJson = initPrintsJson(install, settings);
-  const jsonFile =
-    install.configKind === "json" && !printsJson ? readJsonConfig(install.config) : null;
+  const jsonFile = install.configKind === "json" ? readJsonConfig(install.config) : null;
+  const printsJson = initPrintsJson(install, settings, jsonFile);
   const userFile = caddyfilePath ?? (jsonFile === null ? null : install.config);
   let nextJson: unknown = jsonFile?.config ?? null;
   let adminOps: AdminOp[] = [];
   let restartNote: string | null = null;
   if (install.configKind !== "caddyfile" && !printsJson) {
-    const objects = devsiteObjects(adaptDevsite(undefined, ctx));
+    const objects = devsiteObjects(adaptDevsite(true, ctx));
     if (install.configKind === "json" && jsonFile !== null) {
       const ops = planOps(jsonFile.config, objects);
       if (ops.length > 0) {
@@ -1390,13 +1397,12 @@ export async function init(
     (caImport !== null || checks.some((r) => r.state === "red" && r.label === chainLabel));
   const dnsPlan =
     repairs.has("run-dnsmasq") && dns.dnsmasq !== null ? planDnsmasq(dns.dnsmasq) : null;
-  const dropped =
-    userFile !== null && loadsConfig(userFile, repairs, changes)
-      ? await droppedRoutes(
-          caddyfilePath !== null ? { caddyfile: caddyfilePath } : { json: nextJson },
-          ctx,
-        )
-      : [];
+  const dropped = loadsConfig(userFile, repairs, changes)
+    ? await droppedRoutes(
+        caddyfilePath !== null ? { caddyfile: caddyfilePath } : { json: nextJson },
+        ctx,
+      )
+    : [];
   const steps = planSteps(
     {
       changes,

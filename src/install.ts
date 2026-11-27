@@ -51,7 +51,7 @@ function findCaddyProcess(ctx: CliContext): CaddyProcess | null {
     if (!/(?:^|\/)caddy$/.test(binary) || sub !== "run") continue;
     const config = args.match(/\s--config[= ](.+?)(?=\s--|$)/)?.[1]?.trim() ?? null;
     const adapter = args.match(/\s--adapter[= ](\S+)/)?.[1] ?? null;
-    const resume = /\s--resume(?:\s|$)/.test(args);
+    const resume = /\s--resume(?:=true)?(?:\s|$)/.test(args);
     return {
       pid: Number(m[1]),
       ppid: Number(m[2]),
