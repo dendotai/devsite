@@ -1,0 +1,16 @@
+#!/bin/sh
+# A stand-in for the node's sleep listener: it prints each line a test appends to $DEVSITE_FAKE_SLEEP/events, and, as macOS holds a sleep until the listener lets go, waits after "sleep" for the node's line and then writes $DEVSITE_FAKE_SLEEP/released.
+d="$DEVSITE_FAKE_SLEEP"
+n=0
+while kill -0 "$PPID" 2>/dev/null; do
+  if [ -f "$d/events" ]; then
+    total=$(wc -l <"$d/events")
+    while [ "$n" -lt "$total" ]; do
+      n=$((n + 1))
+      event=$(sed -n "${n}p" "$d/events")
+      echo "$event"
+      if [ "$event" = sleep ] && read -r _; then echo released >"$d/released"; fi
+    done
+  fi
+  sleep 0.05
+done

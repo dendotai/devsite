@@ -1,0 +1,19 @@
+#!/bin/sh
+# A stand-in for the tailscale CLI: it prints the answers a test wrote into $DEVSITE_FAKE_TAILSCALE (after the seconds in its file "delay", when there), and fails as a tailnet with no such answer does. Like the CLI inside the Tailscale app run with no terminal, as under launchd, it starts the GUI instead unless TAILSCALE_BE_CLI is 1.
+if [ "$TAILSCALE_BE_CLI" != 1 ]; then
+  echo "The Tailscale GUI failed to start: The operation couldn't be completed. (Tailscale.CLIError error 3.)" >&2
+  exit 1
+fi
+d="$DEVSITE_FAKE_TAILSCALE"
+[ -f "$d/delay" ] && sleep "$(cat "$d/delay")"
+case "$1 $2" in
+"status --json")
+  [ -f "$d/status.json" ] && exec cat "$d/status.json"
+  echo "Tailscale is stopped." >&2
+  ;;
+"whois --json")
+  [ -f "$d/whois-$3.json" ] && exec cat "$d/whois-$3.json"
+  echo "peer not found" >&2
+  ;;
+esac
+exit 1

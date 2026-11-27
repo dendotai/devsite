@@ -1,0 +1,299 @@
+<!doctype html>
+<!--
+  devsite offline page — design source.
+
+  The node (src/node/server.ts) serves this file for a project whose dev
+  server does not answer, and for a name no project has used on this Mac.
+  Before the node has a list of the other machines, it says so for a
+  .internal name.
+  Substitution tokens:
+    __HOST__         the visited host, e.g. myapp.localhost
+    __PROJECT__      the project's package.json name
+    __STATUS_CODE__  503 (a known project) or 404 (an unknown name)
+    __HEADING__      what the page says of the host, the host included
+    __FACTS__        the project's state: where it last ran, whether it is live
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:,">
+<title>__HOST__ · offline</title>
+<style>
+  :root {
+    --bg: #100f1c;
+    --ink: #ece4ee;
+    --dim: #9a90a8;
+    --line: #2b2638;
+    --accent: #ffa070;
+    /* A low sunset band along the bottom edge. The top edge stays --bg alone, because Safari fills the area behind the notch and behind its bottom bar with the page's solid colour. */
+    --horizon:
+      radial-gradient(1400px 170px at 72% 100%, rgba(255, 165, 100, 0.3), rgba(255, 165, 100, 0)),
+      radial-gradient(1600px 240px at 45% 100%, rgba(255, 105, 120, 0.18), rgba(255, 105, 120, 0)),
+      radial-gradient(1800px 300px at 15% 100%, rgba(140, 80, 230, 0.12), rgba(140, 80, 230, 0)),
+      radial-gradient(1200px 320px at 100% 100%, rgba(90, 95, 235, 0.12), rgba(90, 95, 235, 0));
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    /* biome-ignore lint/suspicious/noDuplicateProperties: 100vh is the fallback for browsers without svh units */
+    min-height: 100svh;
+    padding: 2.5rem 1.5rem;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--ink);
+    background: var(--bg);
+    display: grid;
+    place-items: center;
+  }
+
+  /* The band sits on a layer pinned to the visible screen, the box the 503 and the cut line use too: a background measured from 100svh sat higher than the line on an iPhone. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background: var(--horizon), var(--bg);
+  }
+
+  /* Each layer fills the viewport, so a background it paints lines up with the band. */
+  .watermark {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    overflow: hidden;
+    /* Menlo, the font desktop Chrome draws: Chrome has no ui-monospace, so the 503 looked different on an iPhone. */
+    font-family: Menlo, monospace;
+    font-size: 42vmin;
+    font-weight: 700;
+    line-height: 1;
+    color: transparent;
+    -webkit-text-stroke: 2px rgba(255, 190, 150, 0.3);
+    user-select: none;
+    pointer-events: none;
+  }
+
+  .watermark span {
+    margin: 0 -0.05em -0.18em 0;
+  }
+
+  /* Safari strokes each part of a glyph on its own, so the 0's slash drew its outline across the oval. This layer fills the glyphs with the page's own background over the inner half of the 2px stroke, which leaves one clean 1px outline in every browser. */
+  .watermark.fill {
+    -webkit-text-stroke: 0;
+    background: var(--horizon), var(--bg);
+    -webkit-background-clip: text;
+    background-clip: text;
+  }
+
+  main {
+    width: min(60ch, 100%);
+    position: relative;
+  }
+
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 1ch;
+    color: var(--dim);
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 0.9rem;
+    margin-bottom: 2.2rem;
+  }
+
+  .brand b {
+    color: var(--ink);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  h1 {
+    /* Small enough on a phone for a whole host name on one line. */
+    font-size: min(1.5rem, 5.4vw);
+    font-weight: 600;
+    line-height: 1.35;
+    margin: 0 0 1rem;
+    text-wrap: balance;
+  }
+
+  /* A host name is never split, at a hyphen or at a dot. */
+  .host {
+    white-space: nowrap;
+  }
+
+  h1 em {
+    font-style: normal;
+    color: var(--accent);
+  }
+
+  p {
+    margin: 0 0 1rem;
+    color: var(--dim);
+  }
+
+  dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.3rem 2ch;
+    margin: 0;
+  }
+
+  dt {
+    color: var(--dim);
+  }
+
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .status {
+    display: flex;
+    align-items: flex-start;
+    gap: 1ch;
+    margin-top: 2.6rem;
+    color: var(--dim);
+    font-size: 0.85rem;
+  }
+
+  #tries {
+    white-space: nowrap;
+  }
+
+  .dot {
+    flex: none;
+    margin-top: 0.5em;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* The script restarts the ring on each attempt, so the ring and the count change together. */
+  .dot.ping {
+    animation: pulse 1.6s ease-out;
+  }
+
+  .brand, section, .status {
+    opacity: 0;
+    animation: rise 0.5s ease-out forwards;
+  }
+
+  section {
+    animation-delay: 0.1s;
+  }
+
+  .status {
+    animation-delay: 0.2s;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* The ring only grows and fades, then starts again from the dot: a ring that also shrinks back reads as back and forth. */
+  @keyframes pulse {
+    from {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+    to {
+      box-shadow: 0 0 0 8px transparent;
+    }
+  }
+
+  /* On a phone, Safari's bottom bar cuts the 503; a line marks the cut. */
+  @media (max-width: 600px) {
+    :root {
+      --line-cut: #4a2a45;
+      --horizon:
+        radial-gradient(600px 150px at 60% 100%, rgba(255, 165, 100, 0.32), rgba(255, 165, 100, 0)),
+        radial-gradient(700px 210px at 35% 100%, rgba(255, 105, 120, 0.2), rgba(255, 105, 120, 0)),
+        radial-gradient(800px 260px at 0% 100%, rgba(140, 80, 230, 0.12), rgba(140, 80, 230, 0)),
+        radial-gradient(600px 280px at 100% 100%, rgba(90, 95, 235, 0.12), rgba(90, 95, 235, 0));
+    }
+
+    body::after {
+      content: "";
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: var(--line-cut);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .brand, section, .status {
+      animation: none;
+      opacity: 1;
+    }
+    .dot, .dot.ping {
+      animation: none;
+    }
+  }
+</style>
+</head>
+<body data-status="__STATUS_CODE__">
+
+<div class="watermark" aria-hidden="true"><span>__STATUS_CODE__</span></div>
+<div class="watermark fill" aria-hidden="true"><span>__STATUS_CODE__</span></div>
+
+<main>
+  <header class="brand"><b>devsite</b><span>__PROJECT__</span></header>
+
+  <section>
+    <h1>__HEADING__</h1>
+    __FACTS__
+  </section>
+
+  <div class="status">
+    <span class="dot" aria-hidden="true"></span>
+    <span>waiting for the dev server — reloads when it answers<span id="tries"></span></span>
+  </div>
+</main>
+
+<script>
+  (() => {
+    var tries = 0;
+    var label = document.getElementById("tries");
+    var dot = document.querySelector(".dot");
+    function check() {
+      fetch("/", { cache: "no-store" }).then((res) => {
+        if (res.ok) {
+          location.reload();
+          return;
+        }
+        bump();
+      }).catch(bump);
+    }
+    function bump() {
+      tries += 1;
+      label.textContent = ` · attempt ${tries}`;
+      // A reflow between the two class changes restarts the animation.
+      dot.classList.remove("ping");
+      void dot.offsetWidth;
+      dot.classList.add("ping");
+    }
+    setInterval(check, 2000);
+    check();
+  })();
+</script>
+
+</body>
+</html>

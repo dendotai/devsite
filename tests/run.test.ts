@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { init } from "../src/commands/init";
-import { cli, fakeStdin, makeEmptyRepo, makeIo, makeRepo, scratchCaddyfile } from "./helpers";
+import { cli, fakeStdin, makeIo, makeRepo, scratchCaddyfile, scriptedRunner } from "./helpers";
 
 test("--help prints help to stdout and exits 0", async () => {
   const r = await cli(["--help"]);
@@ -81,18 +81,41 @@ test("an extra positional after init exits 1 with usage", async () => {
   expect(r.stderr).toContain("Usage: devsite");
 });
 
-test("init is dispatched: no routes in cwd returns 1 with the discovery error", async () => {
-  const r = await cli(["init"], { cwd: makeEmptyRepo() });
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("No package.json#devSite routes");
-});
-
 test("init --dry-run through the io context: renders the tree diff, returns 0", async () => {
   const { ctx, stdout } = makeIo({ cwd: makeRepo(), caddyfile: scratchCaddyfile() });
   const status = await init({ dryRun: true }, ctx);
   expect(status).toBe(0);
   expect(stdout.text()).toContain("--dry-run: would change");
-  expect(stdout.text()).toContain("web.test.internal {");
+  expect(stdout.text()).toContain("*.internal, *.localhost {");
+});
+
+test("init --dry-run runs only ps and tailscale, for the install seams, and one diff per planned file", async () => {
+  const { runCommand, calls } = scriptedRunner(({ args }) => ({
+    status: 1,
+    stdout: `scripted diff of ${args.at(-3)}\n`,
+  }));
+  const r = await cli(["init", "--dry-run"], { cwd: makeRepo(), runCommand });
+  expect(r.status).toBe(0);
+  // The last argument, the planned content, is a temp file with a per-run name.
+  expect(calls.map((c) => [c.cmd, ...c.args.slice(0, -1), c.capture])).toEqual([
+    ["ps", "-axo", true],
+    ["tailscale", "status", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "Caddyfile", "/dev/null", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/guard.caddy", "/dev/null", true],
+    ["diff", "-u", "-L", "/dev/null", "-L", "devsite.d/node.caddy", "/dev/null", true],
+  ]);
+  expect(r.stdout).toContain("scripted diff of devsite.d/node.caddy");
+});
+
+test("init --dry-run stops when diff cannot start, and writes no diff", async () => {
+  const { runCommand } = scriptedRunner(() => ({
+    status: 1,
+    error: new Error("spawn diff ENOENT"),
+  }));
+  const r = await cli(["init", "--dry-run"], { cwd: makeRepo(), runCommand });
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("could not diff Caddyfile: spawn diff ENOENT");
+  expect(r.stdout).not.toContain("--dry-run: would change");
 });
 
 test("--dry-run without a command is not an init: usage, exit 1", async () => {
@@ -116,6 +139,21 @@ test("a non-TTY run with a pending diff refuses and writes nothing", async () =>
   expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });
 
+test("one key answers the prompt, with no Enter: the terminal is in raw mode while it waits", async () => {
+  const caddyfile = scratchCaddyfile();
+  const raw: boolean[] = [];
+  const stdin = Object.assign(fakeStdin("n", true), {
+    setRawMode(on: boolean) {
+      raw.push(on);
+    },
+  });
+  const r = await cli(["init"], { cwd: makeRepo(), caddyfile, stdin });
+  expect(r.status).toBe(1);
+  expect(raw).toEqual([true, false]);
+  expect(r.stderr).toContain("Stopped — nothing changed");
+  expect(existsSync(caddyfile)).toBe(false);
+});
+
 test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () => {
   const caddyfile = scratchCaddyfile();
   const r = await cli(["init"], {
@@ -124,8 +162,8 @@ test('a declined confirm ("n") aborts with exit 1 and writes nothing', async () 
     stdin: fakeStdin("n\n", true),
   });
   expect(r.status).toBe(1);
-  expect(r.stdout).toContain("Apply this change?");
-  expect(r.stderr).toContain("Aborted — nothing written");
+  expect(r.stdout).toContain("Apply these changes? [Y/n]");
+  expect(r.stderr).toContain("Stopped — nothing changed");
   expect(existsSync(caddyfile)).toBe(false);
   expect(existsSync(join(dirname(caddyfile), "devsite.d"))).toBe(false);
 });
