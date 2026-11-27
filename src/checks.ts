@@ -278,12 +278,12 @@ function installCheck(install: KnownInstall): Result {
   };
 }
 
-// cert: the name the certificate checks open, or why they are skipped. jsonFix: the fix of a check a load would fix, for a Caddy config init cannot load.
+// cert: the name the certificate checks open, or why they are skipped. jsonFix: the fix of a check a load would fix, for a Caddy that init prints devsite's JSON for in place of a load.
 export async function caddyChecks(
   install: KnownInstall,
   storage: Storage,
   ctx: CliContext,
-  { cert, jsonFix = JSON_FIX }: { cert: CertTarget; jsonFix?: string },
+  { cert, jsonFix }: { cert: CertTarget; jsonFix?: string },
 ): Promise<Result[]> {
   const results: Result[] = [installCheck(install)];
   const admin = await readServers();
@@ -295,14 +295,13 @@ export async function caddyChecks(
     results.push({ state: "skipped", label: "devsite's route", detail: "it needs the admin API" });
   }
   results.push(...(await certChecks(cert, storage, ctx)));
-  // init loads only a Caddyfile: for any other config it prints the JSON to add, so a rerun alone fixes nothing.
-  if (install.configKind === "caddyfile") return results;
+  if (jsonFix === undefined) return results;
   return results.map((r) =>
     r.state === "red" && r.repair === "load" ? { ...r, fix: jsonFix } : r,
   );
 }
 
-const JSON_FIX = `${INIT}, then add the JSON it prints to your Caddy config`;
+export const JSON_FIX = `${INIT}, then add the JSON it prints to your Caddy config`;
 // init prints that JSON below its checks.
 export const JSON_FIX_IN_INIT =
   "add the JSON below to your Caddy config, then run `bunx devsite doctor`";

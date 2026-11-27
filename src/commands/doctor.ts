@@ -2,9 +2,11 @@
  * devsite doctor — checks the node first, prints how this Mac is set up, then checks the outcomes devsite needs, whoever set them up. It writes nothing and runs no sudo, so it is safe to run any time; it exits 1 on any red check, so a script can use it as a gate.
  */
 import { sep } from "node:path";
+import { initPrintsJson } from "../caddy-json";
 import {
   caddyChecks,
   certTarget,
+  JSON_FIX,
   nodeChecks,
   peerChecks,
   portOf,
@@ -61,7 +63,7 @@ function printSetup(
       ? `Caddy config: none (${install.configSource})`
       : `Caddy config: ${install.config} (${install.configSource})`,
   );
-  line(`devsite's Caddy config: ${install.devsiteDir}`);
+  if (install.configKind === "caddyfile") line(`devsite's Caddy config: ${install.devsiteDir}`);
   line(`Caddy log: ${install.log ?? "unknown"}`);
   line(
     `Service manager: ${install.manager ?? (install.installed ? "none, Caddy does not run" : "none, Caddy is not installed")}`,
@@ -135,6 +137,7 @@ export async function doctor(ctx: CliContext = processContext()): Promise<number
         ]
       : await caddyChecks(install, storage ?? (await findStorage(install, ctx)), ctx, {
           cert: certTarget(node),
+          jsonFix: initPrintsJson(install, read.settings) ? JSON_FIX : undefined,
         });
   printSection("Caddy", caddyResults, paint, ctx);
   results.push(...caddyResults);

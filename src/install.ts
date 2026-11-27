@@ -12,9 +12,11 @@ export type CaddyProcess = {
   binary: string;
   config: string | null;
   adapter: string | null;
+  // `caddy run --resume` loads the config Caddy saved last (autosave.json) in place of --config.
+  resume: boolean;
 };
 
-// "json": a config file of another format, which Caddy loads as JSON; "api": no config file, the config came through the admin API. init can load neither, because a reload of a Caddyfile would replace that config.
+// "json": a config file of another format, which Caddy loads as JSON; "api": no config file, the config came through the admin API. init never loads a Caddyfile into either, because a reload of one would replace that config; it adds devsite's objects to the JSON file, or through the admin API (src/caddy-json.ts).
 type ConfigFile =
   | { configKind: "caddyfile" | "json"; config: string }
   | { configKind: "api"; config: null };
@@ -49,7 +51,16 @@ function findCaddyProcess(ctx: CliContext): CaddyProcess | null {
     if (!/(?:^|\/)caddy$/.test(binary) || sub !== "run") continue;
     const config = args.match(/\s--config[= ](.+?)(?=\s--|$)/)?.[1]?.trim() ?? null;
     const adapter = args.match(/\s--adapter[= ](\S+)/)?.[1] ?? null;
-    return { pid: Number(m[1]), ppid: Number(m[2]), user: m[3] as string, binary, config, adapter };
+    const resume = /\s--resume(?:\s|$)/.test(args);
+    return {
+      pid: Number(m[1]),
+      ppid: Number(m[2]),
+      user: m[3] as string,
+      binary,
+      config,
+      adapter,
+      resume,
+    };
   }
   return null;
 }

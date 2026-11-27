@@ -130,7 +130,8 @@ On a set-up Mac `init` prints the checks, then `Nothing to do: init changed noth
 - A Caddy that runs as root stays root: `init` writes its files and reloads it with `sudo`, tagged `[sudo]` in the plan.
 - Your own `storage` line stays, and devsite uses that storage, so your CA stays the one your devices trust.
 - Your own site blocks keep their `default_bind`: `init` stops and names the ways past (`import devsite-guard` in each site, or the `caddy.user` setting).
-- A Caddy with no Caddyfile (JSON config or admin API only): `init` writes `devsite.d/`, prints the adapted JSON with where it goes in your config, and stops.
+- A Caddy with a JSON config: `init` adds devsite's route to the file, shown in the plan's diff, and reloads it. devsite's route goes first in each server that listens on 443, or into a new server `devsite` on `:443` when none does. Each object devsite adds carries an `@id` tag that starts with `devsite.`, and a rerun replaces only tagged objects.
+- A Caddy run with no `--config`: `init` adds the same objects through the admin API. Only `caddy run --resume` loads them again after a restart; with no `--resume`, run `init` after each restart. With `caddy.reload` set to `"manual"`, `init` prints the JSON instead.
 
 A message that stops `init` names the setting that gets you past it.
 
@@ -174,7 +175,7 @@ Each red check names its fix: `bunx devsite init`, a setting, or a manual step.
   "caddy": {
     "config": "/etc/caddy/Caddyfile",           // the main Caddy config, for a Caddy not installed with Homebrew that runs with no --config
     "user": "root",                             // "user" or "root": the user Caddy runs as, over what devsite found
-    "reload": "manual"                          // init writes devsite's files; you reload Caddy
+    "reload": "manual"                          // init writes devsite's files; you reload Caddy (a Caddy with no config file: init prints the JSON)
   },
   "dnsmasq": {
     "run": "manual" // init runs no dnsmasq; you make a DNS server answer .internal on the Tailscale IP
@@ -217,7 +218,7 @@ devsite modifies machine-global state. This section lists every change and how t
 What `devsite init` changes (each changed file shows its diff first, except the files devsite writes whole, which show as one line, and every service and `sudo` command is printed as it runs):
 
 - `/opt/homebrew/etc/Caddyfile` — set up once: one `import devsite.d/*.caddy # devsite` line, the `on_demand_tls` ask that lets Caddy sign a certificate only for a name the node knows, and a `storage` pin only when the file has no `storage` line. Before any Caddyfile write, the previous file is copied to `Caddyfile.bak`; the very first write also saves `Caddyfile.pre-devsite`, which no later run touches. A `default_bind` line is deleted only when the file has no site blocks of your own.
-- `/opt/homebrew/etc/devsite.d/` — devsite's own directory: `node.caddy` (the one route to the node, with the "node not running" page) and `guard.caddy` (the LAN guard snippet).
+- `/opt/homebrew/etc/devsite.d/` — devsite's own directory, for a Caddy with a Caddyfile: `node.caddy` (the one route to the node, with the "node not running" page) and `guard.caddy` (the LAN guard snippet).
 - `~/Library/Application Support/devsite/` — the node's program (`node/cli.js`), its state (`state.json`: each project's port, folder, last-used date, and whether it is live), and the settings (`config.json`).
 - `~/Library/LaunchAgents/ai.den.devsite.node.plist` — starts the node as you; its log is `~/Library/Logs/devsite/node.log`. The node runs one `osascript` process, which tells it when this Mac goes to sleep.
 - The Caddy service — installed and started with Homebrew only when Caddy is missing or stopped.

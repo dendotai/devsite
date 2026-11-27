@@ -23,6 +23,16 @@ import nodeDownPage from "../../assets/node-down.html" with { type: "text" };
 import { type CaRoot, currentRootCert, describeRoot, importCaRoot, parseCaRoot } from "../ca";
 import { adminBase, caddy } from "../caddy-admin";
 import {
+  type AdminOp,
+  applyOp,
+  type CaddyConfig,
+  devsiteObjects,
+  formatLike,
+  initPrintsJson,
+  planOps,
+  readJsonConfig,
+} from "../caddy-json";
+import {
   type CaddyRoute,
   caddyChecks,
   certTarget,
@@ -279,10 +289,10 @@ export function renderNodeRoute(page: string | null = nodeDownPage as unknown as
 // generated: what a file devsite writes whole is; init names such a file in one line, and --dry-run prints its diff.
 type Change = { rel: string; abs: string; next: string | null; generated?: string };
 
-function dirsToMake(changes: Change[], caddyfilePath: string | null): string[] {
+function dirsToMake(changes: Change[], userFile: string | null): string[] {
   return [
     ...new Set(
-      changes.filter((c) => c.next !== null && c.abs !== caddyfilePath).map((c) => dirname(c.abs)),
+      changes.filter((c) => c.next !== null && c.abs !== userFile).map((c) => dirname(c.abs)),
     ),
   ].sort();
 }
@@ -401,6 +411,12 @@ type CaImport = { root: CaRoot; storageRoot: string; replaces: string | null };
 
 type StepPlan = {
   changes: Change[];
+  // The config file of the user's that init edits and reloads: a Caddyfile, or a JSON file; null for a Caddy with no file.
+  userFile: string | null;
+  // The admin API requests that put devsite's objects into a Caddy with no config file.
+  adminOps: AdminOp[];
+  // Why a restart of that Caddy drops what the requests add; null when it keeps it.
+  restartNote: string | null;
   caImport: CaImport | null;
   // `init --ca -` restarts a running Caddy after an import, and again on a rerun while Caddy still serves another root.
   restartCaddy: boolean;
@@ -418,19 +434,15 @@ type StepPlan = {
 };
 
 // Under a root Caddy its files are root-owned: each file is staged in the temp dir and copied into place with sudo.
-function rootWriteCommands(changes: Change[], caddyfilePath: string | null) {
+function rootWriteCommands(changes: Change[], userFile: string | null) {
   const commands: string[][] = [];
-  if (
-    caddyfilePath !== null &&
-    changes.some((c) => c.abs === caddyfilePath) &&
-    existsSync(caddyfilePath)
-  ) {
-    if (!existsSync(`${caddyfilePath}.pre-devsite`)) {
-      commands.push(["cp", caddyfilePath, `${caddyfilePath}.pre-devsite`]);
+  if (userFile !== null && changes.some((c) => c.abs === userFile) && existsSync(userFile)) {
+    if (!existsSync(`${userFile}.pre-devsite`)) {
+      commands.push(["cp", userFile, `${userFile}.pre-devsite`]);
     }
-    commands.push(["cp", caddyfilePath, `${caddyfilePath}.bak`]);
+    commands.push(["cp", userFile, `${userFile}.bak`]);
   }
-  for (const dir of dirsToMake(changes, caddyfilePath)) commands.push(["mkdir", "-p", dir]);
+  for (const dir of dirsToMake(changes, userFile)) commands.push(["mkdir", "-p", dir]);
   for (const c of changes) {
     commands.push(c.next === null ? ["rm", "-f", c.abs] : ["cp", writeTmp(c.next), c.abs]);
   }
@@ -450,29 +462,61 @@ function waitForAdminCommand(): RootCommand {
   );
 }
 
-function repairsOf(checks: Result[], install: KnownInstall): Set<Repair> {
-  // A start would run Homebrew's Caddyfile and a reload would replace the config, so a Caddy with no Caddyfile gets neither: init prints the JSON for it instead.
-  const loadable = install.configKind === "caddyfile";
+// A start would run Homebrew's Caddyfile, so a Caddy with no Caddyfile gets none; one init prints the JSON for gets no load either.
+function repairsOf(checks: Result[], install: KnownInstall, printsJson: boolean): Set<Repair> {
+  const skip = (r: Repair) =>
+    (r === "start" && install.configKind !== "caddyfile") || (r === "load" && printsJson);
   return new Set(
-    checks.flatMap((r) =>
-      r.state !== "green" && r.repair && (loadable || (r.repair !== "start" && r.repair !== "load"))
-        ? [r.repair]
-        : [],
-    ),
+    checks.flatMap((r) => (r.state !== "green" && r.repair && !skip(r.repair) ? [r.repair] : [])),
   );
 }
 
 // A start reads the files written before it, so a run that starts Caddy needs no load.
-function loadsConfig(
-  install: KnownInstall,
-  repairs: Set<Repair>,
-  changes: Change[],
-): install is KnownInstall & { configKind: "caddyfile"; config: string } {
-  return (
-    install.configKind === "caddyfile" &&
-    !repairs.has("start") &&
-    (changes.length > 0 || repairs.has("load"))
-  );
+function loadsConfig(userFile: string | null, repairs: Set<Repair>, changes: Change[]): boolean {
+  return userFile !== null && !repairs.has("start") && (changes.length > 0 || repairs.has("load"));
+}
+
+function reloadCommand(install: KnownInstall, userFile: string): string[] {
+  const adapter = install.configKind === "caddyfile" ? ["--adapter", "caddyfile"] : [];
+  return ["caddy", "reload", "--config", userFile, ...adapter];
+}
+
+// The live config, for the admin API requests planned against it; null when the admin API does not answer.
+async function readLiveConfig(): Promise<CaddyConfig | null | undefined> {
+  try {
+    const res = await caddy("/config/", { signal: AbortSignal.timeout(2000) });
+    return res.ok ? ((await res.json()) as CaddyConfig | null) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function sendOps(ops: AdminOp[]) {
+  for (const op of ops) {
+    const res = await caddy(op.path, {
+      method: op.method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(op.body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `Caddy's admin API refused ${op.method} ${op.path} (HTTP ${res.status}): ${(await res.text()).trim()}`,
+      );
+    }
+  }
+}
+
+// Caddy saves each config pushed to its admin API to autosave.json, and only `caddy run --resume` loads that file at start.
+function restartNoteOf(install: KnownInstall, live: CaddyConfig | null): string | null {
+  const admin = live?.admin as { config?: { persist?: boolean } } | undefined;
+  if (admin?.config?.persist === false) {
+    return "Caddy's config turns admin.config.persist off: a restart drops devsite's route; run bunx devsite init after each restart.";
+  }
+  if (install.running?.resume !== true) {
+    return "Caddy runs with no --config and no --resume: a restart drops devsite's route; start Caddy with --resume, or run bunx devsite init after each restart.";
+  }
+  return null;
 }
 
 // Empty for a route that matches every host: one with no match set, or with a match set that has no host matcher.
@@ -486,12 +530,19 @@ function allRoutes(servers: Servers): CaddyRoute[] {
   return Object.values(servers).flatMap((s) => s.routes ?? []);
 }
 
-// A load replaces the live config with the adapted Caddyfile, so it drops each route another tool added through the admin API at runtime.
-async function droppedRoutes(config: string, ctx: CliContext): Promise<string[]> {
+// A load replaces the live config with the adapted Caddyfile, or with the JSON file, so it drops each route another tool added through the admin API at runtime.
+async function droppedRoutes(
+  from: { caddyfile: string } | { json: unknown },
+  ctx: CliContext,
+): Promise<string[]> {
   const live = await readServers();
   if (!live.ok) return [];
   let adapted: CaddyRoute[] = [];
-  if (existsSync(config)) {
+  if ("json" in from) {
+    const json = from.json as { apps?: { http?: { servers?: Servers } } };
+    adapted = allRoutes(json.apps?.http?.servers ?? {});
+  } else if (existsSync(from.caddyfile)) {
+    const config = from.caddyfile;
     const adapt = ["adapt", "--config", config, "--adapter", "caddyfile"];
     const r = exec("caddy", adapt, ctx, true);
     let parsed: { apps?: { http?: { servers?: Servers } } } | null = null;
@@ -526,8 +577,7 @@ async function droppedRoutes(config: string, ctx: CliContext): Promise<string[]>
 
 // The steps in the order they run: the user's steps, then the root steps (one sudo call, so it runs back to back after the plan's y), then the steps a setting hands to the user.
 function planSteps(p: StepPlan, ctx: CliContext): Step[] {
-  const { install } = p;
-  const caddyfilePath = install.config;
+  const { install, userFile } = p;
   const asRoot = install.user === "root";
   const { repairs } = p;
   const steps: Step[] = [];
@@ -569,14 +619,14 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
             planNote,
             details,
             repair: "write",
-            root: rootWriteCommands(p.changes, caddyfilePath),
+            root: rootWriteCommands(p.changes, userFile),
           }
         : {
             text,
             planNote,
             repair: "write",
             details,
-            run: async () => applyChanges(p.changes, caddyfilePath),
+            run: async () => applyChanges(p.changes, userFile),
           },
     );
   }
@@ -626,9 +676,9 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
             },
           },
     );
-  } else if (loadsConfig(install, repairs, p.changes)) {
-    // `caddy reload` adapts the Caddyfile and posts it to the running Caddy's admin API, whatever service manager runs Caddy.
-    const reload = ["caddy", "reload", "--config", install.config, "--adapter", "caddyfile"];
+  } else if (userFile !== null && loadsConfig(userFile, repairs, p.changes)) {
+    // `caddy reload` adapts a Caddyfile and posts the config to the running Caddy's admin API, whatever service manager runs Caddy.
+    const reload = reloadCommand(install, userFile);
     const text = "load the Caddy config through Caddy's admin API";
     if (p.settings.caddy.reload === "manual") {
       steps.push({
@@ -649,6 +699,15 @@ function planSteps(p: StepPlan, ctx: CliContext): Step[] {
         run: async () => runInTerminal("caddy", reload.slice(1), ctx),
       });
     }
+  }
+  if (p.adminOps.length > 0) {
+    const ops = p.adminOps;
+    steps.push({
+      text: "add devsite's route to Caddy through its admin API",
+      details: [...ops.map((o) => o.shown), ...(p.restartNote === null ? [] : [p.restartNote])],
+      repair: "load",
+      run: () => sendOps(ops),
+    });
   }
   // A reload makes a new intermediate but keeps serving the certificates Caddy holds in memory, so only a restart serves the imported root.
   if (p.restartCaddy && install.running !== null && !repairs.has("start")) {
@@ -871,19 +930,15 @@ async function runSteps(
   }
 }
 
-function applyChanges(changes: Change[], caddyfilePath: string | null) {
-  if (
-    caddyfilePath !== null &&
-    changes.some((c) => c.abs === caddyfilePath) &&
-    existsSync(caddyfilePath)
-  ) {
+function applyChanges(changes: Change[], userFile: string | null) {
+  if (userFile !== null && changes.some((c) => c.abs === userFile) && existsSync(userFile)) {
     // The world before devsite ever touched it — created once, never written again.
-    if (!existsSync(`${caddyfilePath}.pre-devsite`)) {
-      copyFileSync(caddyfilePath, `${caddyfilePath}.pre-devsite`);
+    if (!existsSync(`${userFile}.pre-devsite`)) {
+      copyFileSync(userFile, `${userFile}.pre-devsite`);
     }
-    copyFileSync(caddyfilePath, `${caddyfilePath}.bak`);
+    copyFileSync(userFile, `${userFile}.bak`);
   }
-  for (const dir of dirsToMake(changes, caddyfilePath)) mkdirSync(dir, { recursive: true });
+  for (const dir of dirsToMake(changes, userFile)) mkdirSync(dir, { recursive: true });
   for (const c of changes) {
     if (c.next === null) rmSync(c.abs);
     else writeFileSync(c.abs, c.next);
@@ -1089,9 +1144,9 @@ function defaultBindStop(binds: string[], sites: UnguardedSite[], ctx: CliContex
   ].join("\n");
 }
 
-// A Caddy with no Caddyfile cannot load devsite's files, so init prints them adapted to JSON. Caddy's adapter makes one server for the route, one TLS policy for its `issuer internal`, and the ask from the global block.
-function adaptedJson(ctx: CliContext): string {
-  const files = [["{", ...askLines(), "}"].join("\n"), renderGuardFile(), renderNodeRoute(null)];
+// devsite's files as Caddy's adapter makes them into JSON: one server for the route and its error route, one TLS policy for its `issuer internal`, and the ask from the global block.
+function adaptDevsite(page: string | null | undefined, ctx: CliContext): unknown {
+  const files = [["{", ...askLines(), "}"].join("\n"), renderGuardFile(), renderNodeRoute(page)];
   const r = exec(
     "caddy",
     ["adapt", "--config", writeTmp(files.join("\n")), "--adapter", "caddyfile"],
@@ -1099,7 +1154,12 @@ function adaptedJson(ctx: CliContext): string {
     true,
   );
   if (r.status !== 0) throw new Error("`caddy adapt` could not adapt devsite's route");
-  const config = JSON.parse(r.out) as {
+  return JSON.parse(r.out);
+}
+
+// For a Caddy init cannot put devsite's objects into, init prints them; the page is one line of text, because the "node not running" page would add several KB to the printout.
+function adaptedJson(ctx: CliContext): string {
+  const config = adaptDevsite(null, ctx) as {
     apps?: {
       http?: { servers?: unknown };
       tls?: { automation?: { policies?: unknown; on_demand?: unknown } };
@@ -1254,15 +1314,46 @@ export async function init(
     }
   }
 
-  const desired = new Map<string, string>([
-    [GUARD_FILE, renderGuardFile()],
-    [NODE_ROUTE_FILE, renderNodeRoute()],
-  ]);
+  // Only a Caddyfile imports devsite.d.
+  const desired = new Map<string, string>(
+    caddyfilePath === null
+      ? []
+      : [
+          [GUARD_FILE, renderGuardFile()],
+          [NODE_ROUTE_FILE, renderNodeRoute()],
+        ],
+  );
   for (const [name, content] of desired) {
     const abs = join(devsiteDir, name);
     if (!existsSync(abs) || readFileSync(abs, "utf8") !== content) {
       const generated = name === NODE_ROUTE_FILE ? "devsite's route to the node" : undefined;
       changes.push({ rel: `devsite.d/${name}`, abs, next: content, generated });
+    }
+  }
+
+  // A Caddy with no Caddyfile takes devsite's objects into its JSON file, or through its admin API when it has no file.
+  const printsJson = initPrintsJson(install, settings);
+  const jsonFile =
+    install.configKind === "json" && !printsJson ? readJsonConfig(install.config) : null;
+  const userFile = caddyfilePath ?? (jsonFile === null ? null : install.config);
+  let nextJson: unknown = jsonFile?.config ?? null;
+  let adminOps: AdminOp[] = [];
+  let restartNote: string | null = null;
+  if (install.configKind !== "caddyfile" && !printsJson) {
+    const objects = devsiteObjects(adaptDevsite(undefined, ctx));
+    if (install.configKind === "json" && jsonFile !== null) {
+      const ops = planOps(jsonFile.config, objects);
+      if (ops.length > 0) {
+        nextJson = ops.reduce<unknown>(applyOp, jsonFile.config);
+        const next = formatLike(jsonFile.text, nextJson);
+        changes.push({ rel: basename(install.config), abs: install.config, next });
+      }
+    } else {
+      const live = await readLiveConfig();
+      if (live !== undefined) {
+        adminOps = planOps(live, objects);
+        restartNote = adminOps.length > 0 ? restartNoteOf(install, live) : null;
+      }
     }
   }
   changes.sort((a, b) => a.rel.localeCompare(b.rel));
@@ -1277,13 +1368,13 @@ export async function init(
     ...nodeChecks(node, ctx),
     ...(await caddyChecks(install, storage, ctx, {
       cert: certTarget(node),
-      jsonFix: JSON_FIX_IN_INIT,
+      jsonFix: printsJson ? JSON_FIX_IN_INIT : undefined,
     })),
     ...tailscale,
     ...dns.checks,
   ];
   printSection("Checks", checks, paint, ctx);
-  const repairs = repairsOf(checks, install);
+  const repairs = repairsOf(checks, install, printsJson);
   // A piped secret replaces the one in the Keychain, as for a secret made anew.
   if (pipedSecret !== null) repairs.add("tailscale-secret");
   // The trust check above read the old root; the imported root decides the trust step.
@@ -1299,12 +1390,19 @@ export async function init(
     (caImport !== null || checks.some((r) => r.state === "red" && r.label === chainLabel));
   const dnsPlan =
     repairs.has("run-dnsmasq") && dns.dnsmasq !== null ? planDnsmasq(dns.dnsmasq) : null;
-  const dropped = loadsConfig(install, repairs, changes)
-    ? await droppedRoutes(install.config, ctx)
-    : [];
+  const dropped =
+    userFile !== null && loadsConfig(userFile, repairs, changes)
+      ? await droppedRoutes(
+          caddyfilePath !== null ? { caddyfile: caddyfilePath } : { json: nextJson },
+          ctx,
+        )
+      : [];
   const steps = planSteps(
     {
       changes,
+      userFile,
+      adminOps,
+      restartNote,
       caImport,
       restartCaddy,
       install,
@@ -1320,8 +1418,7 @@ export async function init(
   );
   // Printed until Caddy has the route, so a set-up Mac prints nothing.
   const routeMissing = checks.some((r) => r.state === "red" && r.repair === "load");
-  const jsonHelp =
-    caddyfilePath === null && (changes.length > 0 || routeMissing) ? adaptedJson(ctx) : "";
+  const jsonHelp = printsJson && (changes.length > 0 || routeMissing) ? adaptedJson(ctx) : "";
 
   // devsite's dnsmasq files sit outside the Caddy dir, so their diff labels are absolute paths.
   const dnsChanges: Change[] = (dnsPlan?.files ?? []).map((f) => ({
@@ -1342,7 +1439,9 @@ export async function init(
     else printSteps("Plan", steps, paint, ctx);
     if (fileCount === 0) {
       ctx.stdout.write(
-        `\n--dry-run: ${caddyfilePath ?? devsiteDir} and devsite.d are already up to date; nothing to write.\n`,
+        caddyfilePath !== null
+          ? `\n--dry-run: ${caddyfilePath} and devsite.d are already up to date; nothing to write.\n`
+          : `\n--dry-run: ${userFile === null ? "no file" : `${userFile} is already up to date`}; nothing to write.\n`,
       );
     } else {
       ctx.stdout.write(`\n--dry-run: would change ${plural(fileCount, "file", "files")}.\n`);
@@ -1406,7 +1505,7 @@ export async function init(
     ...nodeChecks(nodeAfter, ctx),
     ...(await caddyChecks(after, storageAfter, ctx, {
       cert: certTarget(nodeAfter),
-      jsonFix: JSON_FIX_IN_INIT,
+      jsonFix: printsJson ? JSON_FIX_IN_INIT : undefined,
     })),
     ...tailscaleChecks(dnsAfter.tailscale, nodeAfter.ok ? await readPeers() : [], ctx),
     ...dnsAfter.checks,

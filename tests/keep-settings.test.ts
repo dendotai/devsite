@@ -13,6 +13,8 @@ import {
   writeSettings,
 } from "./helpers";
 import {
+  adminWrites,
+  loadAdminConfig,
   mockAdmin,
   nodeRoute,
   pki,
@@ -24,21 +26,6 @@ import {
 } from "./machine";
 
 useMachine();
-
-// What `caddy adapt` makes of devsite's route and the ask: one server, one TLS policy, the permission.
-const ADAPTED = {
-  apps: {
-    http: { servers: { srv0: { listen: [":443"], routes: [nodeRoute()] } } },
-    tls: {
-      automation: {
-        policies: [{ subjects: ["*.internal", "*.localhost"], issuers: [{ module: "internal" }] }],
-        on_demand: {
-          permission: { endpoint: "http://127.0.0.1:47380/tls-allowed", module: "http" },
-        },
-      },
-    },
-  },
-};
 
 type Answers = {
   // The `caddy run` line ps prints.
@@ -61,7 +48,13 @@ function runner(a: Answers) {
     if (c.cmd === "brew" && c.args[1] === "info") {
       return { stdout: JSON.stringify([{ name: "caddy", pid: a.caddy?.pid ?? 774 }]) };
     }
-    if (c.cmd === "caddy" && c.args[0] === "adapt") return { stdout: JSON.stringify(ADAPTED) };
+    if (c.cmd === "caddy" && c.args[0] === "adapt") {
+      return processRunner(c.cmd, c.args, { capture: c.capture });
+    }
+    // A reload of a JSON file loads it as Caddy's live config.
+    if (c.cmd === "caddy" && c.args[0] === "reload" && !c.args.includes("--adapter")) {
+      loadAdminConfig(JSON.parse(readFileSync(c.args[2] as string, "utf8")));
+    }
     if (c.cmd === "openssl") return { stdout: pki.served };
     if (c.cmd === "security") return { status: a.trusted === false ? 1 : 0 };
     return {};
@@ -230,74 +223,165 @@ test("a root Caddy: default_bind stays and init goes on", async () => {
   expect(r.status).toBe(0);
 });
 
-// --- a Caddy with no Caddyfile ---
+// --- a Caddy with no Caddyfile (#86) ---
 
-test("a JSON config: init writes devsite.d, prints the adapted JSON with where it goes, and never loads or starts Caddy", async () => {
-  await mockAdmin([]);
-  const m = setUpMachine({ caddyfile: "", devsiteFiles: false });
+const RESTART_NOTE =
+  "Caddy runs with no --config and no --resume: a restart drops devsite's route; start Caddy with --resume, or run bunx devsite init after each restart.";
+const PAGE = "the devsite node is not running";
+
+// A JSON config of the user's with a server on :443, as Caddy loaded it.
+function jsonMachine() {
+  const m = setUpMachine({ caddyfile: "" });
   const json = join(m.dir, "caddy.json");
-  writeFileSync(json, '{"apps":{}}\n');
+  const user = {
+    apps: {
+      http: {
+        servers: {
+          mine: { listen: [":443"], routes: [{ match: [{ host: ["a.example"] }], handle: [] }] },
+        },
+      },
+    },
+  };
+  writeFileSync(json, `${JSON.stringify(user, null, 2)}\n`);
   const caddy = { user: "den", args: `${m.prefix}/opt/caddy/bin/caddy run --config ${json}` };
-  // No project has run yet, so Caddy has no CA to give and init still trusts the CA it makes.
+  return { m, json, user, caddy };
+}
+
+test("a JSON config: init adds devsite's objects to the file, shows its diff, keeps copies, and reloads it", async () => {
+  const { m, json, user, caddy } = jsonMachine();
+  await mockAdmin([], { config: user });
+  const r = await devsite(["init"], m.caddyfile, { caddy });
+  expect(r.stdout).toContain("+++ caddy.json");
+  expect(r.stdout).toMatch(/^\+ +"@id": "devsite.node.mine",$/m);
+  expect(r.stdout).toContain("load the Caddy config through Caddy's admin API");
+  expect(r.ran).toContain(`caddy reload --config ${json}`);
+  expect(readFileSync(`${json}.pre-devsite`, "utf8")).toBe(`${JSON.stringify(user, null, 2)}\n`);
+  expect(existsSync(`${json}.bak`)).toBe(true);
+  const file = JSON.parse(readFileSync(json, "utf8"));
+  expect(file.apps.http.servers.mine.routes[0]["@id"]).toBe("devsite.node.mine");
+  expect(file.apps.http.servers.mine.routes[1]).toEqual(user.apps.http.servers.mine.routes[0]);
+  // The file's route carries the same "node not running" page as the Caddyfile route.
+  expect(JSON.stringify(file.apps.http.servers.mine.errors)).toContain(PAGE);
+  expect(file.apps.tls.automation.on_demand["@id"]).toBe("devsite.ask");
+  expect(r.stdout).not.toContain("as JSON");
+  expect(r.status).toBe(0);
+
+  const again = await devsite(["init"], m.caddyfile, { caddy });
+  expect(again.stdout).toContain("Nothing to do: init changed nothing.");
+});
+
+test("a JSON config and caddy.reload manual: init edits the file and hands the reload to you", async () => {
+  const { m, json, user, caddy } = jsonMachine();
+  await mockAdmin([], { config: user });
+  const r = await devsite(
+    ["init"],
+    m.caddyfile,
+    { caddy },
+    { settings: { caddy: { reload: "manual" } } },
+  );
+  expect(r.stdout).toContain("+++ caddy.json");
+  expect(r.ran.filter((c) => c.startsWith("caddy reload"))).toEqual([]);
+  expect(r.stdout).toContain(
+    `reload Caddy yourself, so it reads the files written above\n  caddy reload --config ${json}\n`,
+  );
+  expect(r.stdout).not.toContain("as JSON");
+  expect(r.status).toBe(0);
+});
+
+test("a config file that is not JSON: init prints the JSON, with the one-line answer, and leaves the file", async () => {
+  const m = setUpMachine({ caddyfile: "", devsiteFiles: false });
+  const yaml = join(m.dir, "caddy.yaml");
+  writeFileSync(yaml, "apps: {}\n");
+  const caddy = {
+    user: "den",
+    args: `${m.prefix}/opt/caddy/bin/caddy run --config ${yaml} --adapter yaml`,
+  };
+  await mockAdmin([]);
   const r = await devsite(["init"], m.caddyfile, { caddy }, { node: {} });
-  expect(existsSync(join(m.dir, "devsite.d", "node.caddy"))).toBe(true);
-  expect(readFileSync(json, "utf8")).toBe('{"apps":{}}\n');
-  expect(readFileSync(m.caddyfile, "utf8")).toBe("");
-  expect(r.ran.filter((c) => /^(caddy reload|brew services start)/.test(c))).toEqual([]);
-  expect(r.ran.some((c) => c.startsWith("caddy adapt --config "))).toBe(true);
+  expect(readFileSync(yaml, "utf8")).toBe("apps: {}\n");
+  expect(existsSync(join(m.dir, "devsite.d"))).toBe(false);
+  expect(r.ran.filter((c) => c.startsWith("caddy reload"))).toEqual([]);
   expect(r.stdout).toContain("Add devsite's route to your Caddy config, as JSON");
   expect(r.stdout).toContain(
     "  apps.http.servers — the routes go into your server that listens on :443:",
   );
-  expect(r.stdout).toContain("  apps.tls.automation.policies — append these policies:");
-  expect(r.stdout).toContain('"module": "internal"');
-  expect(r.stdout).toContain("  apps.tls.automation.on_demand — set it to:");
-  expect(r.stdout).toContain('"endpoint": "http://127.0.0.1:47380/tls-allowed"');
-  // init cannot load a JSON config, so a route check points at the JSON, not at a rerun.
+  expect(r.stdout).toContain("the node does not answer — run bunx devsite doctor");
+  expect(r.stdout).not.toContain(PAGE);
   const after = r.stdout.slice(r.stdout.indexOf("Checks after this run"));
   expect(after).toContain(
     "fix: add the JSON below to your Caddy config, then run `bunx devsite doctor`",
   );
-  expect(after).not.toContain("fix: run `bunx devsite init`");
-  // The admin API gives no CA yet, so the phone steps name the command that saves it once Caddy makes it.
-  expect(r.stdout).toContain(
-    "Caddy makes its CA when it first serves a project; then save it with `curl -s http://127.0.0.1:",
-  );
-  expect(r.stdout).toContain("/pki/ca/local | jq -r .root_certificate > caddy-root.crt`");
   expect(r.status).toBe(0);
 });
 
-test("a Caddy run with no --config: devsite.d goes under Homebrew's etc, and doctor names the admin API as the config", async () => {
-  await mockAdmin([]);
+test("a Caddy run with no --config: init writes devsite's objects through the admin API and says a restart drops them", async () => {
   const m = setUpMachine({ caddyfile: "", devsiteFiles: false });
   const caddy = { user: "den", args: `${m.prefix}/opt/caddy/bin/caddy run`, pid: 4242 };
+  await mockAdmin([], { config: { apps: { http: { servers: { mine: { listen: [":443"] } } } } } });
   const r = await devsite(["init"], m.caddyfile, { caddy });
-  expect(r.stdout).toContain("devsite.d/node.caddy — devsite's route to the node, new");
-  expect(r.stdout).not.toContain("+++ Caddyfile");
-  expect(r.stdout).toContain("Add devsite's route to your Caddy config, as JSON");
+  expect(r.stdout).toContain("add devsite's route to Caddy through its admin API");
+  expect(r.stdout).toContain("adds devsite's route first in server mine");
+  // Only a Caddyfile imports devsite.d, so a Caddy with no Caddyfile gets none.
+  expect(r.stdout).not.toContain("write ");
+  expect(existsSync(join(m.dir, "devsite.d"))).toBe(false);
+  expect(r.stdout).toContain(RESTART_NOTE);
+  expect(adminWrites.map((w) => `${w.method} ${w.path}`)).toEqual([
+    "PUT /config/apps/http/servers/mine/routes",
+    "PUT /config/apps/http/servers/mine/errors",
+    "PUT /config/apps/tls",
+    "PUT /config/apps/tls/automation/on_demand",
+  ]);
+  expect(JSON.stringify(adminWrites[1]?.body)).toContain(PAGE);
+  expect(r.stdout).not.toContain("as JSON");
+  const after = r.stdout.slice(r.stdout.indexOf("Checks after this run"));
+  expect(after).toContain("✓ Caddy has devsite's route for *.internal and *.localhost");
   expect(r.status).toBe(0);
 
-  // Until the user adds the JSON, the live config has no route for devsite's names.
+  // The live config now holds devsite's objects, so a rerun writes nothing.
+  const again = await devsite(["init"], m.caddyfile, { caddy });
+  expect(again.stdout).toContain("Nothing to do: init changed nothing.");
+
   const d = await devsite(["doctor"], m.caddyfile, { caddy });
   expect(d.stdout).toContain(
     "Caddy config: none (Caddy runs (pid 4242) with no --config, so its config came through the admin API)",
   );
-  expect(d.stdout).toContain(`devsite's Caddy config: ${join(m.dir, "devsite.d")}`);
+});
+
+test("a Caddy run with --resume: no line about a restart", async () => {
+  const m = setUpMachine({ caddyfile: "", devsiteFiles: false });
+  const caddy = { user: "den", args: `${m.prefix}/opt/caddy/bin/caddy run --resume` };
+  await mockAdmin([], { config: null });
+  const r = await devsite(["init", "--dry-run"], m.caddyfile, { caddy });
+  expect(r.stdout).toContain("adds a server devsite that listens on :443, with devsite's route");
+  expect(r.stdout).not.toContain("a restart drops");
+  expect(adminWrites).toEqual([]);
+  expect(r.status).toBe(0);
+});
+
+test("a Caddy config that turns persist off: the plan says a restart drops devsite's route", async () => {
+  const m = setUpMachine({ caddyfile: "", devsiteFiles: false });
+  const caddy = { user: "den", args: `${m.prefix}/opt/caddy/bin/caddy run --resume` };
+  await mockAdmin([], { config: { admin: { config: { persist: false } } } });
+  const r = await devsite(["init", "--dry-run"], m.caddyfile, { caddy });
+  expect(r.stdout).toContain(
+    "Caddy's config turns admin.config.persist off: a restart drops devsite's route; run bunx devsite init after each restart.",
+  );
+});
+
+test("a Caddy run with no --config and caddy.reload manual: init prints the JSON and writes nothing to Caddy", async () => {
+  const m = setUpMachine({ caddyfile: "", devsiteFiles: false });
+  const caddy = { user: "den", args: `${m.prefix}/opt/caddy/bin/caddy run`, pid: 4242 };
+  await mockAdmin([]);
+  const settings = { caddy: { reload: "manual" } };
+  const r = await devsite(["init"], m.caddyfile, { caddy }, { settings });
+  expect(r.stdout).toContain("Add devsite's route to your Caddy config, as JSON");
+  expect(adminWrites).toEqual([]);
+  expect(r.status).toBe(0);
+
+  const d = await devsite(["doctor"], m.caddyfile, { caddy }, { settings });
   expect(d.stdout).toContain("✗ Caddy has devsite's route for *.internal and *.localhost");
   expect(d.stdout).toContain(
     "fix: run `bunx devsite init`, then add the JSON it prints to your Caddy config",
   );
   expect(d.status).toBe(1);
-});
-
-test("a JSON config whose routes Caddy has: init prints no JSON", async () => {
-  await mockAdmin([nodeRoute()]);
-  const m = setUpMachine({ caddyfile: "" });
-  const json = join(m.dir, "caddy.json");
-  writeFileSync(json, JSON.stringify({ storage: { module: "file_system", root: m.storage } }));
-  const caddy = { user: "den", args: `${m.prefix}/opt/caddy/bin/caddy run --config ${json}` };
-  const r = await devsite(["init"], m.caddyfile, { caddy });
-  expect(r.stdout).toContain("Nothing to do: init changed nothing.");
-  expect(r.stdout).not.toContain("as JSON");
-  expect(r.status).toBe(0);
 });
