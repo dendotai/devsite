@@ -13,6 +13,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { type AdminOp, applyOp } from "../src/caddy-json";
 import { NODE_ROUTE_FILE, renderGuardFile, renderNodeRoute } from "../src/commands/init";
 import { type RunningNode, startNode } from "../src/node/server";
 import { scratchCaddyfile } from "./helpers";
@@ -122,23 +123,60 @@ export function useMachine() {
   });
 }
 
-// Serves `routes` as server srv0's route list, as Caddy's GET /config/apps/http/servers does; `storage` as the live config's storage (Caddy answers null when there is none), and `caRoot` as the local CA's root, as GET /pki/ca/local does.
+// The live config the mock serves, which a scripted `caddy reload` of a JSON file replaces with loadAdminConfig.
+let liveConfig: unknown = null;
+export function loadAdminConfig(config: unknown) {
+  liveConfig = config;
+}
+
+// Each PUT and PATCH the mock took, in order.
+export const adminWrites: { method: string; path: string; body: unknown }[] = [];
+
+// Serves `routes` as server srv0's route list, as Caddy's GET /config/apps/http/servers does, or `config` as the whole live config (GET /config/); `storage` as the live config's storage (Caddy answers null when there is none), and `caRoot` as the local CA's root, as GET /pki/ca/local does. A PUT or PATCH changes the live config as Caddy's admin API does.
 export async function mockAdmin(
   routes: unknown[],
-  opts: { caRoot?: string; storage?: object } = {},
+  opts: { caRoot?: string; storage?: object; config?: object | null } = {},
 ) {
+  adminWrites.length = 0;
+  liveConfig =
+    opts.config === undefined
+      ? { apps: { http: { servers: { srv0: { listen: [":443"], routes } } } } }
+      : opts.config;
   const json = (res: import("node:http").ServerResponse, body: unknown) => {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(body));
   };
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
+    if (req.method === "PUT" || req.method === "PATCH") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const op = { method: req.method, path: req.url ?? "", body: JSON.parse(body) };
+      adminWrites.push(op);
+      try {
+        liveConfig = applyOp(liveConfig, { ...op, planLine: "" } as AdminOp);
+      } catch (e) {
+        res.statusCode = 404;
+        json(res, { error: (e as Error).message });
+        return;
+      }
+      res.end();
+      return;
+    }
     if (req.method !== "GET") {
       res.statusCode = 404;
       res.end();
       return;
     }
+    if (req.url === "/config/") {
+      json(res, liveConfig);
+      return;
+    }
     if (req.url === "/config/apps/http/servers") {
-      json(res, { srv0: { listen: [":443"], routes } });
+      json(
+        res,
+        (liveConfig as { apps?: { http?: { servers?: unknown } } } | null)?.apps?.http?.servers ??
+          null,
+      );
       return;
     }
     if (req.url === "/config/storage") {
