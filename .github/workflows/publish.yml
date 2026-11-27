@@ -33,6 +33,8 @@ jobs:
       - run: gh release download --repo caddyserver/caddy --pattern 'caddy_*_linux_amd64.tar.gz' --dir "$RUNNER_TEMP" && sudo tar -xzf "$RUNNER_TEMP"/caddy_*_linux_amd64.tar.gz -C /usr/local/bin caddy
         env:
           GH_TOKEN: ${{ github.token }}
+      # The dnsmasq watcher tests run devsite's zsh script, and Ubuntu's runner image has no zsh.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - run: bun test
       # npm (not bun) publishes: trusted publishing needs npm >= 11.5.1, which node 24 ships. bun cannot publish via OIDC or emit provenance.
       - uses: actions/setup-node@v4
