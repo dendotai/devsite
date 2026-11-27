@@ -42,10 +42,10 @@ const isFree = (port: number, host: string) =>
     s.listen(port, host, () => s.close(() => resolve(true)));
   });
 
-// A port free on both loopback addresses, for a port every Mac shares, with its fallback ports free too. It lies below macOS's ephemeral range (49152 up), as the node's peer port (NODE_PORT) does: the OS gives a port 0 server the ports after the last one in sequence, so a port in that range finds its fallback ports taken by the test's other servers.
+// A port free on both loopback addresses, for a port every Mac shares, with its fallback ports free too. It lies below the ephemeral range of macOS (49152 up) and of Linux (32768 up), as the node's peer port (NODE_PORT) does: the OS gives a port 0 server or an outgoing connection a port from that range, so a port there can be taken between this check and the listen.
 export async function freePort(): Promise<number> {
   for (;;) {
-    const port = 20_000 + Math.floor(Math.random() * 25_000);
+    const port = 20_000 + Math.floor(Math.random() * 12_000);
     const ports = [port, ...fallbackPorts(port)];
     const free = await Promise.all(
       ports.flatMap((p) => [isFree(p, "127.0.0.1"), isFree(p, "::1")]),
