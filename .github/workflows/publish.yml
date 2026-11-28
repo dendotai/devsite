@@ -1,4 +1,4 @@
-# Releases @den-ai/devsite from main. semantic-release computes the version from the commits since the last release tag (fix -> patch, feat -> minor, BREAKING CHANGE -> major), pushes the tag, writes GitHub release notes, and publishes to npm — or exits without releasing when nothing releasable landed.
+# Releases @den-ai/devsite from main. semantic-release computes the version from the commits since the last release tag (fix -> patch, feat -> minor, a `!` after the type or a BREAKING CHANGE footer -> major), pushes the tag, writes GitHub release notes, and publishes to npm — or exits without releasing when nothing releasable landed.
 # package.json stays at 0.0.0 on purpose: the real version lives in git tags and on npm, so no release commits ever land on main.
 # Auth is trusted publishing (OIDC): npmjs.com trusts this exact workflow file in this repo, so no token or secret exists anywhere. Provenance is automatic.
 # The publish job waits for ci.yml, run here as the gate: a push to main can carry commits no green PR run judged. One workflow holds the checks, so the gate cannot miss a CI step.
@@ -31,15 +31,16 @@ jobs:
           fetch-depth: 0 # semantic-release reads the full tag + commit history
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: bun install --frozen-lockfile
-      # npm (not bun) publishes: trusted publishing needs npm >= 11.5.1, which node 24 ships. bun cannot publish via OIDC or emit provenance.
+      # npm (not bun) publishes: trusted publishing needs npm >= 11.5.1. bun cannot publish via OIDC or emit provenance.
+      # setup-node reads the Node version from `devEngines.runtime` in package.json, the one place both release jobs take it from.
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 24.22.3
+          node-version-file: package.json
           registry-url: https://registry.npmjs.org
       # Build once up front so dist/cli.js exists when npm first reads the manifest (silences "No bin file found"); prepack rebuilds it anyway after semantic-release writes the real version, so this copy is never what ships.
       - run: bun run build
-      # Major pinned: a new semantic-release major must arrive via a reviewed edit here, not silently at the next release. OIDC publish needs >= 25.
-      - run: npx semantic-release@25
+      # The exact version changes only by a reviewed edit, and the `semantic-release-dry-run` job in ci.yml runs it on that edit's PR. OIDC publish needs >= 25.
+      - run: npx semantic-release@26.0.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # PRs to main are opened as "Release TBD" — the version does not exist until this run computes it. Once npm has the release, this step writes the real title ("Release v1.2.3") onto the PR whose merge triggered the run. Cosmetic and best-effort: by this point the release is already published, so a failure here must not paint the whole run red (continue-on-error).
