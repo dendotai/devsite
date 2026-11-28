@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 0 # semantic-release reads every tag and commit since the last release
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 24.22.3
+          node-version-file: package.json # `devEngines.runtime`, the Node publish.yml runs
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       # The release config's preset (conventional-changelog-conventionalcommits) loads from the repo's node_modules.
       - run: bun install --frozen-lockfile
@@ -66,6 +66,6 @@ jobs:
       # `--plugins` leaves out @semantic-release/npm: its check exchanges a GitHub OIDC token for an npm token, and npmjs.com issues one only to publish.yml. The preset sits at the root of the release config, so it still reaches commit-analyzer and release-notes-generator.
       - run: |
           git checkout -B "$GITHUB_HEAD_REF"
-          env -u GITHUB_ACTIONS bunx semantic-release@25.0.9 --dry-run --branches "$GITHUB_HEAD_REF" --plugins @semantic-release/commit-analyzer,@semantic-release/release-notes-generator,@semantic-release/github
+          env -u GITHUB_ACTIONS bunx semantic-release@26.0.1 --dry-run --branches "$GITHUB_HEAD_REF" --plugins @semantic-release/commit-analyzer,@semantic-release/release-notes-generator,@semantic-release/github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
