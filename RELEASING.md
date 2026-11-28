@@ -11,7 +11,7 @@
 3. Merge that PR **with a merge commit — never squash**. The commit prefixes are the version input; a squash would replace them with the PR title and release nothing.
 4. The push to `main` runs `.github/workflows/publish.yml`:
    - the full CI gate again (typecheck, lint, tests, Node smoke run of the built CLI);
-   - semantic-release computes the version from the commits since the last tag: `fix:` → patch, `feat:` → minor, `BREAKING CHANGE:` footer (or `!`) → major; other prefixes release nothing;
+   - semantic-release `25.0.9` computes the version from the commits since the last tag: `fix:` → patch, `feat:` → minor, a `!` after the type (`feat!:`, `fix(cli)!:`) or a `BREAKING CHANGE:` footer → major; other prefixes release nothing;
    - npm publish via trusted publishing (OIDC — no tokens exist anywhere), with provenance; `prepack` builds `dist/cli.js` so the published bin runs under plain Node;
    - the `vX.Y.Z` tag is pushed and the GitHub release notes are written;
    - the merged PR is retitled to `Release vX.Y.Z`.
@@ -20,5 +20,6 @@
 
 - `package.json` stays at `0.0.0` on purpose. The real version lives in git tags and on npm. Never bump it by hand.
 - Never push a `v*` tag by hand.
-- commitlint checks every PR into `dev`, so the version math never meets a malformed commit message.
+- commitlint checks every commit and the title of every PR into `dev`, so the version math never meets a malformed commit message. A squash merge of a PR with two or more commits writes the PR title as the commit subject.
+- semantic-release runs at one exact version, named in `publish.yml` and in the `semantic-release-dry-run` job of `ci.yml`. That job dry-runs it on every PR, so a version that cannot load the release config fails its own PR.
 - A promotion with nothing releasable (only `chore:`/`ci:`/`docs:` commits) is harmless: the workflow exits without publishing, and the PR keeps its `Release TBD` title.
