@@ -21,7 +21,7 @@ jobs:
   # A `tracking` issue is a split parent: it stays open only while children remain. The children close through their PRs ("Closes #N"), but no PR ever closes the parent — so once every sub-issue is closed, close the parent as completed. A parent with no sub-issues is left alone: there is nothing to infer from an empty list. Runs before strip-state-labels so a parent closed here loses its state labels in the same run — a GITHUB_TOKEN close does not retrigger this workflow.
   close-finished-tracking-parents:
     if: github.event_name == 'issues' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
@@ -44,7 +44,7 @@ jobs:
     # always(): a failed parent-close sweep must not leave closed issues wearing live state labels.
     needs: close-finished-tracking-parents
     if: ${{ always() && (github.event_name == 'issues' || github.event_name == 'workflow_dispatch') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}

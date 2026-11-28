@@ -19,36 +19,39 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      # setup-bun installs the latest Bun when `packageManager` names no version, so CI would run a Bun no one chose.
+      - name: packageManager pins Bun
+        run: jq -e '.packageManager | test("^bun@[0-9]+\\.[0-9]+\\.[0-9]+$")' package.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint
-      # The reload test adapts devsite's Caddyfile with a real caddy binary: the latest prebuilt release from Caddy's authors.
-      - run: gh release download --repo caddyserver/caddy --pattern 'caddy_*_linux_amd64.tar.gz' --dir "$RUNNER_TEMP" && sudo tar -xzf "$RUNNER_TEMP"/caddy_*_linux_amd64.tar.gz -C /usr/local/bin caddy
+      # The reload test adapts devsite's Caddyfile with a real caddy binary.
+      - run: gh release download "$(cat tests/CADDY_VERSION)" --repo caddyserver/caddy --pattern 'caddy_*_linux_amd64.tar.gz' --dir "$RUNNER_TEMP" && sudo tar -xzf "$RUNNER_TEMP"/caddy_*_linux_amd64.tar.gz -C /usr/local/bin caddy
         env:
           GH_TOKEN: ${{ github.token }}
       # The dnsmasq watcher tests run devsite's zsh script, and Ubuntu's runner image has no zsh.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - run: bun test
-      # The published CLI must run under plain Node (engines.node floor), not just under bun — build it and smoke-run the artifact.
+      # The published CLI must run under plain Node 22 (engines.node is >=22), not just under bun — build it and smoke-run the artifact.
       # One node version on purpose: only fs.glob is version-sensitive today. If the CLI grows more node-API surface, promote this to a small matrix (floor + current, e.g. [22, 24]).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 22
+          node-version: 22.23.5
       - run: bun run build
       - run: node dist/cli.js --help
 
   # Commit prefixes decide published versions (semantic-release), so every PR commit must parse as a conventional commit. Only where commits are born (PRs into dev): a dev->main promotion re-plays history that was already linted on its way into dev, plus pre-convention commits that can never be fixed.
   commitlint:
     if: github.event_name == 'pull_request' && github.base_ref != 'main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0 # commitlint walks the PR's commit range
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: bun install --frozen-lockfile
       - run: bunx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
